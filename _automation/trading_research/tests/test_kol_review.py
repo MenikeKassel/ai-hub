@@ -30,7 +30,7 @@ class ApprovalTests(unittest.TestCase):
     def _stores(self, root: Path) -> tuple[KolPostStore, KolStore, str]:
         posts = KolPostStore(root / "posts.db", root / "media")
         initialize_seed_kols(posts)
-        kol = posts.get_kol_by_handle("WwQQ129146")
+        kol = posts.get_kol_by_handle("public_kol_2")
         assert kol is not None
         post = normalise_twitter_post(payload(), kol)
         posts.upsert_post(post)
@@ -107,7 +107,7 @@ class ApprovalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             posts, events, post_id = self._stores(root)
-            kol = posts.get_kol_by_handle("WwQQ129146")
+            kol = posts.get_kol_by_handle("public_kol_2")
             assert kol is not None
             conflicting = normalise_twitter_post(
                 payload() | {"createdAtISO": "2026-07-13T08:32:01+00:00"},
@@ -136,7 +136,7 @@ class ApprovalTests(unittest.TestCase):
             root = Path(tmp)
             posts = KolPostStore(root / "posts.db", root / "media")
             initialize_seed_kols(posts)
-            kol = posts.get_kol_by_handle("WwQQ129146")
+            kol = posts.get_kol_by_handle("public_kol_2")
             assert kol is not None
             post = normalise_twitter_post(
                 payload() | {"text": "昨天推荐 002414 高德红外，今天已经涨停。"},

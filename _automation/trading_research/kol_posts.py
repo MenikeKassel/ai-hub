@@ -26,12 +26,12 @@ from kol_tracker import SHANGHAI, now_iso
 
 
 SEED_KOLS = [
-    ("A股点金手", "agudianjinshou", "A股、AI硬件、半导体主题"),
-    ("林哥-深研A股", "WwQQ129146", "A股深研、业绩预告、事件驱动"),
-    ("擒龙捉妖-泰戈", "sszcw", "个股推荐"),
-    ("大道无形我有型", "bafeite1234", "市场周期、流动性、市场情绪"),
-    ("Mistery / Mimiwftt", "Mimiwftt", "交易心理、市场人性"),
-    ("Hoyooyoo", "Hoyooyoo", "待补"),
+    ("Public KOL 1", "public_kol_1", "A股、AI硬件、半导体主题"),
+    ("Public KOL 2", "public_kol_2", "A股深研、业绩预告、事件驱动"),
+    ("Public KOL 3", "public_kol_3", "个股推荐"),
+    ("Public KOL 4", "public_kol_4", "市场周期、流动性、市场情绪"),
+    ("Mistery / public_kol_5", "public_kol_5", "交易心理、市场人性"),
+    ("Public KOL 6", "Public KOL 6", "待补"),
 ]
 
 LONG_WORDS = {
@@ -340,8 +340,8 @@ def extract_zhihu_digest_attributions(text: str) -> list[dict[str, Any]]:
     for index, match in enumerate(matches):
         name = re.sub(r"\s+", " ", match.group("name")).strip(" ：:。；;")
         names = [name]
-        if name == "龙开无水又三人禾":
-            names = ["龙开", "水又三人禾"]
+        if name == "Public KOL 50无Public KOL 38":
+            names = ["Public KOL 50", "Public KOL 38"]
         section_end = matches[index + 1].start() if index + 1 < len(matches) else len(clean)
         section = clean[match.start():section_end].strip()[:20000]
         for attributed_name in names:
@@ -352,7 +352,7 @@ def extract_zhihu_digest_attributions(text: str) -> list[dict[str, Any]]:
             values.append(
                 {
                     "author_name": attributed_name,
-                    "section_text": "无" if attributed_name == "龙开" else section,
+                    "section_text": "无" if attributed_name == "Public KOL 50" else section,
                     "symbols": sorted(set(re.findall(r"(?<!\d)\d{6}(?!\d)", section))),
                     "status": "secondhand_aggregation",
                 }

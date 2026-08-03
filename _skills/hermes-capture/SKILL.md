@@ -39,7 +39,7 @@ if the user instruction is `/clip https://example.com note`, pass that exact tex
 - `/auto <shared text>`: URL text becomes `/clip`; plain text becomes `/log`.
 - `/log <text>`: save a daily activity log to Notion only.
 - `/kol <url> [note]`: save a KOL profile/source as a KOL entity lead.
-  X profile URLs such as `https://x.com/Hoyooyoo` are valid profile leads even without a tweet/status id.
+  X profile URLs such as `https://x.com/Public KOL 6` are valid profile leads even without a tweet/status id.
 - `/event <url> [note]`: save a KOL recommendation candidate; it must later pass six-element audit before entering the formal event table.
 - `/concept <text or url> [note]`: save a reusable trading/research concept lead.
 - `/holding <text>`: save a real holding or position audit lead.

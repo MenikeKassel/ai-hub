@@ -156,16 +156,16 @@ class MultiSourceProviderTests(unittest.TestCase):
                     "tweets": [
                         {
                             "tweet_id": "2076675438580248923",
-                            "author": "@WwQQ129146",
+                            "author": "@public_kol_2",
                             "text": "nitter text",
-                            "time_ago": "@WwQQ129146",
+                            "time_ago": "@public_kol_2",
                         }
                     ]
                 }
             )
 
         result = XtfNitterProvider("xtf", runner=lambda *args, **kwargs: Result()).fetch_user_posts(
-            "WwQQ129146", 1
+            "public_kol_2", 1
         )
 
         self.assertEqual("2026-07-13T14:29:41+00:00", result.posts[0]["createdAtISO"])
