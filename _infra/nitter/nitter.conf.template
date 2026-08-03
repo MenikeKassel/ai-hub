@@ -1,0 +1,44 @@
+[Server]
+hostname = "127.0.0.1:9377"
+title = "ai-hub Nitter"
+address = "0.0.0.0"
+port = 8080
+https = false
+httpMaxConnections = 10
+staticDir = "./public"
+
+[Cache]
+listMinutes = 240
+rssMinutes = 10
+redisHost = "nitter-redis"
+redisPort = 6379
+redisPassword = ""
+redisConnections = 2
+redisMaxConnections = 4
+
+[Config]
+hmacKey = "{HMAC_KEY}"
+base64Media = false
+enableRSS = false
+enableRSSUserTweets = false
+enableRSSUserReplies = false
+enableRSSUserMedia = false
+enableRSSSearch = false
+enableRSSList = false
+enableDebug = false
+proxy = ""
+proxyAuth = ""
+apiProxy = ""
+disableTid = false
+maxConcurrentReqs = 1
+maxRetries = 1
+retryDelayMs = 500
+
+[Preferences]
+theme = "Nitter"
+replaceTwitter = "x.com"
+replaceYouTube = "youtube.com"
+replaceReddit = "reddit.com"
+proxyVideos = false
+hlsPlayback = false
+infiniteScroll = false

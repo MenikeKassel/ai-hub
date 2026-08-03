@@ -1,0 +1,1 @@
+﻿kol-audit-workbench @ git+https://github.com/MenikeKassel/kol-audit-workbench.git@v0.1.0-alpha
