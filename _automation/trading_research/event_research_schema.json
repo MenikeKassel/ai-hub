@@ -1,0 +1,68 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["results"],
+  "properties": {
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "interpretations"],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "interpretations": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lens",
+                "hypothesis",
+                "confidence",
+                "evidence_refs",
+                "counter_evidence",
+                "invalidation"
+              ],
+              "properties": {
+                "lens": {
+                  "type": "string",
+                  "enum": [
+                    "short_term_leader",
+                    "dow_wave_gann",
+                    "price_action",
+                    "ict",
+                    "wyckoff_orderflow"
+                  ]
+                },
+                "hypothesis": {"type": "string", "minLength": 1, "maxLength": 500},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 12,
+                  "items": {"type": "string", "minLength": 1, "maxLength": 240}
+                },
+                "counter_evidence": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {"type": "string", "maxLength": 300}
+                },
+                "invalidation": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {"type": "string", "maxLength": 300}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

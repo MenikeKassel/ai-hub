@@ -1,0 +1,60 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["content_type", "evidence_type", "confidence", "summary", "drafts"],
+  "properties": {
+    "content_type": {
+      "type": "string",
+      "enum": ["recommendation", "methodology", "market_view", "other"]
+    },
+    "evidence_type": {
+      "type": "string",
+      "enum": ["original_pre_event", "retrospective", "secondhand", "ambiguous"]
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {"type": "string"},
+    "drafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol", "security_name", "direction", "action", "horizon", "strength", "thesis", "evidence_type", "confidence",
+          "evidence_spans", "evidence_source", "conditions", "depends_on_ocr", "mention_kind"
+        ],
+        "properties": {
+          "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
+          "security_name": {"type": "string"},
+          "direction": {"type": "string", "enum": ["long", "short"]},
+          "action": {"type": "string", "enum": ["buy", "add", "hold", "watch", "reduce", "sell", "avoid"]},
+          "horizon": {"type": "string", "enum": ["intraday", "short", "swing", "medium_long", "unspecified"]},
+          "strength": {"type": "string", "enum": ["explicit", "moderate", "weak", "unspecified"]},
+          "thesis": {"type": "string"},
+          "evidence_type": {
+            "type": "string",
+            "enum": ["original_pre_event", "retrospective", "secondhand", "ambiguous"]
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence_spans": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "evidence_source": {
+            "type": "string",
+            "enum": ["text", "article_text", "quoted_text", "ocr", "image"]
+          },
+          "conditions": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "depends_on_ocr": {"type": "boolean"},
+          "mention_kind": {
+            "type": "string",
+            "enum": ["recommendation", "holding", "retrospective", "analysis"]
+          }
+        }
+      }
+    }
+  }
+}

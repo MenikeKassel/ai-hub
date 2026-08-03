@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "Delegate to Codex"
+  short_description: "Route complex Hermes tasks to local Codex CLI"
+  default_prompt: "Delegate this complex task to Codex and return the verified result."

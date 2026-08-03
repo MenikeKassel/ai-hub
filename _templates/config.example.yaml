@@ -1,0 +1,21 @@
+﻿notion_database_id: "REPLACE_WITH_NOTION_DATABASE_ID"
+notion_version: "2022-06-28"
+vault_path: "<OBSIDIAN_VAULT>"
+obsidian_inbox_dir: "00_Inbox"
+notion_env_files: "C:\\Users\\YOUR_USER\\AppData\\Local\\hermes\\.env;C:\\Users\\YOUR_USER\\.hermes\\.env"
+max_content_chars: 8000
+max_notion_block_chars: 1800
+
+field_title: "日期"
+field_url: "URL"
+field_content: "text"
+field_author: "作者"
+field_author_username: "作者用户名"
+field_tags: "Tags"
+field_info_type: "信息类别"
+field_notion_date: "Notion日期"
+field_status: "状态"
+field_source_type: "来源类型"
+field_project: "项目归属"
+field_value_score: "价值评分"
+field_obsidian_path: "Obsidian路径"
