@@ -263,8 +263,8 @@ interrupted approval stages are recorded for repair instead of silently
 disappearing. The UI can add, edit, pause, and resume accounts; it cannot delete
 their history.
 
-The initial enabled handles are `agudianjinshou`, `WwQQ129146`, `sszcw`,
-`bafeite1234`, `Mimiwftt`, and `Hoyooyoo`. Serenity is intentionally not
+The initial enabled handles are `public_kol_1`, `public_kol_2`, `public_kol_3`,
+`public_kol_4`, `public_kol_5`, and `Public KOL 6`. Serenity is intentionally not
 auto-followed until the original account identity is confirmed.
 
 ## Morning recommendation workflow v4

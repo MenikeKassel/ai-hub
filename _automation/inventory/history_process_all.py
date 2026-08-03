@@ -734,7 +734,7 @@ def build_report(summary: dict, top_items: list[dict]) -> str:
             "## 固定规则",
             "",
             "- `raw_index_only`：只保留在台账，不进入 Obsidian 正文。",
-            "- `source_note_needed`：写 `01_Sources/`，必要时连到项目页。",
+            "- `source_note_needed`：写 `source-note-placeholder.md",
             "- `source_resolution_needed`：只有 X/t.co 线索，必须先解析公开源；未确认前不写 Wiki。",
             "- `llm_wiki_needed`：必须走 `01_Sources -> wiki/summaries -> wiki/concepts/entities -> wiki/synthesis -> wiki/index`。",
             "- `kol_event_candidate`：先进入来源页或事件候选，只有满足 KOL、标的、方向、理由、日期、原始链接六要素，才写入 KOL 推荐事件表。",

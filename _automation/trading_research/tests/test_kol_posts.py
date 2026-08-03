@@ -97,17 +97,17 @@ class StoreTests(unittest.TestCase):
 
     def test_zhihu_digest_is_secondhand_and_keeps_attributed_authors(self) -> None:
         text = (
-            "奥特之父\n本周主题：看好能源。\n本周操作\n买入某能源股。\n"
-            "龙开\n无\nDeep Van\n本周主题：半导体对冲。\n本周观点\n控制风险。"
+            "Public KOL 32\n本周主题：看好能源。\n本周操作\n买入某能源股。\n"
+            "Public KOL 50\n无\nPublic KOL 20\n本周主题：半导体对冲。\n本周观点\n控制风险。"
         )
         attributions = extract_zhihu_digest_attributions(text)
-        self.assertEqual(["奥特之父", "Deep Van", "龙开"], [item["author_name"] for item in attributions])
+        self.assertEqual(["Public KOL 32", "Public KOL 20", "Public KOL 50"], [item["author_name"] for item in attributions])
 
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "NEVEN",
-                "seven-38-40-58",
+                "Public KOL 9",
+                "public_kol_9",
                 platform="Zhihu",
                 tracking_mode="aggregation",
             )
@@ -119,7 +119,7 @@ class StoreTests(unittest.TestCase):
                     "text": text,
                     "articleTitle": "如何评价今日A股行情？",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2062243986040001481",
-                    "author": {"name": "NEVEN", "screenName": "seven-38-40-58"},
+                    "author": {"name": "Public KOL 9", "screenName": "public_kol_9"},
                     "createdAtISO": "2026-07-20T01:00:00Z",
                     "metrics": {"likes": 12},
                 },
@@ -130,9 +130,9 @@ class StoreTests(unittest.TestCase):
             store.replace_digest_attributions(
                 post.post_id,
                 post.raw_payload["attributions"] + [
-                    {"author_name": "xu-ze-qiu", "section_text": "旧摘要使用主页 handle。"},
+                    {"author_name": "public_kol_32", "section_text": "旧摘要使用主页 handle。"},
                     {
-                        "author_name": "Deep Van的一周操作总结",
+                        "author_name": "Public KOL 20的一周操作总结",
                         "section_text": "旧摘要使用固定标题后缀。",
                     },
                 ],
@@ -144,29 +144,29 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(5, len(store.list_digest_authors()))
             updated = store.upsert_digest_author_profiles([
                 {
-                    "display_name": "奥特之父",
-                    "profile_url": "https://www.zhihu.com/people/xu-ze-qiu",
+                    "display_name": "Public KOL 32",
+                    "profile_url": "https://www.zhihu.com/people/public_kol_32",
                 },
                 {
-                    "display_name": "Deep Van",
-                    "profile_url": "https://www.zhihu.com/people/yang-lei-96-72",
+                    "display_name": "Public KOL 20",
+                    "profile_url": "https://www.zhihu.com/people/public_kol_20",
                 },
             ])
             authors = {item["author_name"]: item for item in store.list_digest_authors()}
             self.assertEqual(2, len(updated))
             self.assertEqual(3, len(authors))
-            self.assertEqual("xu-ze-qiu", authors["奥特之父"]["profile_handle"])
-            self.assertEqual(2, authors["奥特之父"]["summary_count"])
-            self.assertEqual("linked_only", authors["Deep Van"]["tracking_status"])
-            self.assertEqual(2, authors["Deep Van"]["summary_count"])
-            self.assertEqual("", authors["龙开"]["profile_url"])
+            self.assertEqual("public_kol_32", authors["Public KOL 32"]["profile_handle"])
+            self.assertEqual(2, authors["Public KOL 32"]["summary_count"])
+            self.assertEqual("linked_only", authors["Public KOL 20"]["tracking_status"])
+            self.assertEqual(2, authors["Public KOL 20"]["summary_count"])
+            self.assertEqual("", authors["Public KOL 50"]["profile_url"])
 
     def test_zhihu_direct_profile_answer_can_be_a_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "Deep Van",
-                "yang-lei-96-72",
+                "Public KOL 20",
+                "public_kol_20",
                 platform="Zhihu",
                 tracking_mode="direct_profile",
             )
@@ -178,7 +178,7 @@ class StoreTests(unittest.TestCase):
                     "text": str(tweet_payload()["text"]),
                     "articleTitle": "A share morning plan",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2063202890978693514",
-                    "author": {"name": "Deep Van", "screenName": "yang-lei-96-72"},
+                    "author": {"name": "Public KOL 20", "screenName": "public_kol_20"},
                     "createdAtISO": "2026-07-22T02:05:01Z",
                     "updatedAtISO": "2026-07-22T02:05:01Z",
                 },
@@ -196,8 +196,8 @@ class StoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "Deep Van",
-                "yang-lei-96-72",
+                "Public KOL 20",
+                "public_kol_20",
                 platform="Zhihu",
                 tracking_mode="direct_profile",
             )
@@ -209,7 +209,7 @@ class StoreTests(unittest.TestCase):
                     "text": str(tweet_payload()["text"]),
                     "articleTitle": "Historical answer",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2063202890978693514",
-                    "author": {"name": "Deep Van", "screenName": "yang-lei-96-72"},
+                    "author": {"name": "Public KOL 20", "screenName": "public_kol_20"},
                     "createdAtISO": "2026-07-01T02:05:01Z",
                     "updatedAtISO": "2026-07-01T02:05:01Z",
                 },
@@ -251,10 +251,10 @@ class StoreTests(unittest.TestCase):
             def fetch_user_posts(self, handle, max_count):
                 return [{
                     "id": "2062243986040001481",
-                    "text": "奥特之父\n本周主题：能源。",
+                    "text": "Public KOL 32\n本周主题：能源。",
                     "articleTitle": "A股行情",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2062243986040001481",
-                    "author": {"name": "NEVEN"},
+                    "author": {"name": "Public KOL 9"},
                     "createdAtISO": "2026-07-20T01:00:00Z",
                 }]
 
@@ -262,7 +262,7 @@ class StoreTests(unittest.TestCase):
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             store.add_kol("X one", "x_one")
             store.add_kol("X two", "x_two")
-            store.add_kol("NEVEN", "seven-38-40-58", platform="Zhihu", tracking_mode="aggregation")
+            store.add_kol("Public KOL 9", "public_kol_9", platform="Zhihu", tracking_mode="aggregation")
             result = run_post_fetch(
                 store,
                 BrokenX(),
@@ -357,7 +357,7 @@ Path(a.output).write_text(json.dumps({items[0]['post_id']:{'text':'002414 高德
 
             self.assertEqual(6, created)
             self.assertEqual(
-                {"agudianjinshou", "WwQQ129146", "sszcw", "bafeite1234", "Mimiwftt", "Hoyooyoo"},
+                {"public_kol_1", "public_kol_2", "public_kol_3", "public_kol_4", "public_kol_5", "Public KOL 6"},
                 handles,
             )
             self.assertNotIn("aleabitoreddit", handles)
@@ -367,7 +367,7 @@ Path(a.output).write_text(json.dumps({items[0]['post_id']:{'text':'002414 高德
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             assert kol is not None
             post = normalise_twitter_post(tweet_payload(), kol)
 
@@ -572,7 +572,7 @@ class ClassificationTests(unittest.TestCase):
             root = Path(tmp)
             store = KolPostStore(root / "posts.db", root / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(tweet_payload(text=""), kol)
             store.upsert_post(post)
             image = root / "media" / post.post_id / "1.jpg"
@@ -617,7 +617,7 @@ class ClassificationTests(unittest.TestCase):
             root = Path(tmp)
             store = KolPostStore(root / "posts.db", root / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(tweet_payload(text="普通闲聊"), kol)
             store.upsert_post(post)
             image = root / "media" / post.post_id / "1.jpg"

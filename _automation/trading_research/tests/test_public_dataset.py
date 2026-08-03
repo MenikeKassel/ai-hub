@@ -47,15 +47,15 @@ def _create_fixture_runtime(root: Path) -> None:
           queue_scope text, reviewed_at text, event_id text, extraction_version text, action text, horizon text);
         """
     )
-    con.execute("insert into kols values (1,'公开账号','X','WwQQ129146','https://x.com/WwQQ129146','active','direct')")
-    con.execute("insert into posts values (?,?,?,?,?,?,?,?,?)", ("p1", 1, "X", "WwQQ129146", "公开账号", "https://x.com/WwQQ129146/status/1?utm_source=private", "2026-08-01T08:00:00+08:00", "original", "pending"))
+    con.execute("insert into kols values (1,'公开账号','X','public_kol_2','https://x.com/public_kol_2','active','direct')")
+    con.execute("insert into posts values (?,?,?,?,?,?,?,?,?)", ("p1", 1, "X", "public_kol_2", "公开账号", "https://x.com/public_kol_2/status/1?utm_source=private", "2026-08-01T08:00:00+08:00", "original", "pending"))
     con.execute("insert into classifications values (?,?,?,?,?)", ("p1", "recommendation", "original_pre_event", 1, "短摘要 13800138000"))
     con.execute("insert into recommendation_drafts values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (1, "p1", "600000", "测试股份", "long", "公开理由", "original_pre_event", '["证据片段"]', '["条件"]', "recommendation", 0.95, "ready", "morning", "", "", "v1", "buy", "swing"))
     con.commit()
     con.close()
 
     events_fields = ["event_id", "kol_name", "kol_id", "kol_handle", "platform", "source_url", "source_post_id", "posted_at", "symbol", "security_name", "direction", "thesis", "status", "baseline_rule", "baseline_date", "baseline_price_raw", "benchmark_symbol", "benchmark_baseline_price", "execution_warning"]
-    _write_csv(root / "kol" / "events.csv", events_fields, [{"event_id": "E1", "kol_name": "公开账号", "kol_id": "1", "kol_handle": "WwQQ129146", "platform": "X", "source_url": "https://x.com/WwQQ129146/status/1?x=1", "source_post_id": "p1", "posted_at": "2026-08-01T08:00:00+08:00", "symbol": "600000", "security_name": "测试股份", "direction": "long", "thesis": "公开理由", "status": "active", "baseline_rule": "next_open", "baseline_date": "2026-08-03", "baseline_price_raw": "10", "benchmark_symbol": "000300", "benchmark_baseline_price": "4000", "execution_warning": ""}])
+    _write_csv(root / "kol" / "events.csv", events_fields, [{"event_id": "E1", "kol_name": "公开账号", "kol_id": "1", "kol_handle": "public_kol_2", "platform": "X", "source_url": "https://x.com/public_kol_2/status/1?x=1", "source_post_id": "p1", "posted_at": "2026-08-01T08:00:00+08:00", "symbol": "600000", "security_name": "测试股份", "direction": "long", "thesis": "公开理由", "status": "active", "baseline_rule": "next_open", "baseline_date": "2026-08-03", "baseline_price_raw": "10", "benchmark_symbol": "000300", "benchmark_baseline_price": "4000", "execution_warning": ""}])
     _write_csv(root / "kol" / "daily_marks.csv", ["event_id", "trade_date", "raw_return"], [{"event_id": "E1", "trade_date": "2026-08-03", "raw_return": "0.01"}])
     _write_csv(root / "kol" / "checkpoints.csv", ["event_id", "horizon"], [{"event_id": "E1", "horizon": "1W"}])
 
@@ -83,7 +83,7 @@ def test_public_redaction_and_public_identity() -> None:
     assert secret not in text
     assert "E:\\private" not in text
     assert "123456" not in text
-    assert sanitize_public_identity("WwQQ129146") == "WwQQ129146"
+    assert sanitize_public_identity("public_kol_2") == "public_kol_2"
     assert canonical_url("https://x.com/a/status/1?utm_source=secret") == "https://x.com/a/status/1"
 
 
@@ -101,5 +101,5 @@ def test_export_is_deterministic_and_read_only(tmp_path: Path) -> None:
     assert source.stat().st_mtime_ns == before
     report = validate_public_dataset(first)
     assert report["ok"], report
-    assert "WwQQ129146" in (first / "catalog" / "kols.csv").read_text(encoding="utf-8")
+    assert "public_kol_2" in (first / "catalog" / "kols.csv").read_text(encoding="utf-8")
     assert "13800138000" not in "\n".join(path.read_text(encoding="utf-8") for path in first.rglob("*.csv"))

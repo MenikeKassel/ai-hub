@@ -17,7 +17,7 @@ python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --mes
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/idea 今天想到一个KOL指数思路" --source feishu
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/readlater https://example.com" --source feishu
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/log 今天整理了A股新手防亏系统，晚上复盘一下" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/kol https://x.com/Mimiwftt 交易心理" --source feishu
+python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/kol https://x.com/public_kol_5 交易心理" --source feishu
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/event https://x.com/user/status/1 推荐某标的，待核验六要素" --source feishu
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/concept 大周期高位放量" --source feishu
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/holding 我买了159139，建仓时间2026-07-07，价格1.460" --source feishu
@@ -68,7 +68,7 @@ python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --j
 python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json mark <job_id> --status cancelled --note "manual skip"
 ```
 
-`run-next` is a dry run unless `--execute` is provided. Use it after browser login/API keys are ready. Add `--import-results` to write successful MediaCrawler output into Obsidian `01_Sources/MediaCrawler`; add `--import-notion` only when you also want Notion pages created or refreshed.
+`run-next` is a dry run unless `--execute` is provided. Use it after browser login/API keys are ready. Add `--import-results` to write successful MediaCrawler output into Obsidian `source-note-placeholder.md
 
 Output import can also be run separately:
 
@@ -125,7 +125,7 @@ obsidian_project_allowlist: "交易系统;KOL指数;基本面量化系统"
 - Feishu raw non-command messages containing a URL are rewritten to `/auto <original text>` by the Hermes `pre_gateway_dispatch` hook.
 - `/log`, `/day`, and `/j` write daily activity logs to Notion only.
 - `/kol` writes a KOL profile/source as a KOL entity lead.
-  - X profile URLs such as `https://x.com/Hoyooyoo` are accepted as profile leads even when no tweet/status id is present.
+  - X profile URLs such as `https://x.com/Public KOL 6` are accepted as profile leads even when no tweet/status id is present.
 - `/event` writes a KOL recommendation candidate; it still needs six-element audit before entering `KOL推荐事件表`.
 - `/concept` writes a reusable concept lead.
 - `/holding` writes a real holding audit lead.

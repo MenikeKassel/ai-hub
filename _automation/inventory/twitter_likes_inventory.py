@@ -247,7 +247,7 @@ def build_report(summary: dict, candidates: list[dict]) -> str:
             "## Promotion Rule",
             "",
             "- Keep the raw JSON as the historical archive.",
-            "- Promote only a reviewed item into `01_Sources/` when it teaches a reusable idea or supports an active project.",
+            "- Promote only a reviewed item into `source-note-placeholder.md",
             "- Add a row to `04_Projects/KOL推荐事件表.md` only when the item has a clear KOL, asset, date, direction, reason, and original URL.",
             "- Create or update `03_Entities/` pages only for KOLs and companies that appear repeatedly or matter to a current decision.",
         ]

@@ -48,7 +48,7 @@ def active_event(**overrides: str) -> EventRecord:
         "kol_name": "测试KOL",
         "platform": "X",
         "source_url": "https://x.com/test/status/1",
-        "source_note": "01_Sources/test.md",
+        "source_note": "source-note-placeholder.md",
         "posted_at": "2026-07-08T10:00:00+08:00",
         "symbol": "600000",
         "security_name": "浦发银行",

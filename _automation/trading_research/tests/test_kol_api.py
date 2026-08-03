@@ -103,13 +103,13 @@ class ApiTests(unittest.TestCase):
                 codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
             ))
             store = app.state.post_store
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000001",
                     "text": "关注 002414 高德红外",
-                    "url": "https://x.com/WwQQ129146/status/2078000000000000001",
-                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_2", "name": "fixture"},
                     "createdAtISO": datetime.now(SHANGHAI).astimezone(timezone.utc).isoformat(),
                     "media": [],
                     "isRetweet": False,
@@ -221,7 +221,7 @@ class ApiTests(unittest.TestCase):
             ))
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             values = [
                 ("2078000000000000801", "2026-07-17T02:00:00+00:00"),
                 ("2078000000000000802", "2026-07-18T00:00:00+00:00"),
@@ -232,8 +232,8 @@ class ApiTests(unittest.TestCase):
                     {
                         "id": post_id,
                         "text": f"fixture {post_id}",
-                        "url": f"https://x.com/WwQQ129146/status/{post_id}",
-                        "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                        "url": f"https://x.com/public_kol_2/status/{post_id}",
+                        "author": {"screenName": "public_kol_2", "name": "fixture"},
                         "createdAtISO": posted_at,
                         "media": [],
                         "isRetweet": False,
@@ -266,13 +266,13 @@ class ApiTests(unittest.TestCase):
             app.state.market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", source="fixture")
             )
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000999",
                     "text": "今日补充关注 002414 高德红外。",
-                    "url": "https://x.com/WwQQ129146/status/2078000000000000999",
-                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_2", "name": "fixture"},
                     "createdAtISO": "2026-07-18T00:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -603,7 +603,7 @@ class ApiTests(unittest.TestCase):
             app = create_app(settings)
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             timestamp = "2026-07-18T08:00:00+08:00"
             with store.connect() as db:
                 posts = []
@@ -670,14 +670,14 @@ class ApiTests(unittest.TestCase):
                 Instrument("000938", "Unisplendour", "stock", "SZ", source="fixture"),
             ]
             market_store.upsert_instruments(instruments)
-            kol = post_store.get_kol_by_handle("WwQQ129146")
+            kol = post_store.get_kol_by_handle("public_kol_2")
             text = "Morning picks: 605178, 002303, 000938. No individual thesis was provided."
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000123",
                     "text": text,
-                    "url": "https://x.com/WwQQ129146/status/2078000000000000123",
-                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_2", "name": "fixture"},
                     "createdAtISO": "2026-07-17T00:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -781,13 +781,13 @@ class ApiTests(unittest.TestCase):
             app = create_app(settings)
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(
                 {
                     "id": "2076000000000000888",
                     "text": "普通市场观察",
-                    "url": "https://x.com/WwQQ129146/status/2076000000000000888",
-                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_2", "name": "fixture"},
                     "createdAtISO": "2026-07-15T02:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -833,13 +833,13 @@ class ApiTests(unittest.TestCase):
             market_store.upsert_instrument(
                 Instrument("002414", "Gaode Infrared", "stock", "SZ", lifecycle="archived", source="fixture")
             )
-            kol = post_store.get_kol_by_handle("WwQQ129146")
+            kol = post_store.get_kol_by_handle("public_kol_2")
             post = normalise_twitter_post(
                 {
                     "id": "2077000000000000999",
                     "text": "002414 long thesis",
-                    "url": "https://x.com/WwQQ129146/status/2077000000000000999",
-                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_2", "name": "fixture"},
                     "metrics": {},
                     "createdAtISO": "2026-07-14T08:30:00+00:00",
                     "media": [],
@@ -891,8 +891,8 @@ class ApiTests(unittest.TestCase):
             post_store = app.state.post_store
             event_store = app.state.event_store
             kol_id, _ = post_store.add_kol(
-                "A股趋势捕手",
-                "Aw3ff_",
+                "Public KOL 10",
+                "public_kol_10",
                 "A股技术复盘",
                 status="paused",
             )
@@ -901,8 +901,8 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077011102911852883",
                     "text": "明日参考：603127 昭衍新药。逻辑：医疗服务+创新药。",
-                    "url": "https://x.com/Aw3ff_/status/2077011102911852883",
-                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
+                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
                     "metrics": {},
                     "createdAtISO": "2026-07-14T12:43:30+00:00",
                     "media": [],
@@ -915,12 +915,12 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077210207818764707",
                     "text": "涨停，逻辑预判正确。大资金都去医药了。",
-                    "url": "https://x.com/Aw3ff_/status/2077210207818764707",
-                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
+                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
                     "quotedTweet": {
                         "id": original.post_id,
                         "text": original.text,
-                        "author": {"screenName": "Aw3ff_"},
+                        "author": {"screenName": "public_kol_10"},
                     },
                     "metrics": {},
                     "createdAtISO": "2026-07-15T01:54:40+00:00",
@@ -934,12 +934,12 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077210207818764708",
                     "text": "尚未人工审核的复盘。",
-                    "url": "https://x.com/Aw3ff_/status/2077210207818764708",
-                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
+                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
+                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
                     "quotedTweet": {
                         "id": original.post_id,
                         "text": original.text,
-                        "author": {"screenName": "Aw3ff_"},
+                        "author": {"screenName": "public_kol_10"},
                     },
                     "metrics": {},
                     "createdAtISO": "2026-07-15T02:54:40+00:00",
@@ -966,7 +966,7 @@ class ApiTests(unittest.TestCase):
             post_store.set_review(retrospective.post_id, "excluded", "涨后复盘，不重复注册事件")
             event = EventRecord(
                 event_id="KOL-T001",
-                kol_name="A股趋势捕手",
+                kol_name="Public KOL 10",
                 platform="X",
                 source_url=original.url,
                 source_note=f"post:{original.post_id}",
@@ -1244,12 +1244,12 @@ class ApiTests(unittest.TestCase):
             market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", lifecycle="tracking", source="fixture")
             )
-            kol = post_store.get_kol_by_handle("WwQQ129146")
+            kol = post_store.get_kol_by_handle("public_kol_2")
             payload = {
                 "id": "2077000000000000101",
                 "text": "关注 002414 高德红外，继续看多。",
-                "url": "https://x.com/WwQQ129146/status/2077000000000000101",
-                "author": {"screenName": "WwQQ129146", "name": "林哥"},
+                "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                "author": {"screenName": "public_kol_2", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-14T08:30:00+00:00",
                 "media": [],
@@ -1283,12 +1283,12 @@ class ApiTests(unittest.TestCase):
             app.state.market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", lifecycle="archived", source="fixture_master")
             )
-            kol = post_store.get_kol_by_handle("WwQQ129146")
+            kol = post_store.get_kol_by_handle("public_kol_2")
             payload = {
                 "id": "2077000000000000102",
                 "text": "高德红外值得继续研究。",
-                "url": "https://x.com/WwQQ129146/status/2077000000000000102",
-                "author": {"screenName": "WwQQ129146", "name": "林哥"},
+                "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                "author": {"screenName": "public_kol_2", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-14T08:30:00+00:00",
                 "media": [],
@@ -1450,12 +1450,12 @@ class ApiTests(unittest.TestCase):
             self.assertEqual("queued", queued.json()["backfill_status"])
 
             store = app.state.post_store
-            kol = store.get_kol_by_handle("WwQQ129146")
+            kol = store.get_kol_by_handle("public_kol_2")
             payload = {
                 "id": "2076000000000000001",
                 "text": "关注 002414 高德红外，继续看多。",
-                "url": "https://x.com/WwQQ129146/status/2076000000000000001",
-                "author": {"screenName": "WwQQ129146", "name": "林哥"},
+                "url": "https://x.com/public_kol_2/status/0000000000000000000",
+                "author": {"screenName": "public_kol_2", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-13T08:30:00+00:00",
                 "media": [],
