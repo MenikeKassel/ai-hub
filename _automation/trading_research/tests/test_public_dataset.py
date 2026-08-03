@@ -103,3 +103,22 @@ def test_export_is_deterministic_and_read_only(tmp_path: Path) -> None:
     assert report["ok"], report
     assert "public_kol_2" in (first / "catalog" / "kols.csv").read_text(encoding="utf-8")
     assert "13800138000" not in "\n".join(path.read_text(encoding="utf-8") for path in first.rglob("*.csv"))
+
+
+def test_invalid_staging_does_not_replace_previous_snapshot(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    _create_fixture_runtime(runtime)
+    exporter = PublicDatasetExporter(runtime)
+    destination = tmp_path / "latest"
+    exporter.export(destination)
+    before = _hash_tree(destination)
+
+    def invalid_export(root: Path) -> dict[str, int]:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "partial.txt").write_text("incomplete", encoding="utf-8")
+        return {}
+
+    exporter._export_to = invalid_export  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="staging validation failed"):
+        exporter.export(destination)
+    assert _hash_tree(destination) == before
