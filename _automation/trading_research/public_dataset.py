@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
+from filelock import FileLock
+
 
 EXPORT_VERSION = "public-kol-dataset-v1"
 SCHEMA_VERSION = "2026-08-03"
@@ -200,22 +202,37 @@ class PublicDatasetExporter:
     def export(self, output: str | Path) -> dict[str, Any]:
         destination = Path(output).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f"{destination.name}.staging-", dir=destination.parent))
-        try:
-            counts = self._export_to(staging)
+        lock_path = self.runtime / "public-dataset.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(lock_path), timeout=120):
+            staging = Path(tempfile.mkdtemp(prefix=f"{destination.name}.staging-", dir=destination.parent))
             previous = destination.with_name(f".{destination.name}.previous")
-            if previous.exists():
-                shutil.rmtree(previous)
-            if destination.exists():
-                os.replace(destination, previous)
-            os.replace(staging, destination)
-            if previous.exists():
-                shutil.rmtree(previous)
-            return {"ok": True, "output": str(destination), "counts": counts, "manifest": str(destination / "manifest.json")}
-        except Exception:
-            if staging.exists():
-                shutil.rmtree(staging)
-            raise
+            moved_previous = False
+            try:
+                counts = self._export_to(staging)
+                validation = validate_public_dataset(staging)
+                if not validation["ok"]:
+                    raise RuntimeError("Public dataset staging validation failed: " + "; ".join(validation["errors"]))
+                if previous.exists():
+                    shutil.rmtree(previous)
+                if destination.exists():
+                    os.replace(destination, previous)
+                    moved_previous = True
+                try:
+                    os.replace(staging, destination)
+                except Exception:
+                    if moved_previous and previous.exists() and not destination.exists():
+                        os.replace(previous, destination)
+                    raise
+                if previous.exists():
+                    shutil.rmtree(previous)
+                return {"ok": True, "output": str(destination), "counts": counts, "manifest": str(destination / "manifest.json")}
+            except Exception:
+                if staging.exists():
+                    shutil.rmtree(staging)
+                if moved_previous and previous.exists() and not destination.exists():
+                    os.replace(previous, destination)
+                raise
 
     def _export_to(self, root: Path) -> dict[str, int]:
         root.mkdir(parents=True, exist_ok=True)
@@ -593,7 +610,12 @@ def _latest_date(root: Path) -> str:
 
 def validate_public_dataset(input_path: str | Path) -> dict[str, Any]:
     root = Path(input_path).resolve()
-    required = ["GPT_CONTEXT.md", "DATA_DICTIONARY.md", "DATA_TERMS.md", "manifest.json", "catalog/kols.csv", "catalog/instruments.csv", "events/events.csv", "returns/checkpoints.csv", "performance/latest.csv", "research/technical_context.csv"]
+    required = [
+        "GPT_CONTEXT.md", "DATA_DICTIONARY.md", "DATA_TERMS.md", "manifest.json",
+        "catalog/kols.csv", "catalog/instruments.csv", "events/events.csv",
+        "recommendations/drafts.csv", "returns/checkpoints.csv", "performance/latest.csv",
+        "research/technical_context.csv", "research/method_research.jsonl",
+    ]
     errors: list[str] = []
     for relative in required:
         if not (root / relative).exists():
@@ -646,6 +668,24 @@ def validate_public_dataset(input_path: str | Path) -> dict[str, Any]:
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             errors.append("invalid_manifest")
+    manifest_files = manifest.get("files") if isinstance(manifest, dict) else None
+    if isinstance(manifest_files, list):
+        expected = {str(item.get("path", "")): item for item in manifest_files if isinstance(item, dict)}
+        actual = {
+            path.relative_to(root).as_posix(): path
+            for path in root.rglob("*")
+            if path.is_file() and path.name != "manifest.json"
+        }
+        if set(expected) != set(actual):
+            errors.append("manifest_file_set_mismatch")
+        for relative, item in expected.items():
+            path = actual.get(relative)
+            if path is None:
+                continue
+            if item.get("size") != path.stat().st_size or item.get("sha256") != _sha256(path):
+                errors.append(f"manifest_hash_mismatch:{relative}")
+    else:
+        errors.append("manifest_files_missing")
     return {
         "ok": not errors,
         "input": str(root),
