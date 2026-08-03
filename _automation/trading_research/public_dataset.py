@@ -445,7 +445,12 @@ class PublicDatasetExporter:
             if str(row.get("as_of", "")) >= str(latest.get(key, {}).get("as_of", "")):
                 latest[key] = row
         latest_count = _write_csv(root / "performance" / "latest.csv", fields, latest.values())
-        series_count = self._export_year_csv(root / "performance", "series", rows)
+        series_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            series_groups[_year(row.get("as_of"))].append(row)
+        series_count = 0
+        for year, values in sorted(series_groups.items()):
+            series_count += _write_csv(root / "performance" / f"series-{year}.csv", fields, values)
         return {"performance_latest": latest_count, "performance_series": series_count}
 
     def _export_technical_context(self, root: Path) -> int:
