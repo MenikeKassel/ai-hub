@@ -686,6 +686,30 @@ def validate_public_dataset(input_path: str | Path) -> dict[str, Any]:
                 errors.append(f"manifest_hash_mismatch:{relative}")
     else:
         errors.append("manifest_files_missing")
+    manifest_counts = manifest.get("counts") if isinstance(manifest, dict) else None
+    if isinstance(manifest_counts, dict):
+        count_sources: dict[str, int] = {
+            "kols": len(csv_rows("catalog/kols.csv")),
+            "instruments": len(csv_rows("catalog/instruments.csv")),
+            "drafts": len(csv_rows("recommendations/drafts.csv")),
+            "events": len(csv_rows("events/events.csv")),
+            "checkpoints": len(csv_rows("returns/checkpoints.csv")),
+            "performance_latest": len(csv_rows("performance/latest.csv")),
+            "technical_context": len(csv_rows("research/technical_context.csv")),
+            "daily_marks": sum(len(_read_csv(path)) for path in (root / "returns").glob("daily_marks-*.csv")) if (root / "returns").exists() else 0,
+            "performance_series": sum(len(_read_csv(path)) for path in (root / "performance").glob("series-*.csv")) if (root / "performance").exists() else 0,
+            "method_research": sum(len(path.read_text(encoding="utf-8").splitlines()) for path in (root / "research").glob("method_research*.jsonl")) if (root / "research").exists() else 0,
+            "board_rps": sum(len(_read_csv(path)) for path in (root / "boards").glob("rps-rank-*.csv")) if (root / "boards").exists() else 0,
+        }
+        for path in (root / "sources").glob("posts-*.jsonl") if (root / "sources").exists() else []:
+            year = path.stem.removeprefix("posts-")
+            count_sources[f"sources_{year}"] = len(path.read_text(encoding="utf-8").splitlines())
+        for key, expected in manifest_counts.items():
+            actual = count_sources.get(str(key), 0)
+            if actual != expected:
+                errors.append(f"manifest_count_mismatch:{key}:{expected}!={actual}")
+    else:
+        errors.append("manifest_counts_missing")
     return {
         "ok": not errors,
         "input": str(root),
