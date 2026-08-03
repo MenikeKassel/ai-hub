@@ -395,7 +395,15 @@ class PublicDatasetExporter:
         return total
 
     def _export_performance(self, root: Path) -> dict[str, int]:
+        performance_fields = [
+            "as_of", "platform", "kol_key", "kol_id", "kol_handle", "kol_name", "horizon",
+            "window_name", "tier", "rank", "batch_count", "event_count", "unique_symbols",
+            "recommendation_days", "median_excess", "mean_excess", "win_rate", "median_mae",
+            "median_mfe", "sample_status", "unmatured_batch_count", "summary", "limitations",
+            "algorithm_version",
+        ]
         if not self.performance_db.exists():
+            _write_csv(root / "performance" / "latest.csv", performance_fields, [])
             return {"performance_latest": 0, "performance_series": 0}
         con = _read_only_sqlite(self.performance_db)
         try:
@@ -438,7 +446,7 @@ class PublicDatasetExporter:
                 "limitations": short_excerpt(json.dumps(narrative.get("limitations", []), ensure_ascii=False), 600),
                 "algorithm_version": payload.get("version", ""),
             })
-        fields = list(rows[0].keys()) if rows else ["as_of"]
+        fields = list(rows[0].keys()) if rows else performance_fields
         latest: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for row in rows:
             key = (str(row.get("platform")), str(row.get("kol_key")), str(row.get("horizon")), str(row.get("window_name")))
