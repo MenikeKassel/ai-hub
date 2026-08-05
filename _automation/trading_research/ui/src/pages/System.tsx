@@ -110,7 +110,7 @@ export default function System() {
       <HealthItem icon={Database} label="Zhihu collection" ok={!!h?.zhihu_capture_available && h?.zhihu_fetch_status !== 'degraded'} value={`${h?.zhihu_active_kols || 0} active / ${h?.zhihu_paused_kols || 0} paused / ${h?.zhihu_fetch_status || 'never'}`} />
       <HealthItem icon={RefreshCw} label="Morning pipeline" ok={h?.morning_pipeline_task === 'installed'} value={`Zhihu 06:30 / X 07:20 08:05 08:45 / ${h?.morning_pipeline_task || '-'}`} />
       <HealthItem icon={Terminal} label="Codex batch review" ok={!!h?.codex_cli} value={h?.codex_cli || 'Codex CLI not found'} />
-      <HealthItem icon={Terminal} label="OpenCode Go review AI" ok={!!h?.deepseek_credentials_configured} value={`${h?.deepseek_model || 'deepseek-v4-flash'} / ${h?.deepseek_credential_source || (h?.deepseek_credentials_configured ? 'configured' : 'missing key')}`} />
+      <HealthItem icon={Terminal} label="OpenCode Go review AI" ok={!!h?.deepseek_credentials_configured} value={`${h?.deepseek_model || 'deepseek-v4-flash'} / ${h?.deepseek_credentials_configured ? 'configured' : 'missing key'}`} />
       <HealthItem icon={Terminal} label="OCR RapidOCR" ok={!!h?.rapid_ocr_available} value={h?.rapid_ocr_available ? 'local OCR available' : 'run OCR installer'} />
       <HealthItem icon={Terminal} label="OCR experiment" ok={!!h?.unlimited_ocr_available} value={h?.unlimited_ocr_available ? 'Unlimited-OCR available' : 'not installed'} />
       <HealthItem icon={Database} label="Market warehouse" ok={!!h?.market?.ok} value={`${h?.market?.active_instruments || 0} active / ${h?.market?.coverage_count || 0} coverage`} />
@@ -153,7 +153,7 @@ export default function System() {
       <CredentialForm title="X primary session" configured={!!h?.twitter_credentials_configured} values={primary} busy={savePrimary.isPending} onChange={setPrimary} onSubmit={(event) => { event.preventDefault(); savePrimary.mutate() }} />
       <CredentialForm title="Nitter backup session" configured={!!h?.nitter_credentials_configured} values={backup} busy={saveBackup.isPending} onChange={setBackup} onSubmit={(event) => { event.preventDefault(); saveBackup.mutate() }} />
       <form className="panel credential-form" onSubmit={(event) => { event.preventDefault(); saveDeepSeek.mutate() }}>
-        <div className="panel-heading"><div><h2><KeyRound size={16} />OpenCode Go · DeepSeek V4 Flash</h2><span>{h?.deepseek_credential_source === 'opencode-config' ? 'Reusing local OpenCode config' : `Windows Credential Manager / ${h?.deepseek_credentials_configured ? 'configured' : 'missing'}`}</span></div></div>
+        <div className="panel-heading"><div><h2><KeyRound size={16} />OpenCode Go · DeepSeek V4 Flash</h2><span>Windows Credential Manager / {h?.deepseek_credentials_configured ? 'configured' : 'missing'}</span></div></div>
         <label>OpenCode Go API key<input type="password" autoComplete="off" value={deepseekKey} onChange={(event) => setDeepseekKey(event.target.value)} /></label>
         <button className="primary-button" disabled={saveDeepSeek.isPending || !deepseekKey}>安全保存</button>
       </form>

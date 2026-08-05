@@ -2277,7 +2277,6 @@ def create_app(
             "shadow_rollout": post_store.shadow_rollout_status(),
             "codex_cli": shutil.which("codex") or "",
             "deepseek_credentials_configured": deepseek_credentials.configured(),
-            "deepseek_credential_source": deepseek_credentials.credential_source(),
             "deepseek_provider": DeepSeekPostClassifier.provider_name,
             "deepseek_model": DeepSeekPostClassifier.model_name,
             "unlimited_ocr_root": str(ocr_root),

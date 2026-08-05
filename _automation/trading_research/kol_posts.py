@@ -3355,7 +3355,12 @@ class OpenCodeGoCredentialStore:
         import keyring  # type: ignore
 
         value = self.validate(api_key)
-        previous = keyring.get_password(self.service_name, "api_key")
+        try:
+            previous = keyring.get_password(self.service_name, "api_key")
+        except Exception as exc:
+            raise CredentialStorageError(
+                "Windows Credential Manager is unavailable for OpenCode Go"
+            ) from exc
         try:
             keyring.set_password(self.service_name, "api_key", value)
         except Exception as exc:
@@ -3373,7 +3378,10 @@ class OpenCodeGoCredentialStore:
     def load(self) -> str:
         import keyring  # type: ignore
 
-        value = keyring.get_password(self.service_name, "api_key") or ""
+        try:
+            value = keyring.get_password(self.service_name, "api_key") or ""
+        except Exception:
+            value = ""
         if value:
             return self.validate(value)
         try:
@@ -3384,17 +3392,6 @@ class OpenCodeGoCredentialStore:
             raise ModelProviderUnavailableError(
                 "OpenCode Go / DeepSeek V4 Flash is not configured"
             ) from exc
-
-    def credential_source(self) -> str:
-        import keyring  # type: ignore
-
-        if keyring.get_password(self.service_name, "api_key"):
-            return "windows-credential-manager"
-        try:
-            self.validate(load_opencode_go_api_key(config_path=self.config_path))
-            return "opencode-config"
-        except Exception:
-            return "missing"
 
     def configured(self) -> bool:
         try:

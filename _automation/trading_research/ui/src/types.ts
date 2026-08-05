@@ -1007,7 +1007,6 @@ export interface Health {
   zhihu_fetch_status: string
   codex_cli: string
   deepseek_credentials_configured: boolean
-  deepseek_credential_source?: string
   deepseek_provider?: string
   deepseek_model: string
   unlimited_ocr_root: string

@@ -57,7 +57,65 @@ class FailingInterpreter:
         raise ValueError("evidence ref does not exist")
 
 
+class ProviderAwareInterpreter(FakeInterpreter):
+    provider_name = "opencode-go"
+    model_name = "deepseek-v4-flash"
+
+
 class EventResearchServiceTests(unittest.TestCase):
+    def test_provider_and_model_are_stored_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            event_store = KolStore(root / "kol")
+            market = MarketStore(root / "market")
+            event = EventRecord(
+                event_id="KOL-PROVIDER-MODEL",
+                kol_name="fixture",
+                platform="X",
+                source_url="https://x.com/fixture/status/provider-model",
+                source_note="post:provider-model",
+                posted_at="2026-07-01T16:00:00+08:00",
+                symbol="600900",
+                security_name="fixture",
+                direction="long",
+                thesis="fixture thesis",
+                status="active",
+            )
+            event_store.register_event(event)
+            market.save_event_method_research(
+                {
+                    "snapshot_id": "research-provider-model",
+                    "event_id": event.event_id,
+                    "method_version": "fixture-v1",
+                    "input_hash": "fixture-input",
+                    "symbol": event.symbol,
+                    "posted_at": event.posted_at,
+                    "as_of_trade_date": "2026-07-01",
+                    "status": "partial",
+                    "payload": {
+                        "version": "fixture-v1",
+                        "lenses": {
+                            lens: {"facts": {"fixture": True}}
+                            for lens in LENSES
+                        },
+                    },
+                    "warnings": [],
+                    "computed_at": "2026-07-01T16:01:00+08:00",
+                }
+            )
+            service = EventMethodResearchService(
+                event_store,
+                market,
+                interpreter=ProviderAwareInterpreter(),
+            )
+
+            result = service.interpret_pending(event_ids=[event.event_id])
+            section = service.get_section(event.event_id)["interpretation"]
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("opencode-go", section["provider"])
+            self.assertEqual("deepseek-v4-flash", section["model"])
+
     def test_current_provider_replaces_legacy_ready_interpretation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

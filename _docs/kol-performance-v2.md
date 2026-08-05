@@ -24,7 +24,7 @@ python trading_cli.py kol-performance-report --weekly --notify
 python trading_cli.py kol-performance-report --weekly --with-ai --notify
 ```
 
-默认不调用 AI。`--with-ai` 只把聚合后的指标交给 DeepSeek 生成解释；模型失败时保留确定性模板，不能改变指标、阶段或排名。
+默认不调用 AI。`--with-ai` 只把聚合后的指标交给 OpenCode Go 中的 DeepSeek V4 Flash 生成解释；模型失败时保留确定性模板，不能改变指标、阶段或排名。
 
 ## 页面
 
