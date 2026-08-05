@@ -8,7 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kol_performance import KolPerformanceService, bootstrap_ci  # noqa: E402
+from kol_performance import (  # noqa: E402
+    DeepSeekPerformanceInterpreter,
+    KolPerformanceService,
+    bootstrap_ci,
+)
 from kol_tracker import EventRecord, KolStore  # noqa: E402
 
 
@@ -54,6 +58,13 @@ def checkpoint(event_id: str, trade_date: str, excess: float) -> dict[str, str]:
 
 
 class KolPerformanceTests(unittest.TestCase):
+    def test_narrative_provider_uses_opencode_go_deepseek_v4_flash(self) -> None:
+        self.assertEqual("deepseek-v4-flash", DeepSeekPerformanceInterpreter.model_name)
+        self.assertEqual(
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            DeepSeekPerformanceInterpreter.api_url,
+        )
+
     def test_same_post_multi_stock_is_one_equal_weighted_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolStore(Path(tmp))

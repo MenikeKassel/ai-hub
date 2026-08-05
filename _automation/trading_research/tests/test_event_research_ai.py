@@ -61,6 +61,10 @@ class EventResearchAITests(unittest.TestCase):
 
         self.assertIsInstance(provider, DeepSeekEventResearchInterpreter)
         self.assertEqual("deepseek-v4-flash", provider.model_name)
+        self.assertEqual(
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            provider.api_url,
+        )
 
     def test_deepseek_retries_once_with_the_validation_error(self) -> None:
         class Credentials:
