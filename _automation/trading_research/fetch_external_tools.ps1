@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$ExternalRoot = "<AI_HUB_HOME>\ai-hub\_external"
+    [string]$ExternalRoot = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "_external")
 )
 
 $ErrorActionPreference = "Stop"

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(os.environ.get("AI_HUB_ROOT", r"<AI_HUB_HOME>\ai-hub"))
+REPO_ROOT = Path(os.environ.get("AI_HUB_HOME") or os.environ.get("AI_HUB_ROOT") or Path(__file__).resolve().parents[2])
 OPERATOR = REPO_ROOT / "scripts" / "hermes-kol-operator.ps1"
 ACTIONS = {
     "status",

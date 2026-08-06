@@ -83,7 +83,7 @@ class ApiSettings:
     codex_schema: Path
     xtf_command: Path | None = None
     nitter_url: str = "http://127.0.0.1:9377"
-    freestockdb_root: Path = Path("<AI_HUB_HOME>/stockdb")
+    freestockdb_root: Path = Path(os.environ.get("FREESTOCKDB_ROOT", Path(__file__).resolve().parents[3] / "stockdb"))
     freestockdb_url: str = "http://127.0.0.1:7899"
 
     @classmethod
@@ -95,7 +95,7 @@ class ApiSettings:
             codex_schema=Path(__file__).with_name("kol_classifier_schema.json"),
             xtf_command=ROOT / "_runtime" / "venv-x-fetcher" / "Scripts" / "xtf.exe",
             nitter_url=os.environ.get("KOL_NITTER_URL", "http://127.0.0.1:9377"),
-            freestockdb_root=Path(os.environ.get("FREESTOCKDB_ROOT", "<AI_HUB_HOME>/stockdb")),
+            freestockdb_root=Path(os.environ.get("FREESTOCKDB_ROOT", Path(__file__).resolve().parents[3] / "stockdb")),
             freestockdb_url=os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899"),
         )
 

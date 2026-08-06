@@ -24,8 +24,12 @@ from market_data import (
 )
 
 
-DEFAULT_ROOT = Path(os.environ.get("FREESTOCKDB_ROOT", "<AI_HUB_HOME>/stockdb"))
-DEFAULT_DATA_ROOT = Path(os.environ.get("FREESTOCKDB_DATA_ROOT", "<MARKET_DATA_HOME>/free-stockdb"))
+_FILE = Path(__file__).resolve()
+_REPO_ROOT = _FILE.parents[2]
+_WORKSPACE_ROOT = _FILE.parents[3]
+
+DEFAULT_ROOT = Path(os.environ.get("FREESTOCKDB_ROOT", _WORKSPACE_ROOT / "stockdb"))
+DEFAULT_DATA_ROOT = Path(os.environ.get("FREESTOCKDB_DATA_ROOT", Path(os.environ.get("FREESTOCKDB_ROOT", _WORKSPACE_ROOT / "stockdb")) / "live"))
 DEFAULT_URL = os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899")
 DEFAULT_RUNTIME_ROOT = Path(
     os.environ.get("TRADING_RUNTIME_ROOT", Path(__file__).resolve().parents[2] / "_runtime" / "trading")

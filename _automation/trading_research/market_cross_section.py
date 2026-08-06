@@ -60,12 +60,18 @@ def normalise_cross_section(frame: pd.DataFrame) -> pd.DataFrame:
         value["pct_change"] = value["close"] / value["preclose"] - 1.0
     else:
         value["pct_change"] = np.nan
+    # preclose of zero (suspended or bad data) yields inf; normalise to NaN.
+    value["pct_change"] = value["pct_change"].replace(
+        [float("inf"), float("-inf")], np.nan
+    )
     if "is_st" not in value:
         value["is_st"] = False
     value["is_st"] = value["is_st"].map(
         lambda item: (
             item
             if isinstance(item, bool)
+            else bool(float(item))
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
             else str(item).strip().lower() in {"1", "true", "yes", "y", "st"}
         )
     )

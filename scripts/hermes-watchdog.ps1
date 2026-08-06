@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$HermesCommand = "hermes",
-    [string]$LogPath = "<AI_HUB_HOME>\ai-hub\_runtime\watchdog\hermes-watchdog.log"
+    [string]$LogPath = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")).Path "_runtime\watchdog\hermes-watchdog.log")
 )
 
 $ErrorActionPreference = "Stop"
