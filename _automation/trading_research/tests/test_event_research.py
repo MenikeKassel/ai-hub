@@ -223,6 +223,94 @@ class EventResearchTests(unittest.TestCase):
         self.assertFalse(option_wall["available"])
         self.assertEqual("not_applicable", option_wall["status"])
 
+    def test_zero_close_pct_change_inf_never_becomes_a_limit_streak(self) -> None:
+        # A previous close of zero produces inf in pct_change; inf must not be
+        # counted as a limit move (it previously inflated limit_move_streak).
+        daily = daily_fixture()
+        daily = daily.copy()
+        daily.loc[daily.index[60], "close"] = 0.0
+        event_date = str(daily.iloc[70]["trade_date"])
+
+        result = analyze_event_methods(
+            event_id="KOL-ZERO-CLOSE",
+            symbol="600900",
+            posted_at=f"{event_date}T16:05:00+08:00",
+            qfq_daily=daily,
+        )
+
+        streak = result["lenses"]["short_term_leader"]["facts"]["limit_move_streak_local_approx"]
+        self.assertIsInstance(streak, int)
+        self.assertGreaterEqual(streak, 0)
+        # The fixture does not contain real limit moves, so the streak must
+        # stay small and never explode to inf-driven values.
+        self.assertLessEqual(streak, 2)
+
+    def test_daily_indicators_normalise_inf_to_nan(self) -> None:
+        from market_indicators import compute_daily_indicators
+
+        daily = daily_fixture()
+        # Inject a zero close so return_20d and atr14_pct divide by zero.
+        daily = daily.copy()
+        daily.loc[daily.index[30], "close"] = 0.0
+        indicators = compute_daily_indicators(daily)
+
+        for column in (
+            "ma5",
+            "ma10",
+            "ma20",
+            "ma60",
+            "rsi14",
+            "atr14",
+            "atr14_pct",
+            "volume_ratio_5",
+            "return_20d",
+            "distance_60d_high",
+        ):
+            # Leading rows are legitimately NaN (rolling warm-up); the bug we
+            # guard against is inf/-inf leaking into downstream consumers.
+            self.assertFalse(
+                indicators[column].isin([float("inf"), float("-inf")]).any(),
+                f"{column} contains inf/-inf",
+            )
+        self.assertFalse(
+            indicators[["atr14_pct", "return_20d"]].isin([float("inf"), float("-inf")]).any().any()
+        )
+
+    def test_numeric_is_st_flag_is_recognised(self) -> None:
+        from market_cross_section import normalise_cross_section
+
+        frame = pd.DataFrame(
+            {
+                "trade_date": ["2026-08-05", "2026-08-05"],
+                "symbol": ["000001", "000002"],
+                "close": [10.0, 12.0],
+                "amount": [1e8, 2e8],
+                "preclose": [9.5, 11.5],
+                "is_st": [1.0, 0.0],
+            }
+        )
+        normalised = normalise_cross_section(frame)
+        self.assertTrue(bool(normalised.set_index("symbol").loc["000001", "is_st"]))
+        self.assertFalse(bool(normalised.set_index("symbol").loc["000002", "is_st"]))
+
+    def test_pct_change_inf_is_normalised_to_nan(self) -> None:
+        from market_cross_section import normalise_cross_section
+
+        frame = pd.DataFrame(
+            {
+                "trade_date": ["2026-08-05"],
+                "symbol": ["000001"],
+                "close": [10.0],
+                "amount": [1e8],
+                "preclose": [0.0],
+            }
+        )
+        normalised = normalise_cross_section(frame)
+        self.assertTrue(
+            pd.isna(normalised.iloc[0]["pct_change"]),
+            "zero preclose must not produce inf pct_change",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

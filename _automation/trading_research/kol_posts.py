@@ -44,7 +44,6 @@ LONG_WORDS = {
     "买入",
     "建仓",
     "低吸",
-    "关注",
     "推荐",
     "布局",
     "机会",
@@ -54,7 +53,7 @@ LONG_WORDS = {
     "马前炮",
     "个股分享",
 }
-SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "风险", "见顶", "离场"}
+SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "见顶", "离场"}
 RETROSPECTIVE_WORDS = {"昨天推荐", "此前推荐", "已经涨停", "成功涨停", "回顾", "复盘"}
 FINANCE_WORDS = {"A股", "股票", "个股", "板块", "涨停", "跌停", "K线", "指数", "业绩", "估值", "资金", "成交量", "主力"}
 STRUCTURED_REVIEW_VERSION = "structured-text-v2"
@@ -478,7 +477,19 @@ class RuleClassifier:
         finance_hits = sorted(word for word in FINANCE_WORDS if word in content)
         if finance_hits:
             reasons.append("finance_language")
-        direction = "long" if len(long_hits) > len(short_hits) else "short" if short_hits else ""
+        # Direction needs a strict majority of directional words; a tie
+        # (e.g. one bullish and one bearish token) yields no direction
+        # rather than defaulting to short.
+        if long_hits and not short_hits:
+            direction = "long"
+        elif short_hits and not long_hits:
+            direction = "short"
+        elif long_hits and len(long_hits) > len(short_hits):
+            direction = "long"
+        elif short_hits and len(short_hits) > len(long_hits):
+            direction = "short"
+        else:
+            direction = ""
         retrospective = any(word in content for word in RETROSPECTIVE_WORDS)
         evidence_type = "retrospective" if retrospective else "original_pre_event"
         if value("post_type") in {"retweet", "aggregation"}:
@@ -682,7 +693,6 @@ class RuleClassifier:
 
 def validate_event_draft(draft: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    rate_limit_paused = False
     symbol = str(draft.get("symbol") or "")
     if not re.fullmatch(r"\d{6}", symbol):
         errors.append("one_symbol_per_event")

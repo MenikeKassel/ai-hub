@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 
@@ -220,12 +221,18 @@ def compute_event_technical_context(
     else:
         warnings.append("insufficient_volume_ratio_5")
 
-    return_20d = float(closes.iloc[-1] / closes.iloc[-21] - 1.0) if len(history) >= 21 else None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return_20d = float(closes.iloc[-1] / closes.iloc[-21] - 1.0) if len(history) >= 21 else None
+    if return_20d is None or not np.isfinite(return_20d):
+        return_20d = None
     if return_20d is None:
         warnings.append("insufficient_return_20d")
-    distance_60d_high = (
-        float(latest_close / closes.iloc[-60:].max() - 1.0) if len(history) >= 60 else None
-    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        distance_60d_high = (
+            float(latest_close / closes.iloc[-60:].max() - 1.0) if len(history) >= 60 else None
+        )
+    if distance_60d_high is None or not np.isfinite(distance_60d_high):
+        distance_60d_high = None
     if distance_60d_high is None:
         warnings.append("insufficient_distance_60d_high")
 

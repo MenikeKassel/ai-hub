@@ -2,6 +2,7 @@
 
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -656,7 +657,12 @@ def _normalise_prices(frame: pd.DataFrame) -> pd.DataFrame:
 def _format_number(value: float | int | str) -> str:
     if value == "" or pd.isna(value):
         return ""
-    return f"{float(value):.8f}"
+    number = float(value)
+    if not math.isfinite(number):
+        # inf/-inf (zero baseline, bad data) must never reach CSV/JSON as
+        # the literal "inf"; downstream treats empty as missing.
+        return ""
+    return f"{number:.8f}"
 
 
 def _select_baseline(event: EventRecord, raw: pd.DataFrame) -> tuple[int, str, str, str]:

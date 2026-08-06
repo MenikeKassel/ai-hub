@@ -723,7 +723,11 @@ class EventMethodResearchService:
             }
             items.append(item)
             metadata[event.event_id] = latest
-            if len(items) >= max(1, min(max_items, 5)):
+            if max_items <= 0:
+                # max_items=0 means "process none" (a pause switch), not one.
+                items.pop()
+                break
+            if len(items) >= min(max_items, 5):
                 break
         if not items:
             return {

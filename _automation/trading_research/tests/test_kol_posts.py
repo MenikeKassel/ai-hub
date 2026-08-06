@@ -496,6 +496,32 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("long", result.direction)
         self.assertIn("stock_code", result.reasons)
 
+    def test_rule_classifier_neutral_risk_text_has_no_direction(self) -> None:
+        # "风险" is a neutral word; it must not flip a post to short, and a
+        # bare "关注" without bullish context must not force long.
+        for text in ("注意风险", "关注该股风险", "该股值得关注"):
+            result = RuleClassifier().classify(
+                {"text": text, "post_type": "original", "media": []}
+            )
+            self.assertEqual("", result.direction, f"neutral text misclassified: {text}")
+
+    def test_rule_classifier_tie_between_directional_words_yields_no_direction(self) -> None:
+        # One bullish and one bearish token is a tie -> no direction.
+        result = RuleClassifier().classify(
+            {"text": "有机会但建议卖出", "post_type": "original", "media": []}
+        )
+        self.assertEqual("", result.direction)
+
+    def test_rule_classifier_clear_long_and_short_directions(self) -> None:
+        long_result = RuleClassifier().classify(
+            {"text": "推荐买入，布局机会很大", "post_type": "original", "media": []}
+        )
+        self.assertEqual("long", long_result.direction)
+        short_result = RuleClassifier().classify(
+            {"text": "该股风险很大，建议回避离场", "post_type": "original", "media": []}
+        )
+        self.assertEqual("short", short_result.direction)
+
     def test_retweet_cannot_become_direct_candidate(self) -> None:
         kol = {"id": 1, "handle": "example", "display_name": "示例KOL"}
         post = normalise_twitter_post(
