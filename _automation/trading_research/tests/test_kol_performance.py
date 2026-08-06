@@ -16,7 +16,7 @@ from kol_performance import (  # noqa: E402
 from kol_tracker import EventRecord, KolStore  # noqa: E402
 
 
-def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01") -> EventRecord:
+def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01", direction: str = "long") -> EventRecord:
     return EventRecord(
         event_id=event_id,
         kol_name="Fixture KOL",
@@ -26,7 +26,7 @@ def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01"
         posted_at=f"{posted}T09:00:00+08:00",
         symbol=symbol,
         security_name="Fixture",
-        direction="long",
+        direction=direction,
         thesis="Fixture thesis",
         status="active",
         kol_id="7",
@@ -79,6 +79,26 @@ class KolPerformanceTests(unittest.TestCase):
             self.assertEqual(2, metrics["event_count"])
             self.assertEqual(2, metrics["unique_symbols"])
             self.assertAlmostEqual(0.13, metrics["median_excess"])
+
+    def test_short_events_are_excluded_from_batch_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-1", "600001", direction="short"),
+                event("E3", "POST-2", "600002", direction="short"),
+            ], backup=False)
+            store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-10", 0.04),
+                checkpoint("E2", "2026-01-10", 0.99),
+            ])
+            result = KolPerformanceService(store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            metrics = result["rows"][0]["metrics"]
+            self.assertEqual(1, metrics["batch_count"])
+            self.assertEqual(1, metrics["event_count"])
+            self.assertEqual(1, metrics["unique_symbols"])
+            self.assertEqual(0, metrics["unmatured_batch_count"])
+            self.assertAlmostEqual(0.04, metrics["median_excess"])
 
     def test_different_posts_remain_separate_and_recent_window_uses_trade_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

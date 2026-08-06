@@ -1400,7 +1400,7 @@ def should_write_obsidian(item: dict[str, Any], config: dict[str, Any]) -> bool:
 
     configured = str(config.get("obsidian_project_allowlist", "")).strip()
     if not configured:
-        # 第二大脑 v2.2.1:捕获阶段不再写 Obsidian;知识提升统一走 /wiki(second-brain-engine)
+        # Obsidian 写入已停用(2026-08-06): allowlist 为空即不写
         return False
 
     allowed_projects = {

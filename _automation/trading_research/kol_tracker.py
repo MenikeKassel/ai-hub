@@ -179,6 +179,10 @@ def is_executable_event(event: EventRecord) -> bool:
     return not (set(event.execution_warning.split(";")) & NON_EXECUTABLE_WARNINGS)
 
 
+def is_long_event(event: EventRecord) -> bool:
+    return event.direction.strip().lower() == "long"
+
+
 def validate_event(event: EventRecord) -> list[str]:
     if event.status not in EVENT_STATUSES:
         return ["status"]

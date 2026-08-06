@@ -4,14 +4,10 @@ from collections import defaultdict
 from statistics import fmean, median
 from typing import Any, Iterable
 
-from kol_tracker import EventRecord, is_executable_event
+from kol_tracker import EventRecord, is_executable_event, is_long_event
 
 
 HORIZONS = ("1W", "1M", "3M", "6M")
-
-
-def _is_long_event(event: EventRecord) -> bool:
-    return event.direction.strip().lower() == "long"
 
 
 def _number(value: Any) -> float:
@@ -82,7 +78,7 @@ def build_kol_leaderboard(
     eligible = {
         event.event_id: event
         for event in event_rows
-        if event.status in {"active", "completed"} and _is_long_event(event) and is_executable_event(event)
+        if event.status in {"active", "completed"} and is_long_event(event) and is_executable_event(event)
     }
     all_events: dict[str, int] = defaultdict(int)
     executable_events: dict[str, int] = defaultdict(int)

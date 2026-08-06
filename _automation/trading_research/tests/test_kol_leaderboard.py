@@ -10,7 +10,7 @@ from kol_leaderboard import build_kol_leaderboard  # noqa: E402
 from kol_tracker import EventRecord  # noqa: E402
 
 
-def event(event_id: str, kol: str, warning: str = "") -> EventRecord:
+def event(event_id: str, kol: str, warning: str = "", direction: str = "long") -> EventRecord:
     return EventRecord(
         event_id=event_id,
         kol_name=kol,
@@ -20,7 +20,7 @@ def event(event_id: str, kol: str, warning: str = "") -> EventRecord:
         posted_at="2026-01-01T08:00:00+08:00",
         symbol="600900",
         security_name="Fixture",
-        direction="long",
+        direction=direction,
         thesis="Fixture thesis",
         status="active",
         execution_warning=warning,
@@ -69,6 +69,23 @@ class KolLeaderboardTests(unittest.TestCase):
 
         self.assertEqual("watch", rows[0]["tier"])
         self.assertIsNone(rows[0]["rank"])
+
+    def test_short_events_do_not_contribute_to_samples_or_rank(self) -> None:
+        events = [event(f"A-{index}", "Alpha", direction="short") for index in range(10)]
+        events += [event(f"B-{index}", "Beta") for index in range(10)]
+        checkpoints = [checkpoint(f"A-{index}", 1.0) for index in range(10)]
+        checkpoints += [checkpoint(f"B-{index}", 0.01) for index in range(10)]
+
+        rows = build_kol_leaderboard(events, checkpoints)
+        alpha = next(item for item in rows if item["kol_name"] == "Alpha")
+        beta = next(item for item in rows if item["kol_name"] == "Beta")
+
+        self.assertEqual(10, alpha["event_count"])
+        self.assertEqual(0, alpha["executable_event_count"])
+        self.assertEqual(0, alpha["horizons"]["1M"]["samples"])
+        self.assertEqual("collecting", alpha["tier"])
+        self.assertIsNone(alpha["rank"])
+        self.assertEqual(1, beta["rank"])
 
 
 if __name__ == "__main__":

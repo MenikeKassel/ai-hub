@@ -23,7 +23,7 @@ import httpx
 
 from kol_posts import DeepSeekCredentialStore, ModelProviderUnavailableError
 from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
-from kol_tracker import EventRecord, KolStore, is_executable_event
+from kol_tracker import EventRecord, KolStore, is_executable_event, is_long_event
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -76,10 +76,6 @@ def _hash(value: Any) -> str:
 
 def _warning_tokens(event: EventRecord) -> set[str]:
     return {item.strip() for item in event.execution_warning.split(";") if item.strip()}
-
-
-def _is_long_event(event: EventRecord) -> bool:
-    return event.direction.strip().lower() == "long"
 
 
 def _parse_post_id(event: EventRecord) -> str:
@@ -519,7 +515,7 @@ class KolPerformanceService:
             identity = identities[self.resolve_identity(event).key]
             if event.status not in {"active", "completed"}:
                 continue
-            if not _is_long_event(event):
+            if not is_long_event(event):
                 continue
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
@@ -534,7 +530,7 @@ class KolPerformanceService:
             event = event_by_id.get(str(row.get("event_id") or ""))
             if event is None or event.status not in {"active", "completed"}:
                 continue
-            if not _is_long_event(event):
+            if not is_long_event(event):
                 continue
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
