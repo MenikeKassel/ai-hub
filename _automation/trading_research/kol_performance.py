@@ -27,7 +27,7 @@ from kol_tracker import EventRecord, KolStore, is_executable_event
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-PERFORMANCE_VERSION = "kol-performance-v2"
+PERFORMANCE_VERSION = "kol-performance-v3"
 HORIZONS = ("1W", "1M", "3M", "6M")
 RECENT_WINDOWS = (7, 30, 90)
 PRIMARY_WARNINGS = {
@@ -76,6 +76,10 @@ def _hash(value: Any) -> str:
 
 def _warning_tokens(event: EventRecord) -> set[str]:
     return {item.strip() for item in event.execution_warning.split(";") if item.strip()}
+
+
+def _is_long_event(event: EventRecord) -> bool:
+    return event.direction.strip().lower() == "long"
 
 
 def _parse_post_id(event: EventRecord) -> str:
@@ -222,7 +226,7 @@ def _rule_narrative(row_name: str, tier: str, metrics: dict[str, Any]) -> dict[s
         "strengths": strengths,
         "risks": risks,
         "changes": changes,
-        "limitations": ["同帖多股等权聚合", "不模拟手续费、滑点、仓位和资金占用", "AI解读不参与排名"],
+        "limitations": ["只统计看多事件；看空事件保留审计记录但不计入A股收益", "同帖多股等权聚合", "不模拟手续费、滑点、仓位和资金占用", "AI解读不参与排名"],
         "evidence_refs": [],
         "provider": "rules",
         "model": "none",
@@ -515,6 +519,8 @@ class KolPerformanceService:
             identity = identities[self.resolve_identity(event).key]
             if event.status not in {"active", "completed"}:
                 continue
+            if not _is_long_event(event):
+                continue
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
             if primary_only is False and primary.get(event.event_id, False):
@@ -527,6 +533,8 @@ class KolPerformanceService:
                 continue
             event = event_by_id.get(str(row.get("event_id") or ""))
             if event is None or event.status not in {"active", "completed"}:
+                continue
+            if not _is_long_event(event):
                 continue
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
@@ -666,7 +674,7 @@ class KolPerformanceService:
                 "ranked_count": sum(row["rank"] is not None for row in rows),
                 "mature_batch_count": sum(row["metrics"]["batch_count"] for row in rows),
                 "unmatured_batch_count": sum(row["metrics"]["unmatured_batch_count"] for row in rows),
-                "sample_note": "主分析仅含已验证且可执行的事前推荐；小样本只展示，不排名。",
+                "sample_note": "主分析仅含已验证且可执行的事前看多推荐；看空事件保留审计记录但不计入A股收益，小样本只展示、不排名。",
             },
             "rows": rows,
             "secondary": self.compute_secondary(as_of=as_of, platform=platform, window=window_name, horizon=horizon),
@@ -677,7 +685,7 @@ class KolPerformanceService:
         selected = [item for item in identities.values() if not platform or platform == "all" or item.platform == platform]
         rows = [self._row_for_identity(item, as_of=as_of, horizon=horizon, window_name=window, primary_only=False) for item in selected]
         return {
-            "description": "不可执行、条件、来源受限或二手事件的观点表现，仅供审计，不参与能力判断。",
+            "description": "不可执行、条件、来源受限或二手看多事件的观点表现，仅供审计，不参与能力判断；看空事件不纳入A股收益口径。",
             "rows": rows,
         }
 
@@ -792,12 +800,12 @@ def build_weekly_message(result: dict[str, Any]) -> str:
     rows = [row for row in result.get("rows", []) if row.get("rank") is not None]
     if not rows:
         return f"[KOL表现周报] 截至 {result.get('as_of', '')} 无新增达到正式排名门槛的成熟样本；小样本和未成熟批次仍在观察。"
-    lines = [f"[KOL表现周报] 截至 {result.get('as_of', '')}，正式排名仅按平台内中位超额排序。"]
+    lines = [f"[KOL表现周报] 截至 {result.get('as_of', '')}，正式排名仅按平台内看多事件中位超额排序。"]
     for row in rows[:10]:
         metrics = row["horizons"][row["rank_horizon"]]
         value = metrics.get("median_excess")
         lines.append(f"{row['platform']} {row['kol_name']}：{row['tier_label']}，{metrics['batch_count']}批，中位超额 {value:.2%}，胜率 {metrics['win_rate']:.1%}。" if value is not None else f"{row['platform']} {row['kol_name']}：{row['tier_label']}，样本不足。")
-    lines.append("限制：同帖多股按等权批次统计；X与知乎分开；AI解读不参与排名。")
+    lines.append("限制：只统计看多事件，看空事件保留审计记录但不计入A股收益；同帖多股按等权批次统计；X与知乎分开；AI解读不参与排名。")
     return "\n".join(lines)
 
 

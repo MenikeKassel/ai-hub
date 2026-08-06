@@ -756,10 +756,11 @@ def create_app(
             })
         return {
             "policy": {
-                "primary_metric": "platform-separated median batch excess return",
+                "primary_metric": "platform-separated median long-only batch excess return",
                 "batch_weighting": "same-post stocks are equal-weighted into one batch",
                 "score": None,
-                "sample_policy": "small samples are shown but never formally ranked",
+                "direction_policy": "short events are retained for audit but excluded from A-share return statistics",
+                "sample_policy": "small long-only samples are shown but never formally ranked",
             },
             "as_of": result["as_of"],
             "rows": rows,

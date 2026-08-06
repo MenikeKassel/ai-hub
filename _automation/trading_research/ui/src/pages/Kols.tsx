@@ -39,8 +39,8 @@ export default function Kols() {
       <button className={view === 'performance' ? 'active' : ''} onClick={() => setView('performance')}>阶段表现</button>
     </div>
     {view === 'performance' && <div className="panel kol-leaderboard">
-      <div className="panel-heading"><div><h2>KOL阶段表现</h2><span>只统计已冻结、已验证且可执行的推荐事件</span></div><span className="badge neutral">按超额收益审计</span></div>
-      <div className="scope-note"><BarChart3 size={15} />阶段表现已升级为独立工作台，支持平台分组、批次等权、近期窗口和趋势查看。<button className="text-button" onClick={() => { window.location.hash = '/performance' }}>打开 KOL 表现</button></div>
+      <div className="panel-heading"><div><h2>KOL阶段表现</h2><span>只统计已冻结、已验证且可执行的看多推荐事件</span></div><span className="badge neutral">按超额收益审计</span></div>
+      <div className="scope-note"><BarChart3 size={15} />看空事件保留审计记录，但不计入收益、胜率或排名；阶段表现已升级为独立工作台，支持平台分组、批次等权、近期窗口和趋势查看。<button className="text-button" onClick={() => { window.location.hash = '/performance' }}>打开 KOL 表现</button></div>
       <div className="table-scroll"><table><thead><tr><th>排名</th><th>KOL</th><th>阶段</th><th>可执行事件</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
       <tbody>{leaderboard.data?.rows.map((row) => <tr key={row.kol_name}>
         <td className="mono">{row.rank || '-'}</td><td><strong>{row.kol_name}</strong>{row.score !== null && <span className="secondary-line">观察分 {row.score.toFixed(2)}</span>}</td>

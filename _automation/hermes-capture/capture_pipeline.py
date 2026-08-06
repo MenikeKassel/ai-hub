@@ -82,7 +82,7 @@ def load_config(path: Path) -> dict[str, Any]:
     defaults = {
         "notion_database_id": "28552633-5cd6-800e-96b4-c9d97bba2c58",
         "notion_version": "2022-06-28",
-        "vault_path": r"<AI_HUB_HOME>\obsidian-vaults\research-os",
+        "vault_path": "",  # 已废弃(第二大脑项目终止,2026-08-06)
         "obsidian_inbox_dir": "00_Inbox",
         "obsidian_project_allowlist": "",
         "notion_env_files": r"<USER_HOME>\.hermes\.env;<USER_HOME>\AppData\Local\hermes\.env",
