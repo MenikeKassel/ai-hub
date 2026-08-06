@@ -15,6 +15,10 @@ from opencode_go import (  # noqa: E402
     OPENCODE_GO_MODEL,
     load_opencode_go_api_key,
 )
+from kol_posts import (  # noqa: E402
+    CredentialStorageError,
+    OpenCodeGoCredentialStore,
+)
 
 
 class OpenCodeGoTests(unittest.TestCase):
@@ -25,7 +29,7 @@ class OpenCodeGoTests(unittest.TestCase):
         )
         self.assertEqual("deepseek-v4-flash", OPENCODE_GO_MODEL)
 
-    def test_loads_inline_key_from_matching_provider_regardless_of_provider_id(self) -> None:
+    def test_rejects_inline_key_even_for_the_matching_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "opencode.json"
             config.write_text(
@@ -45,10 +49,8 @@ class OpenCodeGoTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(
-                "fixture-opencode-go-key",
-                load_opencode_go_api_key(config_path=config),
-            )
+            with self.assertRaisesRegex(ValueError, "Inline OpenCode Go API keys"):
+                load_opencode_go_api_key(config_path=config)
 
     def test_resolves_env_reference_without_exposing_other_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,7 +62,7 @@ class OpenCodeGoTests(unittest.TestCase):
                             "not-go": {
                                 "options": {
                                     "baseURL": "https://example.invalid/v1",
-                                    "apiKey": "must-not-be-used",
+                                    "apiKey": "fixture-must-not-be-used",
                                 }
                             },
                             "go": {
@@ -84,6 +86,26 @@ class OpenCodeGoTests(unittest.TestCase):
                     "fixture-env-go-key",
                     load_opencode_go_api_key(config_path=config),
                 )
+
+    def test_credential_store_uses_environment_when_keyring_is_unavailable(self) -> None:
+        with patch("keyring.get_password", side_effect=RuntimeError("unavailable")):
+            with patch.dict(
+                os.environ,
+                {"OPENCODE_GO_API_KEY": "fixture-environment-go-key"},
+                clear=False,
+            ):
+                self.assertEqual(
+                    "fixture-environment-go-key",
+                    OpenCodeGoCredentialStore().load(),
+                )
+
+    def test_credential_save_normalizes_keyring_backend_failure(self) -> None:
+        with patch("keyring.get_password", side_effect=RuntimeError("unavailable")):
+            with self.assertRaisesRegex(
+                CredentialStorageError,
+                "Credential Manager is unavailable",
+            ):
+                OpenCodeGoCredentialStore().save("fixture-environment-go-key")
 
 
 if __name__ == "__main__":

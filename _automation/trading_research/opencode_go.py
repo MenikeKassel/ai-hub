@@ -57,7 +57,13 @@ def load_opencode_go_api_key(
         match = _ENV_REFERENCE.fullmatch(value)
         if match:
             value = str(env.get(match.group(1)) or "").strip()
+            if value:
+                return value
+            raise KeyError("OpenCode Go API key environment variable is empty")
         if value:
-            return value
+            raise ValueError(
+                "Inline OpenCode Go API keys are not accepted; use an environment "
+                "reference or Windows Credential Manager"
+            )
         raise KeyError("OpenCode Go API key is empty")
     raise KeyError("OpenCode Go provider is not configured")

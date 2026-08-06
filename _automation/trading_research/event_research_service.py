@@ -65,6 +65,14 @@ class EventMethodResearchService:
 
     @property
     def interpretation_provider(self) -> str:
+        if self.interpreter is None:
+            return ""
+        return str(
+            getattr(self.interpreter, "provider_name", self.interpreter.model_name)
+        )
+
+    @property
+    def interpretation_model(self) -> str:
         return str(self.interpreter.model_name) if self.interpreter is not None else ""
 
     def has_ready_interpretation(
@@ -723,7 +731,8 @@ class EventMethodResearchService:
             outputs = self.interpreter.interpret_many(items)
         except Exception as exc:
             error = str(exc)[:2000]
-            provider = str(self.interpreter.model_name)
+            provider = self.interpretation_provider
+            model = self.interpretation_model
             prompt_version = str(self.interpreter.prompt_version)
             failed: list[dict[str, Any]] = []
             for item in items:
@@ -750,7 +759,7 @@ class EventMethodResearchService:
                         "event_id": event_id,
                         "research_snapshot_id": str(research["snapshot_id"]),
                         "provider": provider,
-                        "model": provider,
+                        "model": model,
                         "prompt_version": prompt_version,
                         "input_hash": input_hash,
                         "status": "failed",
@@ -778,7 +787,8 @@ class EventMethodResearchService:
             }
         created: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
-        provider = str(self.interpreter.model_name)
+        provider = self.interpretation_provider
+        model = self.interpretation_model
         prompt_version = str(self.interpreter.prompt_version)
         for item in items:
             event = item["event"]
@@ -805,7 +815,7 @@ class EventMethodResearchService:
                         "event_id": event_id,
                         "research_snapshot_id": str(research["snapshot_id"]),
                         "provider": provider,
-                        "model": provider,
+                        "model": model,
                         "prompt_version": prompt_version,
                         "input_hash": input_hash,
                         "status": "ready",
