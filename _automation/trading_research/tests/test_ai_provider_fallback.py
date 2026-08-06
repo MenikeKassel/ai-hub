@@ -56,6 +56,10 @@ class AiProviderFallbackTests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             captured.update(json.loads(request.content))
             self.assertEqual("Bearer fixture-key", request.headers["Authorization"])
+            self.assertEqual(
+                "https://opencode.ai/zen/go/v1/chat/completions",
+                str(request.url),
+            )
             return httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps(PAYLOAD)}}],
             })

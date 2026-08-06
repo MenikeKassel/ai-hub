@@ -13,6 +13,7 @@ from kol_posts import (
     ModelProviderUnavailableError,
     _parse_json_object_content,
 )
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
 
 
 LENS_KEYS = {
@@ -22,7 +23,7 @@ LENS_KEYS = {
     "ict",
     "wyckoff_orderflow",
 }
-AI_PROMPT_VERSION = "event-method-research-ai-v4"
+AI_PROMPT_VERSION = "event-method-research-ai-v5-opencode-go"
 FUTURE_LEAKAGE_RE = re.compile(
     r"(?:后续|随后|后来|事后|最终).{0,12}(?:收益|上涨|下跌|涨幅|跌幅)"
     r"|(?:发帖后|推荐后|此后|之后).{0,8}(?:\d+|一|二|三|四|五|六|七|八|九|"
@@ -328,9 +329,10 @@ def _instruction(schema: str) -> str:
 
 
 class DeepSeekEventResearchInterpreter:
-    model_name = "deepseek-v4-flash"
+    model_name = OPENCODE_GO_MODEL
+    provider_name = "opencode-go"
     prompt_version = AI_PROMPT_VERSION
-    api_url = "https://api.deepseek.com/chat/completions"
+    api_url = OPENCODE_GO_API_URL
 
     def __init__(
         self,
@@ -387,15 +389,15 @@ class DeepSeekEventResearchInterpreter:
                     )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 raise ModelProviderUnavailableError(
-                    f"DeepSeek connection failed: {exc.__class__.__name__}"
+                    f"OpenCode Go connection failed: {exc.__class__.__name__}"
                 ) from exc
             if response.status_code in {401, 402, 403, 408, 409, 429} or response.status_code >= 500:
                 raise ModelProviderUnavailableError(
-                    f"DeepSeek API unavailable (HTTP {response.status_code})"
+                    f"OpenCode Go API unavailable (HTTP {response.status_code})"
                 )
             if response.status_code >= 400:
                 raise RuntimeError(
-                    f"DeepSeek request rejected (HTTP {response.status_code})"
+                    f"OpenCode Go request rejected (HTTP {response.status_code})"
                 )
             try:
                 content = response.json()["choices"][0]["message"]["content"]
@@ -413,7 +415,7 @@ class DeepSeekEventResearchInterpreter:
                     )
                     continue
                 raise RuntimeError(
-                    "DeepSeek returned invalid event research JSON"
+                    "OpenCode Go returned invalid event research JSON"
                 ) from exc
             try:
                 return _split_and_validate(raw, items)
@@ -430,7 +432,7 @@ class DeepSeekEventResearchInterpreter:
                         ),
                     }
                 )
-        raise RuntimeError("DeepSeek event research retry exhausted")
+        raise RuntimeError("OpenCode Go event research retry exhausted")
 
 
 def _split_and_validate(

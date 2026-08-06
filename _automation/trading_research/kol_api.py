@@ -2277,7 +2277,9 @@ def create_app(
             "shadow_rollout": post_store.shadow_rollout_status(),
             "codex_cli": shutil.which("codex") or "",
             "deepseek_credentials_configured": deepseek_credentials.configured(),
-            "deepseek_model": "deepseek-v4-flash",
+            "deepseek_credential_source": deepseek_credentials.credential_source(),
+            "deepseek_provider": DeepSeekPostClassifier.provider_name,
+            "deepseek_model": DeepSeekPostClassifier.model_name,
             "unlimited_ocr_root": str(ocr_root),
             "unlimited_ocr_available": UnlimitedOcrBatchClassifier(ocr_root, ocr_runner).available(),
             "rapid_ocr_runtime": str(rapid_ocr_python),
@@ -2419,6 +2421,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"ok": True, "configured": True}
 
+    @app.post("/api/system/opencode-go-credentials")
     @app.post("/api/system/deepseek-credentials")
     def save_deepseek_credentials(body: DeepSeekCredentialRequest) -> dict[str, bool]:
         try:

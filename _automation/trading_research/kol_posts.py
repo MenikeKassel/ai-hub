@@ -23,6 +23,11 @@ import httpx
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from kol_tracker import SHANGHAI, now_iso
+from opencode_go import (
+    OPENCODE_GO_API_URL,
+    OPENCODE_GO_MODEL,
+    load_opencode_go_api_key,
+)
 
 
 SEED_KOLS = [
@@ -3324,20 +3329,26 @@ class NitterCredentialStore(KeyringCredentialStore):
         return {"kind": "cookie", "auth_token": auth_token, "ct0": ct0}
 
 
-class DeepSeekCredentialStore:
-    service_name = "ai-hub/deepseek"
+class OpenCodeGoCredentialStore:
+    service_name = "ai-hub/opencode-go"
 
-    def __init__(self, service_name: str | None = None):
+    def __init__(
+        self,
+        service_name: str | None = None,
+        *,
+        config_path: Path | None = None,
+    ):
         if service_name:
             self.service_name = service_name
+        self.config_path = config_path
 
     @staticmethod
     def validate(api_key: str) -> str:
         value = str(api_key or "").strip()
-        if not value.startswith("sk-") or not 20 <= len(value) <= 512:
-            raise CredentialValidationError("DeepSeek API key 格式异常")
+        if not 12 <= len(value) <= 1024:
+            raise CredentialValidationError("OpenCode Go API key format is invalid")
         if any(character.isspace() for character in value):
-            raise CredentialValidationError("DeepSeek API key 不能包含空格或换行")
+            raise CredentialValidationError("OpenCode Go API key cannot contain whitespace")
         return value
 
     def save(self, api_key: str) -> None:
@@ -3355,15 +3366,35 @@ class DeepSeekCredentialStore:
                     keyring.set_password(self.service_name, "api_key", previous)
             except Exception:
                 pass
-            raise CredentialStorageError("Windows Credential Manager 保存失败，本次输入未生效") from exc
+            raise CredentialStorageError(
+                "Windows Credential Manager could not save the OpenCode Go API key"
+            ) from exc
 
     def load(self) -> str:
         import keyring  # type: ignore
 
         value = keyring.get_password(self.service_name, "api_key") or ""
-        if not value:
-            raise ModelProviderUnavailableError("DeepSeek backup is not configured")
-        return self.validate(value)
+        if value:
+            return self.validate(value)
+        try:
+            return self.validate(
+                load_opencode_go_api_key(config_path=self.config_path)
+            )
+        except Exception as exc:
+            raise ModelProviderUnavailableError(
+                "OpenCode Go / DeepSeek V4 Flash is not configured"
+            ) from exc
+
+    def credential_source(self) -> str:
+        import keyring  # type: ignore
+
+        if keyring.get_password(self.service_name, "api_key"):
+            return "windows-credential-manager"
+        try:
+            self.validate(load_opencode_go_api_key(config_path=self.config_path))
+            return "opencode-config"
+        except Exception:
+            return "missing"
 
     def configured(self) -> bool:
         try:
@@ -3371,6 +3402,10 @@ class DeepSeekCredentialStore:
             return True
         except Exception:
             return False
+
+
+# Preserve the existing import name while routing every DeepSeek task through Go.
+DeepSeekCredentialStore = OpenCodeGoCredentialStore
 
 
 class TwitterCliProvider:
@@ -4399,8 +4434,9 @@ def _parse_json_object_content(content: Any) -> dict[str, Any]:
 
 
 class _DeepSeekClassifierBase:
-    model_name = "deepseek-v4-flash"
-    api_url = "https://api.deepseek.com/chat/completions"
+    model_name = OPENCODE_GO_MODEL
+    provider_name = "opencode-go"
+    api_url = OPENCODE_GO_API_URL
 
     def __init__(
         self,
@@ -4444,29 +4480,29 @@ class _DeepSeekClassifierBase:
                     timeout=self.timeout_seconds,
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise ModelProviderUnavailableError(f"DeepSeek connection failed: {exc.__class__.__name__}") from exc
+            raise ModelProviderUnavailableError(f"OpenCode Go connection failed: {exc.__class__.__name__}") from exc
         if response.status_code in {401, 402, 403, 408, 409, 429} or response.status_code >= 500:
-            raise ModelProviderUnavailableError(f"DeepSeek API unavailable (HTTP {response.status_code})")
+            raise ModelProviderUnavailableError(f"OpenCode Go API unavailable (HTTP {response.status_code})")
         if response.status_code >= 400:
-            raise RuntimeError(f"DeepSeek request rejected (HTTP {response.status_code})")
+            raise RuntimeError(f"OpenCode Go request rejected (HTTP {response.status_code})")
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
             value = _parse_json_object_content(content)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError("DeepSeek returned invalid JSON") from exc
+            raise RuntimeError("OpenCode Go returned invalid JSON") from exc
         return value
 
 
 class DeepSeekPostClassifier(_DeepSeekClassifierBase):
-    prompt_version = "kol-post-deepseek-v1"
+    prompt_version = "kol-post-opencode-go-v1"
 
     def classify(self, post: dict[str, Any]) -> dict[str, Any]:
         return validate_model_payload(self._request(_deepseek_source_item(post), batch=False))
 
 
 class DeepSeekBatchPostClassifier(_DeepSeekClassifierBase):
-    prompt_version = "kol-morning-deepseek-batch-v1"
+    prompt_version = "kol-morning-opencode-go-batch-v1"
     request_batch_size = 3
 
     def classify_many(self, posts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

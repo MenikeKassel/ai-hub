@@ -164,7 +164,7 @@ export const api = {
       method: 'POST', body: JSON.stringify({ auth_token: authToken, ct0 }),
     }),
   saveDeepSeekCredentials: (apiKey: string) =>
-    request('/api/system/deepseek-credentials', {
+    request('/api/system/opencode-go-credentials', {
       method: 'POST', body: JSON.stringify({ api_key: apiKey }),
     }),
 }

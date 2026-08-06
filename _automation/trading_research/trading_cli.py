@@ -3486,7 +3486,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_performance_report.add_argument("--weekly", action="store_true")
     p_performance_report.add_argument("--notify", action="store_true")
-    p_performance_report.add_argument("--with-ai", action="store_true", help="ask DeepSeek to explain aggregate facts; falls back to deterministic text")
+    p_performance_report.add_argument(
+        "--with-ai",
+        action="store_true",
+        help=(
+            "ask DeepSeek V4 Flash through OpenCode Go to explain aggregate "
+            "facts; falls back to deterministic text"
+        ),
+    )
     p_performance_report.add_argument("--as-of")
     p_performance_report.set_defaults(func=kol_performance_report)
 

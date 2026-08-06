@@ -22,6 +22,7 @@ from filelock import FileLock
 import httpx
 
 from kol_posts import DeepSeekCredentialStore, ModelProviderUnavailableError
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
 from kol_tracker import EventRecord, KolStore, is_executable_event
 
 
@@ -803,8 +804,9 @@ def build_weekly_message(result: dict[str, Any]) -> str:
 class DeepSeekPerformanceInterpreter:
     """Optional narrative provider; it receives aggregate facts only."""
 
-    model_name = "deepseek-chat"
-    api_url = "https://api.deepseek.com/chat/completions"
+    model_name = OPENCODE_GO_MODEL
+    provider_name = "opencode-go"
+    api_url = OPENCODE_GO_API_URL
 
     def __init__(self, credentials: DeepSeekCredentialStore | None = None, *, timeout_seconds: float = 90):
         self.credentials = credentials or DeepSeekCredentialStore()
@@ -848,17 +850,17 @@ class DeepSeekPerformanceInterpreter:
                 timeout=self.timeout_seconds,
             )
             if response.status_code >= 400:
-                raise ModelProviderUnavailableError(f"DeepSeek performance explanation HTTP {response.status_code}")
+                raise ModelProviderUnavailableError(f"OpenCode Go performance explanation HTTP {response.status_code}")
             content = response.json()["choices"][0]["message"]["content"]
             if isinstance(content, str) and content.startswith("```"):
                 content = content.split("\n", 1)[-1].rsplit("```", 1)[0]
             payload = json.loads(content)
             required = ("summary", "strengths", "risks", "changes", "limitations", "evidence_refs")
             if not isinstance(payload, dict) or any(key not in payload for key in required):
-                raise ValueError("DeepSeek performance explanation schema mismatch")
+                raise ValueError("OpenCode Go performance explanation schema mismatch")
             if not isinstance(payload["summary"], str) or any(not isinstance(payload[key], list) for key in required[1:]):
-                raise ValueError("DeepSeek performance explanation types mismatch")
-            payload["provider"] = "deepseek"
+                raise ValueError("OpenCode Go performance explanation types mismatch")
+            payload["provider"] = self.provider_name
             payload["model"] = self.model_name
             payload["status"] = "ready"
             return payload
