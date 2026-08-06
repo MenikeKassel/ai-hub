@@ -9,8 +9,28 @@ from pathlib import Path
 from typing import Any
 
 
-WORKSPACE_ROOT = Path(os.environ.get("AI_WORKSPACE_ROOT", r"<AI_HUB_HOME>"))
-DEFAULT_WORKSPACE = WORKSPACE_ROOT / "ai-hub"
+def _resolve_paths() -> tuple[Path, Path]:
+    """Resolve (WORKSPACE_ROOT, DEFAULT_WORKSPACE).
+
+    Priority: AI_HUB_HOME (repo root) → AI_WORKSPACE_ROOT (legacy parent
+    directory) → derive from this script's own location. When AI_HUB_HOME
+    is set but does not exist, fail loudly with a clear error.
+    """
+    hub = os.environ.get("AI_HUB_HOME")
+    if hub:
+        root = Path(hub).resolve()
+        if not root.is_dir():
+            raise RuntimeError(f"AI_HUB_HOME is set but does not exist: {hub}")
+        return root, root
+    workspace_root = os.environ.get("AI_WORKSPACE_ROOT")
+    if workspace_root:
+        root = Path(workspace_root).resolve()
+        return root, root / "ai-hub"
+    root = Path(__file__).resolve().parents[2]
+    return root, root
+
+
+WORKSPACE_ROOT, DEFAULT_WORKSPACE = _resolve_paths()
 DELEGATE = DEFAULT_WORKSPACE / "_automation" / "codex-delegate" / "invoke_codex.py"
 
 

@@ -23,21 +23,19 @@ import httpx
 
 from kol_posts import DeepSeekCredentialStore, ModelProviderUnavailableError
 from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
-from kol_tracker import EventRecord, KolStore, is_executable_event, is_long_event
+from kol_tracker import (
+    EventRecord,
+    KolStore,
+    PRIMARY_WARNINGS,
+    is_executable_event,
+    is_long_event,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 PERFORMANCE_VERSION = "kol-performance-v3"
 HORIZONS = ("1W", "1M", "3M", "6M")
 RECENT_WINDOWS = (7, 30, 90)
-PRIMARY_WARNINGS = {
-    "conditional_intraday_entry_unverified",
-    "one_price_limit_suspected",
-    "data_conflict",
-    "source_conflict",
-    "secondhand",
-    "retrospective",
-}
 
 
 def _number(value: Any) -> float | None:
@@ -78,6 +76,20 @@ def _warning_tokens(event: EventRecord) -> set[str]:
     return {item.strip() for item in event.execution_warning.split(";") if item.strip()}
 
 
+def _is_executable_long(event: EventRecord) -> bool:
+    """Long events that are executable and free of primary execution warnings.
+
+    Mirrors the primary-universe rule (PRIMARY_WARNINGS + is_executable_event)
+    without the post-store evidence checks, so it can count the executable long
+    universe from the event table alone.
+    """
+    return (
+        is_long_event(event)
+        and is_executable_event(event)
+        and not (_warning_tokens(event) & PRIMARY_WARNINGS)
+    )
+
+
 def _parse_post_id(event: EventRecord) -> str:
     if event.source_post_id:
         return event.source_post_id
@@ -114,6 +126,18 @@ class BatchOutcome:
     max_favorable: float
 
 
+@dataclass(frozen=True)
+class AuditCounts:
+    """Per-identity event counts that are independent of the return sample.
+
+    These are audit-caliber counters over the active/completed event table and
+    do not follow the window/horizon filters that shape the return metrics.
+    """
+
+    short_by_identity: dict[str, int]
+    executable_long_by_identity: dict[str, int]
+
+
 def bootstrap_ci(values: list[float], *, seed: str, iterations: int = 2000) -> tuple[float, float] | None:
     """Return a deterministic percentile CI for the median, if sample size permits."""
     if len(values) < 5:
@@ -130,11 +154,31 @@ def bootstrap_ci(values: list[float], *, seed: str, iterations: int = 2000) -> t
 
 
 def _metrics(outcomes: list[BatchOutcome], *, input_key: str) -> dict[str, Any]:
+    """Return-sample metrics plus directional event counts.
+
+    Field caliber (documented, stable since kol-performance-v3):
+    - long_event_count: long events inside this metrics view's return sample
+      (identical to event_count; follows the window/horizon filters).
+    - short_event_count: short events excluded from returns (audit caliber,
+      does not follow window/horizon filters; the service overrides the 0
+      default with the per-identity audit count).
+    - executable_long_event_count: long events that are executable and free of
+      primary execution warnings (audit caliber; the service overrides the
+      long_event_count fallback with the per-identity audit count).
+    - audit_event_count: audit-retained event total = long_event_count +
+      short_event_count.
+    Returns are computed on long events only; short events never enter the
+    return sample, win rate, or ranking.
+    """
     if not outcomes:
         return {
             "batch_count": 0,
             "samples": 0,
             "event_count": 0,
+            "long_event_count": 0,
+            "short_event_count": 0,
+            "executable_long_event_count": 0,
+            "audit_event_count": 0,
             "recommendation_days": 0,
             "unique_symbols": 0,
             "unmatured_batch_count": 0,
@@ -156,10 +200,15 @@ def _metrics(outcomes: list[BatchOutcome], *, input_key: str) -> dict[str, Any]:
     mae = [item.max_adverse for item in outcomes]
     mfe = [item.max_favorable for item in outcomes]
     ci = bootstrap_ci(excess, seed=input_key)
+    long_event_count = sum(len(item.event_ids) for item in outcomes)
     return {
         "batch_count": len(outcomes),
         "samples": len(outcomes),
-        "event_count": sum(len(item.event_ids) for item in outcomes),
+        "event_count": long_event_count,
+        "long_event_count": long_event_count,
+        "short_event_count": 0,
+        "executable_long_event_count": long_event_count,
+        "audit_event_count": long_event_count,
         "recommendation_days": len({item.posted_at[:10] for item in outcomes}),
         "unique_symbols": len({symbol for item in outcomes for symbol in item.symbols}),
         "unmatured_batch_count": 0,
@@ -507,16 +556,25 @@ class KolPerformanceService:
                 pass
         return events, identities, primary
 
-    def _outcomes(self, *, as_of: date, horizon: str, primary_only: bool | None) -> tuple[list[BatchOutcome], set[str], set[str]]:
+    def _outcomes(
+        self, *, as_of: date, horizon: str, primary_only: bool | None
+    ) -> tuple[list[BatchOutcome], set[str], set[str], AuditCounts]:
         events, identities, primary = self._events_and_identities()
         event_by_id = {event.event_id: event for event in events}
         all_batch_keys: set[str] = set()
+        short_by_identity: dict[str, int] = {}
+        executable_long_by_identity: dict[str, int] = {}
         for event in events:
             identity = identities[self.resolve_identity(event).key]
             if event.status not in {"active", "completed"}:
                 continue
             if not is_long_event(event):
+                # Short events never enter the return pipeline; they are
+                # counted here so the audit totals keep them visible.
+                short_by_identity[identity.key] = short_by_identity.get(identity.key, 0) + 1
                 continue
+            if _is_executable_long(event):
+                executable_long_by_identity[identity.key] = executable_long_by_identity.get(identity.key, 0) + 1
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
             if primary_only is False and primary.get(event.event_id, False):
@@ -574,7 +632,15 @@ class KolPerformanceService:
                 )
             )
             mature_keys.add(batch_key)
-        return outcomes, all_batch_keys - mature_keys, all_batch_keys
+        return (
+            outcomes,
+            all_batch_keys - mature_keys,
+            all_batch_keys,
+            AuditCounts(
+                short_by_identity=short_by_identity,
+                executable_long_by_identity=executable_long_by_identity,
+            ),
+        )
 
     def _row_for_identity(
         self,
@@ -585,22 +651,25 @@ class KolPerformanceService:
         window_name: str,
         primary_only: bool | None,
     ) -> dict[str, Any]:
-        outcomes, unmatured_keys, _ = self._outcomes(as_of=as_of, horizon=horizon, primary_only=primary_only)
+        outcomes, unmatured_keys, _, audit_counts = self._outcomes(as_of=as_of, horizon=horizon, primary_only=primary_only)
         matching = [item for item in outcomes if item.identity.key == identity.key]
         if window_name != "all":
             days = int(window_name)
             start = as_of - timedelta(days=days)
             matching = [item for item in matching if start.isoformat() <= item.trade_date <= as_of.isoformat()]
         metrics = _metrics(matching, input_key=f"{as_of}|{identity.key}|{horizon}|{window_name}|{primary_only}")
+        self._apply_audit_counts(metrics, identity, audit_counts)
         # Count the maturity backlog for the same KOL even when the recent window is empty.
         metrics["unmatured_batch_count"] = sum(
             1 for key in unmatured_keys if key.startswith(identity.key + "|")
         )
         tier_source = {}
         for item_horizon in HORIZONS:
-            values, _, _ = self._outcomes(as_of=as_of, horizon=item_horizon, primary_only=primary_only)
+            values, _, _, horizon_audit = self._outcomes(as_of=as_of, horizon=item_horizon, primary_only=primary_only)
             values = [item for item in values if item.identity.key == identity.key]
-            tier_source[item_horizon] = _metrics(values, input_key=f"{as_of}|{identity.key}|{item_horizon}|all|{primary_only}")
+            horizon_metrics = _metrics(values, input_key=f"{as_of}|{identity.key}|{item_horizon}|all|{primary_only}")
+            self._apply_audit_counts(horizon_metrics, identity, horizon_audit)
+            tier_source[item_horizon] = horizon_metrics
         tier, rank_horizon = _tier(tier_source)
         row = {
             "kol_key": identity.key,
@@ -621,6 +690,19 @@ class KolPerformanceService:
         }
         row["narrative"] = _rule_narrative(identity.display_name, tier, metrics)
         return row
+
+    @staticmethod
+    def _apply_audit_counts(metrics: dict[str, Any], identity: KolIdentity, audit_counts: AuditCounts) -> None:
+        """Overlay audit-caliber directional counts onto a metrics dict.
+
+        long_event_count stays the return-sample count; short_event_count and
+        executable_long_event_count are audit-caliber (full active/completed
+        universe for the identity, independent of window/horizon/primary_only).
+        audit_event_count is the audit-retained total = long + short.
+        """
+        metrics["short_event_count"] = audit_counts.short_by_identity.get(identity.key, 0)
+        metrics["executable_long_event_count"] = audit_counts.executable_long_by_identity.get(identity.key, 0)
+        metrics["audit_event_count"] = metrics["long_event_count"] + metrics["short_event_count"]
 
     @staticmethod
     def _rank(rows: list[dict[str, Any]], horizon: str) -> None:

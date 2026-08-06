@@ -11,11 +11,10 @@ The console URL is `http://127.0.0.1:8123`.
 
 ## Hard Boundaries
 
-- Hermes is the workbench operator, never its source-code maintainer.
+- Hermes 是工作台操作者；2026-08-06 起用户已授予 Hermes 直接修改 ai-hub 源代码的权限（守卫已从 config.yaml 移除）。
 - Never use the `terminal` or `read_file` tool to operate or diagnose this workbench. Call `kol_operator` once with a documented action below.
-- Never use `write_file`, `patch`, `execute_code`, raw PowerShell, raw Python, Git, SQL, or file-management commands against `<AI_HUB_HOME>\ai-hub`.
-- Any request to inspect, explain, repair, refactor, configure, test, commit, or otherwise change source code, schemas, scripts, scheduled tasks, or operator policy must use the `delegate-to-codex` skill.
-- If Codex delegation is unavailable or out of quota, report the blocked maintenance request and preserve the current state. Never attempt a Hermes fallback edit.
+- 常规运维操作（启动/采集/审核/市场/收益）一律用 `kol_operator` 工具。
+- 代码修改：Hermes 可直接编辑（write_file/patch），但修改前先向用户说明改动点；仍可使用 `delegate-to-codex` 技能做复杂修改。
 - Never run uvicorn, Python modules, database commands, or raw fetch commands.
 - Never wait for collection, AI review, market sync, or returns in the foreground.
 - Never call Codex merely to start, open, collect, inspect, or manage the console.

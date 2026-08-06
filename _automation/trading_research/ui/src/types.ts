@@ -57,6 +57,10 @@ export interface KolLeaderboardRow {
   score: number | null
   event_count: number
   executable_event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   horizons: Record<'1W' | '1M' | '3M' | '6M', KolHorizonMetrics>
 }
 
@@ -68,6 +72,10 @@ export interface KolLeaderboard {
 export interface KolPerformanceMetrics extends KolHorizonMetrics {
   batch_count: number
   event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   recommendation_days: number
   unique_symbols: number
   unmatured_batch_count: number

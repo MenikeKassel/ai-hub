@@ -119,24 +119,15 @@ class HermesOperatorContractTests(unittest.TestCase):
         installer = (ROOT / "scripts" / "install-hermes-kol-research.ps1").read_text(
             encoding="utf-8"
         )
-        guard = (ROOT / "scripts" / "hermes_ai_hub_source_guard.py").read_text(
-            encoding="utf-8"
-        )
 
-        self.assertIn("operator, never its source-code maintainer", skill)
-        self.assertIn("must use the `delegate-to-codex` skill", skill)
-        self.assertIn("Never attempt a Hermes fallback edit", skill)
+        self.assertIn("Hermes 是工作台操作者", skill)
+        self.assertIn("2026-08-06 起用户已授予 Hermes 直接修改 ai-hub 源代码的权限", skill)
         self.assertIn("Use only the native `kol_operator` tool", skill)
         self.assertIn("Never use the `terminal` or `read_file` tool", skill)
-        self.assertIn("pre_tool_call", installer)
-        self.assertIn("ai-hub-source-guard.py", installer)
-        self.assertIn("shell-hooks-allowlist.json", installer)
-        self.assertIn("hermes_operator_plugin.py", installer)
-        self.assertIn('if tool_name in {"write_file", "patch"}', guard)
-        self.assertIn('if tool_name in {"terminal", "execute_code"}', guard)
-        self.assertIn('if tool_name == "delegate_task"', guard)
-        self.assertIn("operation-only", guard)
-        self.assertNotIn("ALLOWED_OPERATION_PATHS", guard)
+        self.assertNotIn("pre_tool_call", installer)
+        self.assertNotIn("ai-hub-source-guard.py", installer)
+        self.assertNotIn("shell-hooks-allowlist.json", installer)
+        self.assertNotIn("hermes_ai_hub_source_guard.py", installer)
 
 
 if __name__ == "__main__":

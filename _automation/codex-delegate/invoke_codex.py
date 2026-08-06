@@ -12,7 +12,25 @@ import time
 from pathlib import Path
 
 
-DEFAULT_WORKSPACE = Path(r"<AI_HUB_HOME>\ai-hub")
+def _default_workspace() -> Path:
+    """Repo root: AI_HUB_HOME → AI_WORKSPACE_ROOT/ai-hub → script location."""
+    hub = os.environ.get("AI_HUB_HOME")
+    if hub:
+        return Path(hub).resolve()
+    workspace_root = os.environ.get("AI_WORKSPACE_ROOT")
+    if workspace_root:
+        return Path(workspace_root).resolve() / "ai-hub"
+    return Path(__file__).resolve().parents[2]
+
+
+def _workspace_arg(value: str) -> Path:
+    path = Path(value).resolve()
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError(f"workspace not found: {path}")
+    return path
+
+
+DEFAULT_WORKSPACE = _default_workspace()
 MAX_DIAGNOSTIC_CHARS = 4000
 
 
@@ -25,11 +43,26 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--task-base64", help="UTF-8 task encoded as Base64.")
     source.add_argument("--prompt-file", type=Path, help="UTF-8 file containing the task.")
     source.add_argument("--stdin", action="store_true", help="Read the task from stdin.")
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--workspace",
+        type=_workspace_arg,
+        default=None,
+        help=(
+            "Absolute workspace path (default: $AI_HUB_HOME, else "
+            "$AI_WORKSPACE_ROOT\\ai-hub, else the repository root derived "
+            "from this script's location)."
+        ),
+    )
     parser.add_argument("--mode", choices=("read-only", "write"), default="write")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.workspace is None:
+        try:
+            args.workspace = _workspace_arg(str(_default_workspace()))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+    return args
 
 
 def read_task(args: argparse.Namespace) -> str:

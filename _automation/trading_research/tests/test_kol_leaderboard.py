@@ -87,6 +87,49 @@ class KolLeaderboardTests(unittest.TestCase):
         self.assertIsNone(alpha["rank"])
         self.assertEqual(1, beta["rank"])
 
+    def test_directional_event_counts_split_long_and_short(self) -> None:
+        events = [
+            event("A-1", "Alpha"),
+            event("A-2", "Alpha"),
+            event("A-3", "Alpha"),
+            event("A-S1", "Alpha", direction="short"),
+            event("A-S2", "Alpha", direction="short"),
+            event("A-W1", "Alpha", warning="conditional_intraday_entry_unverified"),
+            event("A-W2", "Alpha", warning="secondhand"),
+        ]
+        checkpoints = [
+            checkpoint("A-1", 0.04),
+            checkpoint("A-2", 0.03),
+            checkpoint("A-3", 0.02),
+        ]
+        rows = build_kol_leaderboard(events, checkpoints)
+        alpha = next(item for item in rows if item["kol_name"] == "Alpha")
+
+        self.assertEqual(7, alpha["event_count"])
+        self.assertEqual(5, alpha["long_event_count"])
+        self.assertEqual(2, alpha["short_event_count"])
+        # Legacy caliber: long and executable (NON_EXECUTABLE_WARNINGS only).
+        self.assertEqual(4, alpha["executable_event_count"])
+        # Shared caliber with kol_performance: executable and free of primary warnings.
+        self.assertEqual(3, alpha["executable_long_event_count"])
+        self.assertEqual(7, alpha["audit_event_count"])
+        self.assertEqual(3, alpha["horizons"]["1M"]["samples"])
+
+    def test_short_only_kol_reports_counts_without_samples(self) -> None:
+        events = [
+            event("B-1", "Beta", direction="short"),
+            event("B-2", "Beta", direction="short"),
+        ]
+        rows = build_kol_leaderboard(events, [])
+        beta = next(item for item in rows if item["kol_name"] == "Beta")
+
+        self.assertEqual(0, beta["long_event_count"])
+        self.assertEqual(2, beta["short_event_count"])
+        self.assertEqual(0, beta["executable_long_event_count"])
+        self.assertEqual(2, beta["audit_event_count"])
+        self.assertEqual(0, beta["horizons"]["1M"]["samples"])
+        self.assertEqual("collecting", beta["tier"])
+
 
 if __name__ == "__main__":
     unittest.main()

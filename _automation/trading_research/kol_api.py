@@ -751,6 +751,10 @@ def create_app(
                 "rank_horizon": item["rank_horizon"],
                 "score": None,
                 "event_count": item["horizons"]["1W"]["event_count"],
+                "long_event_count": item["horizons"]["1W"]["long_event_count"],
+                "short_event_count": item["horizons"]["1W"]["short_event_count"],
+                "executable_long_event_count": item["horizons"]["1W"]["executable_long_event_count"],
+                "audit_event_count": item["horizons"]["1W"]["audit_event_count"],
                 "executable_event_count": item["horizons"]["1W"]["event_count"],
                 "horizons": horizons,
             })
@@ -761,6 +765,7 @@ def create_app(
                 "score": None,
                 "direction_policy": "short events are retained for audit but excluded from A-share return statistics",
                 "sample_policy": "small long-only samples are shown but never formally ranked",
+                "counting_policy": "long_event_count counts the long events in the return sample; short_event_count counts excluded short events (audit only, independent of window/horizon); executable_long_event_count counts long events free of primary execution warnings; audit_event_count = long_event_count + short_event_count",
             },
             "as_of": result["as_of"],
             "rows": rows,

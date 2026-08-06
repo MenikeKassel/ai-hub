@@ -104,7 +104,7 @@ enable_zhihu_local_browser: "true"
 zhihu_local_browser: "edge"
 zhihu_local_browser_path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
 zhihu_local_browser_profile: "Default"
-zhihu_local_user_data_dir: "<USER_HOME>\\AppData\\Local\\hermes\\browser-profiles\\zhihu-edge"
+zhihu_local_user_data_dir: "C:\\Users\\YOUR_USER\\AppData\\Local\\hermes\\browser-profiles\\zhihu-edge"
 zhihu_local_cdp_port: 9222
 zhihu_local_max_answers: 12
 zhihu_local_max_scrolls: 10
@@ -117,7 +117,7 @@ obsidian_project_allowlist: "交易系统;KOL指数;基本面量化系统"
 
 ## Notes
 
-- `NOTION_API_KEY` is loaded from `<USER_HOME>\.hermes\.env` first, then from `<USER_HOME>\AppData\Local\hermes\.env`.
+- `NOTION_API_KEY` is loaded from `C:\Users\YOUR_USER\.hermes\.env` first, then from `C:\Users\YOUR_USER\AppData\Local\hermes\.env`.
 - The pipeline creates the minimum Notion properties if they are missing.
 - `/readlater` writes to Notion only.
 - Obsidian is trading-only: only `交易系统`, `KOL指数`, and `基本面量化系统` items are written to `<OBSIDIAN_VAULT>`. Other captures remain in Notion.

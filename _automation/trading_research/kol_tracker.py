@@ -24,6 +24,18 @@ NON_EXECUTABLE_WARNINGS = {
     "one_price_limit_suspected",
     "conditional_intraday_entry_unverified",
 }
+# Primary execution warnings: events carrying any of these tokens are excluded
+# from the primary (executable) long-only return universe, but remain in audit
+# counts.  Shared by kol_performance and kol_leaderboard so the two pipelines
+# count the executable long universe with the same caliber.
+PRIMARY_WARNINGS = {
+    "conditional_intraday_entry_unverified",
+    "one_price_limit_suspected",
+    "data_conflict",
+    "source_conflict",
+    "secondhand",
+    "retrospective",
+}
 
 EVENT_FIELDS = [
     "event_id",
