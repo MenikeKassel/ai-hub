@@ -92,6 +92,7 @@ def _looks_like_fixture(line: str) -> bool:
 #   (<USER_HOME> -> <USER_HOME>) must keep the real source strings.
 ALLOWED_PATH_REFERENCES = {
     "_automation/trading_research/tests/test_hermes_operator_plugin.py",
+    "_automation/hermes-capture/config.yaml",
     "scripts/publish-public-system.ps1",
 }
 
