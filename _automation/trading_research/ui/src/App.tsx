@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { Activity, Archive, BarChart3, Database, Layers3, ListChecks, Radio, Rows3, Users } from 'lucide-react'
+import { Activity, Archive, BarChart3, Database, ListChecks, Radio, Rows3, Users } from 'lucide-react'
 import PipelineStatusBar from './components/PipelineStatusBar'
 
 const ReviewQueue = lazy(() => import('./pages/ReviewQueue'))
@@ -9,15 +9,13 @@ const Kols = lazy(() => import('./pages/Kols'))
 const KolPerformance = lazy(() => import('./pages/KolPerformance'))
 const System = lazy(() => import('./pages/System'))
 const StockLeads = lazy(() => import('./pages/StockLeads'))
-const BoardMainline = lazy(() => import('./pages/BoardMainline'))
 
-type PageKey = 'reviews' | 'events' | 'backtests' | 'boards' | 'performance' | 'kols' | 'system' | 'history'
+type PageKey = 'reviews' | 'events' | 'backtests' | 'performance' | 'kols' | 'system' | 'history'
 
 const pages: Array<{ key: PageKey; label: string; shortLabel: string; icon: typeof Activity }> = [
   { key: 'reviews', label: '今日审核', shortLabel: '审核', icon: ListChecks },
   { key: 'events', label: '正式事件', shortLabel: '事件', icon: Rows3 },
   { key: 'backtests', label: '收益审计', shortLabel: '收益', icon: Activity },
-  { key: 'boards', label: '板块主线', shortLabel: '板块', icon: Layers3 },
   { key: 'performance', label: 'KOL表现', shortLabel: '表现', icon: BarChart3 },
   { key: 'kols', label: 'KOL管理', shortLabel: 'KOL', icon: Users },
   { key: 'system', label: '数据健康', shortLabel: '健康', icon: Database },
@@ -51,7 +49,6 @@ export default function App() {
       {page === 'reviews' && <ReviewQueue />}
       {page === 'events' && <EventManagement />}
       {page === 'backtests' && <Backtests />}
-      {page === 'boards' && <BoardMainline />}
       {page === 'performance' && <KolPerformance />}
       {page === 'kols' && <Kols />}
       {page === 'system' && <System />}

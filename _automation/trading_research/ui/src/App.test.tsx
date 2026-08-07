@@ -268,50 +268,6 @@ describe('KOL morning audit workbench', () => {
     expect(await screen.findByRole('heading', { name: '正式事件' })).toBeInTheDocument()
   })
 
-  it('shows the board mainline workbench with transparent RPS status', async () => {
-    const board = {
-      board_key: 'industry:BK0001', board_code: 'BK0001', board_name: '示例行业',
-      board_type: 'industry', trade_date: reviewDate, close: 1234.5, turnover: 2,
-      up_count: 8, down_count: 2, leader_name: '示例股份', leader_change: 0.05,
-      return_50: 0.2, return_120: 0.3, return_250: 0.4, rps_50: 95,
-      rps_120: 90, rps_250: 88, breadth: 0.8, turnover_ratio_20: 1.2,
-      status: 'mainline_candidate', coverage_ratio: 1, warnings: [],
-    }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const path = String(input)
-      if (path === '/api/pipeline/status') return response({ lagging_symbols: [], refresh: {} })
-      if (path === '/api/board-mainline/health') return response({
-        status: 'ready', formula_version: 'board-rps-v1',
-        catalog_counts: { industry: 86 }, rps_counts: { industry: 86 },
-        latest_trade_dates: { industry: reviewDate }, pending_backfill: 0, latest_run: null,
-      })
-      if (path.startsWith('/api/board-mainline?')) return response({
-        items: [board], total: 1, page: 1, page_size: 200, total_pages: 1,
-      })
-      if (path.includes('/series?')) return response([{
-        trade_date: reviewDate, open: 1200, high: 1250, low: 1190, close: 1234.5,
-        volume: 1000, amount: 1234500, turnover: 2, up_count: 8, down_count: 2,
-        source_kind: 'history', rps_50: 95, rps_120: 90, rps_250: 88,
-        breadth: 0.8, turnover_ratio_20: 1.2, status: 'mainline_candidate', warnings: [],
-      }])
-      if (path.startsWith('/api/board-mainline/BK0001')) return response({
-        board_key: board.board_key, board_code: board.board_code, board_name: board.board_name,
-        board_type: board.board_type, status: 'active', provider: 'fixture',
-        first_seen_at: reviewDate, last_seen_at: reviewDate, updated_at: reviewDate,
-        latest: board, members: [], related_events: [],
-      })
-      return response([])
-    }))
-    renderApp()
-    fireEvent.click(screen.getAllByRole('button', { name: /板块主线/ })[0])
-
-    expect(await screen.findByRole('heading', { name: '板块主线' })).toBeInTheDocument()
-    expect(await screen.findAllByText('示例行业')).not.toHaveLength(0)
-    expect(screen.getAllByText('主线候选').length).toBeGreaterThan(0)
-    expect(screen.getByText('95.0')).toBeInTheDocument()
-    expect(screen.queryByText('买入信号')).not.toBeInTheDocument()
-  })
-
   it('shows event-time technical context and MFE without a trading score', async () => {
     const event = {
       event_id: 'KOL-CONTEXT-1', kol_name: '示例KOL', platform: 'X', source_url: draft.url,

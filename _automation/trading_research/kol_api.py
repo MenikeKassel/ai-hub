@@ -57,7 +57,6 @@ from market_data import FreeStockDBMarketProvider, Instrument, MarketStore
 from market_indicators import INDICATOR_VERSION, compute_daily_indicators
 from freestockdb_runtime import FreeStockDBRuntime
 from kol_intraday import backfill_event_intraday
-from board_mainline import BoardMainlineStore, FallbackBoardProvider, sync_board_snapshot
 from event_dossier import EventDossierService
 from event_research_ai import build_event_research_interpreter
 from event_research_service import EventMethodResearchService
@@ -272,10 +271,6 @@ class MarketSyncRequest(BaseModel):
     end: date | None = None
 
 
-class BoardSyncRequest(BaseModel):
-    as_of: date | None = None
-
-
 class FreeStockDBUpdateRequest(BaseModel):
     dry_run: bool = False
 
@@ -368,7 +363,6 @@ def create_app(
         config.freestockdb_url,
         runtime_root=config.runtime_root,
     )
-    board_store = BoardMainlineStore(market_store)
     review_agent = ReviewAgentRepository(post_store)
     recommendation_drafts = RecommendationDraftRepository(post_store)
     credentials = credential_store or KeyringCredentialStore()
@@ -418,7 +412,6 @@ def create_app(
     app.state.kol_performance = performance
     app.state.market_store = market_store
     app.state.freestockdb_runtime = freestockdb_runtime
-    app.state.board_store = board_store
     app.state.event_dossier = event_dossier
     app.state.event_research = event_research
     app.state.review_agent = review_agent
@@ -589,28 +582,6 @@ def create_app(
             )
         extract_leads_for_post(post_id)
         return result
-
-    def board_with_related_events(board_code: str, board_type: str | None) -> dict[str, Any]:
-        board = board_store.get_board(board_code, board_type)
-        if board is None:
-            raise HTTPException(404, "board not found")
-        symbols = {str(item["symbol"]) for item in board.get("members", [])}
-        board["related_events"] = [
-            {
-                "event_id": event.event_id,
-                "kol_name": event.kol_name,
-                "platform": event.platform,
-                "posted_at": event.posted_at,
-                "symbol": event.symbol,
-                "security_name": event.security_name,
-                "direction": event.direction,
-                "status": event.status,
-                "source_url": event.source_url,
-            }
-            for event in event_store.load_events()
-            if event.status in {"active", "completed"} and event.symbol in symbols
-        ]
-        return board
 
     def technical_context_for(event: Any) -> dict[str, Any] | None:
         return market_store.get_event_technical_context(
@@ -1597,86 +1568,6 @@ def create_app(
             "row_count": len(rows),
             "rows": rows,
         }
-
-    @app.get("/api/board-mainline/health")
-    def board_mainline_health() -> dict[str, Any]:
-        return board_store.health()
-
-    @app.get("/api/board-mainline")
-    def list_board_mainline(
-        board_type: str = Query(default="industry", pattern="^(industry|concept)$"),
-        status: str = "",
-        q: str = "",
-        as_of: date | None = None,
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=100, ge=1, le=200),
-        sort_by: str = Query(
-            default="rps_50",
-            pattern="^(rps_50|rps_120|rps_250|breadth|turnover_ratio_20|board_name)$",
-        ),
-        descending: bool = True,
-    ) -> dict[str, Any]:
-        return board_store.list_mainline(
-            board_type=board_type,
-            status=status,
-            query=q,
-            as_of=as_of,
-            page=page,
-            page_size=page_size,
-            sort_by=sort_by,
-            descending=descending,
-        )
-
-    @app.get("/api/board-mainline/{board_code}/series")
-    def board_mainline_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        limit: int = Query(default=320, ge=1, le=1000),
-    ) -> list[dict[str, Any]]:
-        if board_store.get_board(board_code, board_type) is None:
-            raise HTTPException(404, "board not found")
-        return board_store.series(board_code, board_type=board_type, limit=limit)
-
-    @app.get("/api/board-mainline/{board_code}/rank-series")
-    def board_rank_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        window: int = Query(default=50, ge=1, le=250),
-        range_name: str = Query(default="120", alias="range", pattern="^(all|120|250)$"),
-    ) -> dict[str, Any]:
-        try:
-            return board_store.rank_series(
-                board_code,
-                board_type=board_type,
-                window=window,
-                range_name=range_name,
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.get("/api/board-mainline/{board_code}")
-    def board_mainline_detail(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-    ) -> dict[str, Any]:
-        return board_with_related_events(board_code, board_type)
-
-    def run_board_sync_job(as_of: date) -> None:
-        store = BoardMainlineStore(MarketStore(config.runtime_root / "market"))
-        result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-        if result.succeeded:
-            store.compute_rps(as_of=as_of, formula_version="board-rps-v2")
-
-    @app.post("/api/board-mainline/sync", status_code=202)
-    def sync_board_mainline(
-        body: BoardSyncRequest,
-        background_tasks: BackgroundTasks,
-    ) -> dict[str, Any]:
-        if board_store.health()["latest_run"] and board_store.health()["latest_run"]["status"] == "running":
-            return {"ok": True, "status": "already_running"}
-        as_of = body.as_of or date.today()
-        background_tasks.add_task(run_board_sync_job, as_of)
-        return {"ok": True, "status": "queued", "as_of": as_of.isoformat()}
 
     @app.get("/api/events")
     def list_events() -> list[dict[str, Any]]:

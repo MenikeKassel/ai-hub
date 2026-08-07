@@ -93,14 +93,6 @@ from purchased_daily import (
     audit_purchased_daily_archive,
     import_historical_daily,
 )
-from board_mainline import (
-    BoardMainlineStore,
-    EastmoneyBoardProvider,
-    FallbackBoardProvider,
-    backfill_boards,
-    sync_board_snapshot,
-    sync_candidate_memberships,
-)
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
@@ -3186,129 +3178,6 @@ def market_aux_fetch(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "saved": result.quality_status == "valid"}, ensure_ascii=False))
 
 
-def _board_store() -> BoardMainlineStore:
-    return BoardMainlineStore(_market_store())
-
-
-def market_board_doctor(_: argparse.Namespace) -> None:
-    store = _board_store()
-    provider = FallbackBoardProvider(
-        primary=EastmoneyBoardProvider(max_retries=1),
-    )
-    checks: dict[str, Any] = {
-        "ok": True,
-        "health": store.health(),
-        "provider": provider.name,
-        "catalog": {},
-    }
-    successes = 0
-    for board_type in ("industry", "concept"):
-        try:
-            frame = provider.fetch_catalog(board_type)
-            checks["catalog"][board_type] = {"ok": True, "rows": int(len(frame))}
-            successes += 1
-        except Exception as exc:
-            checks["catalog"][board_type] = {"ok": False, "error": str(exc)[:2000]}
-    checks["ok"] = successes > 0 or checks["health"]["status"] in {"ready", "backfilling"}
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
-
-
-def market_board_sync(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"}:
-        raise SystemExit(2)
-
-
-def market_board_backfill(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    provider = FallbackBoardProvider()
-    health = store.health()
-    catalog_total = sum(int(value) for value in health["catalog_counts"].values())
-    catalog_result: dict[str, Any] | None = None
-    if catalog_total == 0:
-        result = sync_board_snapshot(store, provider, as_of=as_of)
-        catalog_result = result.__dict__
-        if result.succeeded == 0:
-            print(
-                json.dumps(
-                    {"ok": False, "catalog": catalog_result, "health": store.health()},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            raise SystemExit(2)
-    result = backfill_boards(
-        store,
-        provider,
-        as_of=as_of,
-        days=args.days,
-        batch_size=args.batch_size,
-        board_type=None if args.board_type == "all" else args.board_type,
-    )
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "catalog": catalog_result,
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
-
-
-def market_board_rps(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of) if args.as_of else None
-    version = args.version if args.rebuild else "board-rps-v2"
-    if not re.fullmatch(r"board-rps-v\d+", version):
-        raise SystemExit("--version must look like board-rps-v2")
-    store = _board_store()
-    result = store.compute_rps(as_of=as_of, formula_version=version)
-    print(
-        json.dumps(
-            {"ok": bool(result.get("ok")), "result": result, "health": store.health()},
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if not result.get("ok"):
-        raise SystemExit(2)
-
-
-def market_board_memberships(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_candidate_memberships(
-        store,
-        FallbackBoardProvider(),
-        as_of=as_of,
-        limit=args.limit,
-    )
-    print(
-        json.dumps(
-            {
-                "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-                "result": result.__dict__,
-                "health": store.health(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
-
-
 def data_digest(args: argparse.Namespace) -> None:
     post_store = _post_store()
     post_summary = post_store.summary()
@@ -3839,42 +3708,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_market_aux.add_argument("--as-of", required=True)
     p_market_aux.set_defaults(func=market_aux_fetch)
-
-    p_board_doctor = sub.add_parser(
-        "market-board-doctor", help="check the local board RPS store and Eastmoney provider"
-    )
-    p_board_doctor.set_defaults(func=market_board_doctor)
-
-    p_board_backfill = sub.add_parser(
-        "market-board-backfill", help="resume throttled industry and concept board history backfill"
-    )
-    p_board_backfill.add_argument("--resume", action="store_true")
-    p_board_backfill.add_argument("--days", type=int, default=320)
-    p_board_backfill.add_argument("--batch-size", type=int, default=80)
-    p_board_backfill.add_argument(
-        "--board-type", choices=["all", "industry", "concept"], default="all"
-    )
-    p_board_backfill.add_argument("--as-of")
-    p_board_backfill.set_defaults(func=market_board_backfill)
-
-    p_board_sync = sub.add_parser(
-        "market-board-sync", help="update the latest board snapshot without fabricating missing data"
-    )
-    p_board_sync.add_argument("--as-of")
-    p_board_sync.set_defaults(func=market_board_sync)
-
-    p_board_rps = sub.add_parser(
-        "market-board-rps", help="recompute board RPS from normalized local history"
-    )
-    p_board_rps.add_argument("--as-of")
-    p_board_rps.add_argument("--rebuild", action="store_true")
-    p_board_rps.add_argument("--version", default="board-rps-v2")
-    p_board_rps.set_defaults(func=market_board_rps)
-
-    p_board_memberships = sub.add_parser("market-board-memberships", help=argparse.SUPPRESS)
-    p_board_memberships.add_argument("--as-of")
-    p_board_memberships.add_argument("--limit", type=int, default=20)
-    p_board_memberships.set_defaults(func=market_board_memberships)
 
     p_digest = sub.add_parser("data-digest", help="emit one combined KOL and market data summary")
     p_digest.add_argument("--notify", action="store_true")
