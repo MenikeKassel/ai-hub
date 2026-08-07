@@ -13,6 +13,7 @@ Row-level counts are directional and share the kol_performance caliber:
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from statistics import fmean, median
 from typing import Any, Iterable
@@ -23,11 +24,14 @@ from kol_tracker import EventRecord, PRIMARY_WARNINGS, is_executable_event, is_l
 HORIZONS = ("1W", "1M", "3M", "6M")
 
 
-def _number(value: Any) -> float:
+def _number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    return result if math.isfinite(result) else None
 
 
 def _warning_tokens(event: EventRecord) -> set[str]:
@@ -48,7 +52,12 @@ def _is_executable_long(event: EventRecord) -> bool:
 
 
 def _metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
-    if not rows:
+    returns = [value for value in (_number(row.get("directional_return")) for row in rows) if value is not None]
+    excess = [value for value in (_number(row.get("directional_excess_return")) for row in rows) if value is not None]
+    adverse = [value for value in (_number(row.get("max_adverse_return")) for row in rows) if value is not None]
+    if not excess:
+        # No usable return rows at all: report no samples rather than
+        # pretending the KOL lost (win_rate 0.0 on empty data).
         return {
             "samples": 0,
             "median_return": None,
@@ -58,17 +67,14 @@ def _metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
             "win_rate": None,
             "median_adverse": None,
         }
-    returns = [_number(row.get("directional_return")) for row in rows]
-    excess = [_number(row.get("directional_excess_return")) for row in rows]
-    adverse = [_number(row.get("max_adverse_return")) for row in rows]
     return {
-        "samples": len(rows),
-        "median_return": median(returns),
-        "mean_return": fmean(returns),
+        "samples": len(excess),
+        "median_return": median(returns) if returns else None,
+        "mean_return": fmean(returns) if returns else None,
         "median_excess": median(excess),
         "mean_excess": fmean(excess),
         "win_rate": sum(value > 0 for value in excess) / len(excess),
-        "median_adverse": median(adverse),
+        "median_adverse": median(adverse) if adverse else None,
     }
 
 
@@ -88,13 +94,19 @@ def _score(metrics: dict[str, Any]) -> float | None:
     samples = int(metrics["samples"] or 0)
     if samples == 0:
         return None
+    median_excess = metrics.get("median_excess")
+    mean_excess = metrics.get("mean_excess")
+    win_rate = metrics.get("win_rate")
+    median_adverse = metrics.get("median_adverse")
+    if median_excess is None or mean_excess is None or win_rate is None:
+        return None
     shrinkage = samples / (samples + 10)
     performance = (
-        0.60 * float(metrics["median_excess"])
-        + 0.25 * float(metrics["mean_excess"])
-        + 0.15 * (float(metrics["win_rate"]) - 0.5)
+        0.60 * float(median_excess)
+        + 0.25 * float(mean_excess)
+        + 0.15 * (float(win_rate) - 0.5)
     )
-    downside = 0.20 * abs(min(float(metrics["median_adverse"]), 0.0))
+    downside = 0.20 * abs(min(float(median_adverse or 0.0), 0.0))
     return round(100 * shrinkage * (performance - downside), 4)
 
 

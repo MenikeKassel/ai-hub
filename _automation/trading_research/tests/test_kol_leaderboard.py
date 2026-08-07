@@ -130,6 +130,46 @@ class KolLeaderboardTests(unittest.TestCase):
         self.assertEqual(0, beta["horizons"]["1M"]["samples"])
         self.assertEqual("collecting", beta["tier"])
 
+    def test_invalid_return_values_never_fake_a_loss(self) -> None:
+        # Checkpoints whose return strings are unparsable ("x") or empty must
+        # not be counted as 0.0 returns (previously this faked win_rate 0.0
+        # and inflated the sample count for ranking).
+        events = [event(f"A-{index}", "Alpha") for index in range(5)]
+        checkpoints = [
+            checkpoint(f"A-{index}", 0.03)
+            if index % 2 == 0
+            else {
+                **checkpoint(f"A-{index}", 0.0),
+                "directional_excess_return": "x",
+                "directional_return": "",
+            }
+            for index in range(5)
+        ]
+        rows = build_kol_leaderboard(events, checkpoints)
+        alpha = next(item for item in rows if item["kol_name"] == "Alpha")
+
+        self.assertEqual(3, alpha["horizons"]["1M"]["samples"])
+        self.assertGreater(alpha["horizons"]["1M"]["win_rate"], 0.5)
+
+    def test_all_invalid_checkpoints_report_no_samples(self) -> None:
+        events = [event(f"A-{index}", "Alpha") for index in range(5)]
+        checkpoints = [
+            {
+                **checkpoint(f"A-{index}", 0.0),
+                "directional_excess_return": "not-a-number",
+                "directional_return": "",
+                "max_adverse_return": "",
+            }
+            for index in range(5)
+        ]
+        rows = build_kol_leaderboard(events, checkpoints)
+        alpha = next(item for item in rows if item["kol_name"] == "Alpha")
+
+        self.assertEqual(0, alpha["horizons"]["1M"]["samples"])
+        self.assertIsNone(alpha["score"])
+        self.assertEqual("collecting", alpha["tier"])
+        self.assertIsNone(alpha["rank"])
+
 
 if __name__ == "__main__":
     unittest.main()
