@@ -2,7 +2,6 @@
 param(
     [ValidateSet(
         "status", "doctor", "start", "open", "collect", "review", "market", "returns",
-        "board-status", "board-sync",
         "import-zhihu", "onboard-zhihu",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
         "reject-draft", "list-events", "event-action"
@@ -256,7 +255,6 @@ switch ($Action) {
                     morning = $health.morning_pipeline_task
                     market = $health.market_sync_task
                     returns = $health.return_task
-                    boards = if (Get-ScheduledTask -TaskName "Market_Board_Mainline_Daily" -ErrorAction SilentlyContinue) { "installed" } else { "missing" }
                 }
             } else { @{} }
         }
@@ -381,12 +379,6 @@ switch ($Action) {
     }
     "market" { Write-Result (Start-KolTask "Market_Data_Sync_Daily") }
     "returns" { Write-Result (Start-KolTask "KOL_Return_Tracker_Daily") }
-    "board-status" {
-        Write-Result (Invoke-KolApi "GET" "/api/board-mainline/health")
-    }
-    "board-sync" {
-        Write-Result (Start-KolTask "Market_Board_Mainline_Daily")
-    }
     "import-zhihu" {
         $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
         $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"

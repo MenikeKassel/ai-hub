@@ -19,8 +19,6 @@ ACTIONS = {
     "review",
     "market",
     "returns",
-    "board-status",
-    "board-sync",
     "import-zhihu",
     "onboard-zhihu",
     "list-kols",
@@ -40,7 +38,7 @@ KOL_OPERATOR_SCHEMA = {
         "Operate the local KOL audit workbench through its deterministic Windows "
         "operator. Use this tool, never terminal or raw Python, to start/open the "
         "console, collect posts, inspect status, manage KOLs, review explicit draft "
-        "IDs, sync market data, inspect board RPS, or update returns. This tool cannot edit source code."
+        "IDs, sync market data, or update returns. This tool cannot edit source code."
     ),
     "parameters": {
         "type": "object",

@@ -60,8 +60,6 @@ class HermesOperatorContractTests(unittest.TestCase):
             '"review"',
             '"market"',
             '"returns"',
-            '"board-status"',
-            '"board-sync"',
             '"list-kols"',
             '"add-kol"',
             '"set-kol-status"',

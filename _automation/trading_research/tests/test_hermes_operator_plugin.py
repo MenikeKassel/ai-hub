@@ -2,11 +2,15 @@
 
 import json
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_operator_plugin import KOL_OPERATOR_SCHEMA, _build_command, run_operator
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from hermes_operator_plugin import KOL_OPERATOR_SCHEMA, _build_command, run_operator  # noqa: E402
 
 
 class HermesOperatorPluginTests(unittest.TestCase):

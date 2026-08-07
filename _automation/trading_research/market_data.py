@@ -1519,6 +1519,15 @@ class MarketStore:
 
     def write_daily(self, frame: pd.DataFrame, *, symbol: str, adjustment: str) -> list[str]:
         output_paths: list[str] = []
+        if frame is None or frame.empty:
+            # Nothing to write (no new bars); never crash the sync on this.
+            return output_paths
+        required = {"trade_date"}
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise ValueError(
+                f"daily frame missing columns for {symbol}/{adjustment}: " + ", ".join(missing)
+            )
         frame = frame.copy()
         years = pd.to_datetime(frame["trade_date"]).dt.year
         with self.lock(timeout=30):
