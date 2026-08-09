@@ -19,7 +19,17 @@ class HermesOperatorPluginTests(unittest.TestCase):
 
         self.assertIn("status", action_schema["enum"])
         self.assertIn("approve-draft", action_schema["enum"])
+        self.assertIn("discover-accounts", action_schema["enum"])
+        self.assertIn("accept-candidate", action_schema["enum"])
         self.assertFalse(KOL_OPERATOR_SCHEMA["parameters"]["additionalProperties"])
+
+    def test_discovery_actions_expose_fixed_fields_without_source_mutation(self) -> None:
+        properties = KOL_OPERATOR_SCHEMA["parameters"]["properties"]
+
+        self.assertEqual("^cand_[a-f0-9]{24}$", properties["candidate_id"]["pattern"])
+        self.assertEqual(30, properties["days"]["maximum"])
+        self.assertNotIn("schema", properties)
+        self.assertNotIn("source_path", properties)
 
     @patch("hermes_operator_plugin.OPERATOR")
     @patch("hermes_operator_plugin.shutil.which", return_value=r"C:\Windows\powershell.exe")

@@ -4,7 +4,9 @@ param(
         "status", "doctor", "start", "open", "collect", "review", "market", "returns",
         "import-zhihu", "onboard-zhihu",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
-        "reject-draft", "list-events", "event-action"
+        "reject-draft", "list-events", "event-action",
+        "platform-status", "discover-accounts", "list-candidates", "score-candidate",
+        "accept-candidate", "reject-candidate", "retry-candidate", "kol-profile", "fetch-kol"
     )]
     [string]$Action = "status",
     [string]$RepoRoot = "",
@@ -12,7 +14,10 @@ param(
     [int]$Id = 0,
     [string]$Handle = "",
     [string]$DisplayName = "",
-    [ValidateSet("X", "Zhihu")]
+    [ValidateSet(
+        "X", "Zhihu", "x", "zhihu", "xiaohongshu", "douyin", "bilibili",
+        "weibo", "wechat_rss", "xueqiu", "taoguba"
+    )]
     [string]$Platform = "X",
     [string]$ProfileUrl = "",
     [string]$Domain = "",
@@ -22,6 +27,14 @@ param(
     [string]$ReviewDate = (Get-Date -Format "yyyy-MM-dd"),
     [string]$Note = "",
     [string]$EventId = "",
+    [string]$CandidateId = "",
+    [string]$Query = "",
+    [ValidateSet("", "new", "reviewing", "accepted", "rejected", "duplicate", "unavailable")]
+    [string]$CandidateState = "",
+    [ValidateRange(1, 200)]
+    [int]$Limit = 50,
+    [ValidateRange(1, 30)]
+    [int]$Days = 30,
     [ValidateSet("", "activate", "exclude", "restore", "archive")]
     [string]$EventAction = "",
     [switch]$Force
@@ -81,7 +94,11 @@ function Get-PipelineStatus {
     try {
         return Invoke-Utf8Json "GET" "$url/api/pipeline/status" $null 10
     } catch {
-        return $null
+        try {
+            return Invoke-Utf8Json "GET" "$url/api/v1/pipeline/status" $null 10
+        } catch {
+            return $null
+        }
     }
 }
 
@@ -446,5 +463,52 @@ switch ($Action) {
             $body.exclusion_reason = $Note
         }
         Write-Result (Invoke-KolApi "PATCH" "/api/events/$EventId" $body)
+    }
+    "platform-status" {
+        Write-Result (Invoke-KolApi "GET" "/api/v1/platforms")
+    }
+    "discover-accounts" {
+        if (-not $Query) { throw "discover-accounts requires -Query" }
+        $slug = $Platform.ToLowerInvariant()
+        Write-Result (Invoke-KolApi "POST" "/api/v1/discovery/runs" @{
+            platform = $slug
+            query = $Query
+            limit = $Limit
+        })
+    }
+    "list-candidates" {
+        $parameters = @()
+        if ($Platform -and $Platform -notin @("X", "Zhihu")) {
+            $parameters += "platform=$([Uri]::EscapeDataString($Platform.ToLowerInvariant()))"
+        }
+        if ($CandidateState) {
+            $parameters += "state=$([Uri]::EscapeDataString($CandidateState))"
+        }
+        $parameters += "limit=$Limit"
+        Write-Result (Invoke-KolApi "GET" ("/api/v1/candidates?" + ($parameters -join "&")))
+    }
+    "score-candidate" {
+        if (-not $CandidateId) { throw "score-candidate requires -CandidateId" }
+        Write-Result (Invoke-KolApi "POST" "/api/v1/candidates/$CandidateId/score" @{})
+    }
+    "accept-candidate" {
+        if (-not $CandidateId) { throw "accept-candidate requires -CandidateId" }
+        Write-Result (Invoke-KolApi "POST" "/api/v1/candidates/$CandidateId/accept" @{ note = $Note })
+    }
+    "reject-candidate" {
+        if (-not $CandidateId -or -not $Note) { throw "reject-candidate requires -CandidateId and -Note" }
+        Write-Result (Invoke-KolApi "POST" "/api/v1/candidates/$CandidateId/reject" @{ note = $Note })
+    }
+    "retry-candidate" {
+        if (-not $CandidateId) { throw "retry-candidate requires -CandidateId" }
+        Write-Result (Invoke-KolApi "POST" "/api/v1/candidates/$CandidateId/retry" @{})
+    }
+    "kol-profile" {
+        if ($Id -le 0) { throw "kol-profile requires -Id" }
+        Write-Result (Invoke-KolApi "GET" "/api/v1/kols/$Id/profile")
+    }
+    "fetch-kol" {
+        if ($Id -le 0) { throw "fetch-kol requires -Id" }
+        Write-Result (Invoke-KolApi "POST" "/api/v1/kols/$Id/fetch" @{ count = [Math]::Min($Limit, 100); days = $Days })
     }
 }

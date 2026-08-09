@@ -29,6 +29,15 @@ ACTIONS = {
     "reject-draft",
     "list-events",
     "event-action",
+    "platform-status",
+    "discover-accounts",
+    "list-candidates",
+    "score-candidate",
+    "accept-candidate",
+    "reject-candidate",
+    "retry-candidate",
+    "kol-profile",
+    "fetch-kol",
 }
 
 
@@ -47,7 +56,21 @@ KOL_OPERATOR_SCHEMA = {
             "id": {"type": "integer", "minimum": 1},
             "handle": {"type": "string"},
             "display_name": {"type": "string"},
-            "platform": {"type": "string", "enum": ["X", "Zhihu"]},
+            "platform": {
+                "type": "string",
+                "enum": [
+                    "x", "zhihu", "xiaohongshu", "douyin", "bilibili", "weibo",
+                    "wechat_rss", "xueqiu", "taoguba", "X", "Zhihu",
+                ],
+            },
+            "candidate_id": {"type": "string", "pattern": "^cand_[a-f0-9]{24}$"},
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "candidate_state": {
+                "type": "string",
+                "enum": ["new", "reviewing", "accepted", "rejected", "duplicate", "unavailable"],
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "days": {"type": "integer", "minimum": 1, "maximum": 30},
             "profile_url": {"type": "string"},
             "domain": {"type": "string"},
             "batch_size": {"type": "integer", "minimum": 1, "maximum": 31},
@@ -113,6 +136,11 @@ def _build_command(args: dict[str, Any]) -> list[str]:
         "note": "-Note",
         "event_id": "-EventId",
         "event_action": "-EventAction",
+        "candidate_id": "-CandidateId",
+        "query": "-Query",
+        "candidate_state": "-CandidateState",
+        "limit": "-Limit",
+        "days": "-Days",
     }
     for field, switch in switches.items():
         value = args.get(field)

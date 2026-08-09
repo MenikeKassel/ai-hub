@@ -70,6 +70,19 @@ class HermesOperatorContractTests(unittest.TestCase):
         ):
             self.assertIn(action, operator)
 
+        for action in (
+            '"platform-status"',
+            '"discover-accounts"',
+            '"list-candidates"',
+            '"score-candidate"',
+            '"accept-candidate"',
+            '"reject-candidate"',
+            '"retry-candidate"',
+            '"kol-profile"',
+            '"fetch-kol"',
+        ):
+            self.assertIn(action, operator)
+
     def test_operator_decodes_utf8_and_keeps_list_results_compact(self) -> None:
         operator = (ROOT / "scripts" / "hermes-kol-operator.ps1").read_text(encoding="utf-8")
 
