@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(os.environ.get("AI_HUB_HOME") or os.environ.get("AI_HUB_ROOT") or Path(__file__).resolve().parents[2])
+REPO_ROOT = Path(
+    os.environ.get("AI_HUB_HOME")
+    or os.environ.get("AI_HUB_ROOT")
+    or Path(__file__).resolve().parents[2]
+)
 OPERATOR = REPO_ROOT / "scripts" / "hermes-kol-operator.ps1"
 ACTIONS = {
     "status",
@@ -29,6 +33,8 @@ ACTIONS = {
     "reject-draft",
     "list-events",
     "event-action",
+    "start-discovery",
+    "open-discovery",
     "platform-status",
     "discover-accounts",
     "list-candidates",
@@ -59,15 +65,31 @@ KOL_OPERATOR_SCHEMA = {
             "platform": {
                 "type": "string",
                 "enum": [
-                    "x", "zhihu", "xiaohongshu", "douyin", "bilibili", "weibo",
-                    "wechat_rss", "xueqiu", "taoguba", "X", "Zhihu",
+                    "x",
+                    "zhihu",
+                    "xiaohongshu",
+                    "douyin",
+                    "bilibili",
+                    "weibo",
+                    "wechat_rss",
+                    "xueqiu",
+                    "taoguba",
+                    "X",
+                    "Zhihu",
                 ],
             },
             "candidate_id": {"type": "string", "pattern": "^cand_[a-f0-9]{24}$"},
             "query": {"type": "string", "minLength": 1, "maxLength": 500},
             "candidate_state": {
                 "type": "string",
-                "enum": ["new", "reviewing", "accepted", "rejected", "duplicate", "unavailable"],
+                "enum": [
+                    "new",
+                    "reviewing",
+                    "accepted",
+                    "rejected",
+                    "duplicate",
+                    "unavailable",
+                ],
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": 200},
             "days": {"type": "integer", "minimum": 1, "maximum": 30},
@@ -196,7 +218,9 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
             )
         return _json_result(_parse_operator_output(completed.stdout))
     except subprocess.TimeoutExpired:
-        return _json_result({"ok": False, "error": "KOL operator timed out after 90 seconds"})
+        return _json_result(
+            {"ok": False, "error": "KOL operator timed out after 90 seconds"}
+        )
     except Exception as exc:
         return _json_result({"ok": False, "error": str(exc)})
 
