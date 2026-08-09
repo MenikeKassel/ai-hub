@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -32,7 +35,10 @@ class FoundationMarketReader:
 
     def __init__(self, root: Path):
         self.root = Path(root).expanduser().resolve()
-        self._pinned_release: dict[str, Any] | None = None
+        self._active_release: ContextVar[dict[str, Any] | None] = ContextVar(
+            "ashare_foundation_release",
+            default=None,
+        )
 
     def _read_current_release(self) -> dict[str, Any]:
         pointer = self.root / "current.json"
@@ -48,9 +54,20 @@ class FoundationMarketReader:
         return value
 
     def release(self) -> dict[str, Any]:
-        if self._pinned_release is None:
-            self._pinned_release = self._read_current_release()
-        return self._pinned_release
+        return self._active_release.get() or self._read_current_release()
+
+    @contextmanager
+    def pinned_release(self) -> Iterator[dict[str, Any]]:
+        active = self._active_release.get()
+        if active is not None:
+            yield active
+            return
+        release = self._read_current_release()
+        token = self._active_release.set(release)
+        try:
+            yield release
+        finally:
+            self._active_release.reset(token)
 
     def dataset_path(self, dataset: str, release: dict[str, Any] | None = None) -> Path:
         selected = release or self.release()
@@ -66,16 +83,16 @@ class FoundationMarketReader:
 
     def health(self) -> dict[str, Any]:
         try:
-            release = self.release()
-            return {
-                "ok": True,
-                "provider": "ashare-data-foundation",
-                "read_only": True,
-                "root": str(self.root),
-                "release_id": str(release["release_id"]),
-                "as_of": str(release["as_of"]),
-                "datasets": list(release.get("datasets") or []),
-            }
+            with self.pinned_release() as release:
+                return {
+                    "ok": True,
+                    "provider": "ashare-data-foundation",
+                    "read_only": True,
+                    "root": str(self.root),
+                    "release_id": str(release["release_id"]),
+                    "as_of": str(release["as_of"]),
+                    "datasets": list(release.get("datasets") or []),
+                }
         except (FileNotFoundError, KeyError, TypeError, ValueError, OSError) as error:
             return {
                 "ok": False,
@@ -91,11 +108,11 @@ class FoundationMarketReader:
         if adjustment not in {"raw", "qfq"}:
             raise ValueError(f"unsupported adjustment: {adjustment}")
         dataset = "daily_raw" if adjustment == "raw" else "daily_adjusted"
-        release = self.release()
-        frame = pd.read_parquet(
-            self.dataset_path(dataset, release),
-            filters=[("symbol", "==", _foundation_symbol(symbol))],
-        )
+        with self.pinned_release() as release:
+            frame = pd.read_parquet(
+                self.dataset_path(dataset, release),
+                filters=[("symbol", "==", _foundation_symbol(symbol))],
+            )
         if frame.empty:
             return frame
         output = frame.copy()
@@ -110,8 +127,8 @@ class FoundationMarketReader:
             .reset_index(drop=True)
         )
 
-    def instruments(self) -> list[Instrument]:
-        release = self.release()
+    def instruments(self, release: dict[str, Any] | None = None) -> list[Instrument]:
+        release = release or self.release()
         frame = pd.read_parquet(self.dataset_path("instruments", release))
         values: list[Instrument] = []
         for row in frame.to_dict(orient="records"):
@@ -138,8 +155,8 @@ class FoundationMarketReader:
             )
         return values
 
-    def trading_dates(self) -> list[date]:
-        release = self.release()
+    def trading_dates(self, release: dict[str, Any] | None = None) -> list[date]:
+        release = release or self.release()
         frame = pd.read_parquet(
             self.dataset_path("trading_calendar", release),
             filters=[("is_open", "==", True)],
@@ -155,41 +172,58 @@ class FoundationBackedMarketStore:
         self.local_store = local_store
         self.foundation = FoundationMarketReader(foundation_root)
         self._reference_instruments: dict[str, dict[str, Any]] | None = None
+        self._reference_release_id = ""
         self._trading_dates: list[date] | None = None
+        self._calendar_release_id = ""
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.local_store, name)
 
     def bootstrap_reference_data(self) -> dict[str, Any]:
-        health = self.foundation.health()
-        if not health["ok"]:
-            return {**health, "instrument_count": 0, "calendar_count": 0}
-        instruments = self._reference_map()
-        calendar = self._calendar()
-        return {
-            **health,
-            "instrument_count": len(instruments),
-            "calendar_count": len(calendar),
-            "unchanged": True,
-            "materialized": False,
-        }
+        initial_health = self.foundation.health()
+        if not initial_health["ok"]:
+            return {**initial_health, "instrument_count": 0, "calendar_count": 0}
+        with self.foundation.pinned_release():
+            health = self.foundation.health()
+            instruments = self._reference_map()
+            calendar = self._calendar()
+            return {
+                **health,
+                "instrument_count": len(instruments),
+                "calendar_count": len(calendar),
+                "unchanged": True,
+                "materialized": False,
+            }
 
     def _reference_map(self) -> dict[str, dict[str, Any]]:
-        if self._reference_instruments is None:
+        release = self.foundation.release()
+        release_id = str(release["release_id"])
+        if self._reference_instruments is None or self._reference_release_id != release_id:
             self._reference_instruments = {
                 instrument.symbol: asdict(instrument)
-                for instrument in self.foundation.instruments()
+                for instrument in self.foundation.instruments(release)
             }
+            self._reference_release_id = release_id
         return self._reference_instruments
 
     def _calendar(self) -> list[date]:
-        if self._trading_dates is None:
-            self._trading_dates = self.foundation.trading_dates()
+        release = self.foundation.release()
+        release_id = str(release["release_id"])
+        if self._trading_dates is None or self._calendar_release_id != release_id:
+            self._trading_dates = self.foundation.trading_dates(release)
+            self._calendar_release_id = release_id
         return self._trading_dates
 
     def get_instrument(self, symbol: str) -> dict[str, Any] | None:
         reference = self._reference_map().get(str(symbol))
         workflow = self.local_store.get_instrument(str(symbol))
+        return self._merge_instrument(reference, workflow)
+
+    @staticmethod
+    def _merge_instrument(
+        reference: dict[str, Any] | None,
+        workflow: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
         if reference is None:
             return workflow
         if workflow is None:
@@ -202,23 +236,33 @@ class FoundationBackedMarketStore:
         return merged
 
     def list_instruments(self, lifecycle: str | None = None) -> list[dict[str, Any]]:
-        symbols = set(self._reference_map())
-        symbols.update(
-            item["symbol"]
-            for item in self.local_store.list_instruments()
-            if item.get("lifecycle") in {"pinned", "tracking"}
-        )
-        values = [self.get_instrument(symbol) for symbol in symbols]
-        selected = [item for item in values if item is not None]
-        if lifecycle:
-            selected = [item for item in selected if item.get("lifecycle") == lifecycle]
-        return sorted(
-            selected,
-            key=lambda item: (
-                {"pinned": 0, "tracking": 1, "archived": 2}.get(item.get("lifecycle"), 3),
-                item["symbol"],
-            ),
-        )
+        with self.foundation.pinned_release():
+            references = self._reference_map()
+            workflows = {
+                item["symbol"]: item for item in self.local_store.list_instruments()
+            }
+            symbols = set(references)
+            symbols.update(
+                symbol
+                for symbol, item in workflows.items()
+                if item.get("lifecycle") in {"pinned", "tracking"}
+            )
+            values = [
+                self._merge_instrument(references.get(symbol), workflows.get(symbol))
+                for symbol in symbols
+            ]
+            selected = [item for item in values if item is not None]
+            if lifecycle:
+                selected = [item for item in selected if item.get("lifecycle") == lifecycle]
+            return sorted(
+                selected,
+                key=lambda item: (
+                    {"pinned": 0, "tracking": 1, "archived": 2}.get(
+                        item.get("lifecycle"), 3
+                    ),
+                    item["symbol"],
+                ),
+            )
 
     def instrument_map(self) -> dict[str, dict[str, Any]]:
         return {item["symbol"]: item for item in self.list_instruments()}
@@ -261,30 +305,52 @@ class FoundationBackedMarketStore:
         ]
 
     def health(self) -> dict[str, Any]:
-        foundation = self.foundation.health()
-        instruments = self.list_instruments()
-        active_count = sum(
-            item["lifecycle"] in {"pinned", "tracking"} for item in instruments
-        )
-        return {
-            "ok": bool(foundation["ok"]),
-            "database": str(self.local_store.db_path),
-            "provider": "ashare-data-foundation",
-            "read_only": True,
-            "foundation": foundation,
-            "instrument_count": len(instruments),
-            "instrument_catalog_count": self.instrument_catalog_count(),
-            "active_instruments": active_count,
-            "coverage_count": 2 if foundation["ok"] else 0,
-            "warning_count": 0 if foundation["ok"] else 1,
-            "recent_issue_count": 0,
-            "latest_open_date": str(foundation.get("as_of") or ""),
-            "latest_daily_date": str(foundation.get("as_of") or ""),
-            "daily_data_status": "current" if foundation["ok"] else "provider_pending",
-            "lagging_symbols": [],
-            "lagging_symbol_count": 0,
-            "last_run": None,
-        }
+        initial_health = self.foundation.health()
+        if not initial_health["ok"]:
+            return {
+                "ok": False,
+                "database": str(self.local_store.db_path),
+                "provider": "ashare-data-foundation",
+                "read_only": True,
+                "foundation": initial_health,
+                "instrument_count": 0,
+                "instrument_catalog_count": 0,
+                "active_instruments": 0,
+                "coverage_count": 0,
+                "warning_count": 1,
+                "recent_issue_count": 1,
+                "latest_open_date": "",
+                "latest_daily_date": "",
+                "daily_data_status": "provider_pending",
+                "lagging_symbols": [],
+                "lagging_symbol_count": 0,
+                "last_run": None,
+            }
+        with self.foundation.pinned_release():
+            foundation = self.foundation.health()
+            instruments = self.list_instruments()
+            active_count = sum(
+                item["lifecycle"] in {"pinned", "tracking"} for item in instruments
+            )
+            return {
+                "ok": bool(foundation["ok"]),
+                "database": str(self.local_store.db_path),
+                "provider": "ashare-data-foundation",
+                "read_only": True,
+                "foundation": foundation,
+                "instrument_count": len(instruments),
+                "instrument_catalog_count": self.instrument_catalog_count(),
+                "active_instruments": active_count,
+                "coverage_count": 2 if foundation["ok"] else 0,
+                "warning_count": 0 if foundation["ok"] else 1,
+                "recent_issue_count": 0,
+                "latest_open_date": str(foundation.get("as_of") or ""),
+                "latest_daily_date": str(foundation.get("as_of") or ""),
+                "daily_data_status": "current" if foundation["ok"] else "provider_pending",
+                "lagging_symbols": [],
+                "lagging_symbol_count": 0,
+                "last_run": None,
+            }
 
     def enqueue_sync(
         self,

@@ -114,6 +114,34 @@ class FoundationMarketClientTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 store.write_daily(pd.DataFrame(), symbol="000001", adjustment="raw")
 
+    def test_release_is_pinned_per_operation_and_refreshes_afterward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            foundation_root = root / "foundation"
+            _make_foundation(foundation_root)
+            store = FoundationBackedMarketStore(
+                MarketStore(root / "market"), foundation_root
+            )
+
+            with store.foundation.pinned_release():
+                first = store.read_daily("000001")
+                pointer = json.loads(
+                    (foundation_root / "current.json").read_text(encoding="utf-8")
+                )
+                pointer["release_id"] = "new-release"
+                pointer["as_of"] = "2026-08-08"
+                (foundation_root / "current.json").write_text(
+                    json.dumps(pointer), encoding="utf-8"
+                )
+                still_pinned = store.read_daily("000001")
+
+            refreshed = store.read_daily("000001")
+            self.assertEqual("fixture-release", first.iloc[-1]["foundation_release_id"])
+            self.assertEqual(
+                "fixture-release", still_pinned.iloc[-1]["foundation_release_id"]
+            )
+            self.assertEqual("new-release", refreshed.iloc[-1]["foundation_release_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

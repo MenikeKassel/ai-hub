@@ -360,4 +360,12 @@ def create_private_app(
         app.state.discovery_store,
         score_provider or OpenCodeGoCandidateScoreProvider(),
     )
+
+    @app.middleware("http")
+    async def pin_foundation_release_for_request(request, call_next):
+        if not market_store.foundation.health()["ok"]:
+            return await call_next(request)
+        with market_store.foundation.pinned_release():
+            return await call_next(request)
+
     return app
