@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -75,13 +74,13 @@ class HermesOperatorContractTests(unittest.TestCase):
             '"discover-accounts"',
             '"list-candidates"',
             '"score-candidate"',
-            '"accept-candidate"',
             '"reject-candidate"',
             '"retry-candidate"',
             '"kol-profile"',
             '"fetch-kol"',
         ):
             self.assertIn(action, operator)
+        self.assertNotIn('"accept-candidate"', operator)
 
     def test_operator_decodes_utf8_and_keeps_list_results_compact(self) -> None:
         operator = (ROOT / "scripts" / "hermes-kol-operator.ps1").read_text(encoding="utf-8")

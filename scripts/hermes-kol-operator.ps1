@@ -7,12 +7,12 @@ param(
         "reject-draft", "list-events", "event-action",
         "start-discovery", "open-discovery",
         "platform-status", "discover-accounts", "list-candidates", "score-candidate",
-        "accept-candidate", "reject-candidate", "retry-candidate", "kol-profile", "fetch-kol"
+        "reject-candidate", "retry-candidate", "kol-profile", "fetch-kol"
     )]
     [string]$Action = "status",
     [string]$RepoRoot = "",
     [int]$Port = 8123,
-    [int]$DiscoveryPort = 8765,
+    [int]$DiscoveryPort = 8125,
     [int]$Id = 0,
     [string]$Handle = "",
     [string]$DisplayName = "",
@@ -539,10 +539,6 @@ switch ($Action) {
     "score-candidate" {
         if (-not $CandidateId) { throw "score-candidate requires -CandidateId" }
         Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/candidates/$CandidateId/score" @{})
-    }
-    "accept-candidate" {
-        if (-not $CandidateId) { throw "accept-candidate requires -CandidateId" }
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/candidates/$CandidateId/accept" @{ note = $Note })
     }
     "reject-candidate" {
         if (-not $CandidateId -or -not $Note) { throw "reject-candidate requires -CandidateId and -Note" }

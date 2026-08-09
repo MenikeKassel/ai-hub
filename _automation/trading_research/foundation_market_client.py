@@ -1,0 +1,330 @@
+﻿"""Read-only bridge from the KOL workflow to the shared A-share foundation."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from kol_audit.market.store import Instrument
+
+
+def _foundation_symbol(symbol: str) -> str:
+    value = str(symbol).strip().upper()
+    if "." in value:
+        return value
+    if not value.isdigit() or len(value) != 6:
+        raise ValueError(f"invalid A-share symbol: {symbol}")
+    if value.startswith(("4", "8", "9")):
+        exchange = "BJ"
+    elif value.startswith(("5", "6")):
+        exchange = "SH"
+    else:
+        exchange = "SZ"
+    return f"{value}.{exchange}"
+
+
+class FoundationMarketReader:
+    """Pin every read to the release selected by the atomic current pointer."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root).expanduser().resolve()
+        self._pinned_release: dict[str, Any] | None = None
+
+    def _read_current_release(self) -> dict[str, Any]:
+        pointer = self.root / "current.json"
+        if not pointer.is_file():
+            raise FileNotFoundError(f"A-share foundation pointer is missing: {pointer}")
+        value = json.loads(pointer.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, dict)
+            or not value.get("release_id")
+            or not value.get("as_of")
+        ):
+            raise ValueError(f"invalid A-share foundation pointer: {pointer}")
+        return value
+
+    def release(self) -> dict[str, Any]:
+        if self._pinned_release is None:
+            self._pinned_release = self._read_current_release()
+        return self._pinned_release
+
+    def dataset_path(self, dataset: str, release: dict[str, Any] | None = None) -> Path:
+        selected = release or self.release()
+        source_release = (selected.get("dataset_sources") or {}).get(
+            dataset
+        ) or selected["release_id"]
+        path = self.root / "warehouse" / dataset / f"release_id={source_release}"
+        if dataset not in selected.get("datasets", []) or not path.is_dir():
+            raise FileNotFoundError(
+                f"foundation dataset is unavailable: {dataset} at {path}"
+            )
+        return path
+
+    def health(self) -> dict[str, Any]:
+        try:
+            release = self.release()
+            return {
+                "ok": True,
+                "provider": "ashare-data-foundation",
+                "read_only": True,
+                "root": str(self.root),
+                "release_id": str(release["release_id"]),
+                "as_of": str(release["as_of"]),
+                "datasets": list(release.get("datasets") or []),
+            }
+        except (FileNotFoundError, KeyError, TypeError, ValueError, OSError) as error:
+            return {
+                "ok": False,
+                "provider": "ashare-data-foundation",
+                "read_only": True,
+                "root": str(self.root),
+                "error": str(error),
+            }
+
+    def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
+        if adjustment == "hfq":
+            return pd.DataFrame()
+        if adjustment not in {"raw", "qfq"}:
+            raise ValueError(f"unsupported adjustment: {adjustment}")
+        dataset = "daily_raw" if adjustment == "raw" else "daily_adjusted"
+        release = self.release()
+        frame = pd.read_parquet(
+            self.dataset_path(dataset, release),
+            filters=[("symbol", "==", _foundation_symbol(symbol))],
+        )
+        if frame.empty:
+            return frame
+        output = frame.copy()
+        output["foundation_symbol"] = output["symbol"].astype(str)
+        output["symbol"] = output["foundation_symbol"].str.split(".").str[0]
+        output["trade_date"] = pd.to_datetime(output["trade_date"]).dt.date
+        output["provider"] = "ashare-data-foundation"
+        output["foundation_release_id"] = str(release["release_id"])
+        return (
+            output.sort_values("trade_date")
+            .drop_duplicates("trade_date", keep="last")
+            .reset_index(drop=True)
+        )
+
+    def instruments(self) -> list[Instrument]:
+        release = self.release()
+        frame = pd.read_parquet(self.dataset_path("instruments", release))
+        values: list[Instrument] = []
+        for row in frame.to_dict(orient="records"):
+            foundation_symbol = str(row.get("symbol") or "")
+            symbol = foundation_symbol.split(".", 1)[0]
+            if not symbol.isdigit() or len(symbol) != 6:
+                continue
+            list_date = row.get("list_date")
+            values.append(
+                Instrument(
+                    symbol=symbol,
+                    name=str(row.get("name") or symbol),
+                    instrument_type="stock",
+                    exchange=str(
+                        row.get("exchange") or foundation_symbol.rsplit(".", 1)[-1]
+                    ),
+                    status=str(row.get("status") or "active"),
+                    list_date=list_date.isoformat()
+                    if isinstance(list_date, date)
+                    else str(list_date or ""),
+                    lifecycle="archived",
+                    source=f"ashare-foundation:{release['release_id']}",
+                )
+            )
+        return values
+
+    def trading_dates(self) -> list[date]:
+        release = self.release()
+        frame = pd.read_parquet(
+            self.dataset_path("trading_calendar", release),
+            filters=[("is_open", "==", True)],
+            columns=["trade_date"],
+        )
+        return sorted(set(pd.to_datetime(frame["trade_date"]).dt.date))
+
+
+class FoundationBackedMarketStore:
+    """Keep KOL workflow state local while sourcing all daily facts centrally."""
+
+    def __init__(self, local_store: Any, foundation_root: Path):
+        self.local_store = local_store
+        self.foundation = FoundationMarketReader(foundation_root)
+        self._reference_instruments: dict[str, dict[str, Any]] | None = None
+        self._trading_dates: list[date] | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.local_store, name)
+
+    def bootstrap_reference_data(self) -> dict[str, Any]:
+        health = self.foundation.health()
+        if not health["ok"]:
+            return {**health, "instrument_count": 0, "calendar_count": 0}
+        instruments = self._reference_map()
+        calendar = self._calendar()
+        return {
+            **health,
+            "instrument_count": len(instruments),
+            "calendar_count": len(calendar),
+            "unchanged": True,
+            "materialized": False,
+        }
+
+    def _reference_map(self) -> dict[str, dict[str, Any]]:
+        if self._reference_instruments is None:
+            self._reference_instruments = {
+                instrument.symbol: asdict(instrument)
+                for instrument in self.foundation.instruments()
+            }
+        return self._reference_instruments
+
+    def _calendar(self) -> list[date]:
+        if self._trading_dates is None:
+            self._trading_dates = self.foundation.trading_dates()
+        return self._trading_dates
+
+    def get_instrument(self, symbol: str) -> dict[str, Any] | None:
+        reference = self._reference_map().get(str(symbol))
+        workflow = self.local_store.get_instrument(str(symbol))
+        if reference is None:
+            return workflow
+        if workflow is None:
+            return dict(reference)
+        merged = {**workflow, **reference}
+        for key in ("lifecycle", "first_seen_at", "last_mentioned_at", "created_at", "updated_at"):
+            if key in workflow:
+                merged[key] = workflow[key]
+        merged["workflow_source"] = workflow.get("source", "")
+        return merged
+
+    def list_instruments(self, lifecycle: str | None = None) -> list[dict[str, Any]]:
+        symbols = set(self._reference_map())
+        symbols.update(
+            item["symbol"]
+            for item in self.local_store.list_instruments()
+            if item.get("lifecycle") in {"pinned", "tracking"}
+        )
+        values = [self.get_instrument(symbol) for symbol in symbols]
+        selected = [item for item in values if item is not None]
+        if lifecycle:
+            selected = [item for item in selected if item.get("lifecycle") == lifecycle]
+        return sorted(
+            selected,
+            key=lambda item: (
+                {"pinned": 0, "tracking": 1, "archived": 2}.get(item.get("lifecycle"), 3),
+                item["symbol"],
+            ),
+        )
+
+    def instrument_map(self) -> dict[str, dict[str, Any]]:
+        return {item["symbol"]: item for item in self.list_instruments()}
+
+    def instrument_catalog_count(self) -> int:
+        return len(self._reference_map())
+
+    def latest_open_date(self, as_of: date) -> date | None:
+        eligible = [value for value in self._calendar() if value <= as_of]
+        return eligible[-1] if eligible else None
+
+    def open_dates_between(self, start: date, end: date) -> list[date]:
+        return [value for value in self._calendar() if start <= value <= end]
+
+    def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
+        return self.foundation.read_daily(symbol, adjustment=adjustment)
+
+    def get_coverage(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        release = self.foundation.release()
+        selected_symbol = str(symbol or "ALL")
+        paths = {
+            "raw": self.foundation.dataset_path("daily_raw", release),
+            "qfq": self.foundation.dataset_path("daily_adjusted", release),
+        }
+        return [
+            {
+                "symbol": selected_symbol,
+                "dataset": "daily",
+                "adjustment": adjustment,
+                "provider": "ashare-data-foundation",
+                "start_date": "2016-01-04",
+                "end_date": str(release["as_of"]),
+                "row_count": 0,
+                "quality_status": "valid",
+                "paths": [str(path)],
+                "updated_at": str(release.get("created_at") or ""),
+                "release_id": str(release["release_id"]),
+            }
+            for adjustment, path in paths.items()
+        ]
+
+    def health(self) -> dict[str, Any]:
+        foundation = self.foundation.health()
+        instruments = self.list_instruments()
+        active_count = sum(
+            item["lifecycle"] in {"pinned", "tracking"} for item in instruments
+        )
+        return {
+            "ok": bool(foundation["ok"]),
+            "database": str(self.local_store.db_path),
+            "provider": "ashare-data-foundation",
+            "read_only": True,
+            "foundation": foundation,
+            "instrument_count": len(instruments),
+            "instrument_catalog_count": self.instrument_catalog_count(),
+            "active_instruments": active_count,
+            "coverage_count": 2 if foundation["ok"] else 0,
+            "warning_count": 0 if foundation["ok"] else 1,
+            "recent_issue_count": 0,
+            "latest_open_date": str(foundation.get("as_of") or ""),
+            "latest_daily_date": str(foundation.get("as_of") or ""),
+            "daily_data_status": "current" if foundation["ok"] else "provider_pending",
+            "lagging_symbols": [],
+            "lagging_symbol_count": 0,
+            "last_run": None,
+        }
+
+    def enqueue_sync(
+        self,
+        symbol: str,
+        *,
+        dataset: str = "daily",
+        priority: int = 50,
+        start: date | None = None,
+        end: date | None = None,
+        reason: str = "manual",
+    ) -> None:
+        del dataset, priority, start, end, reason
+        if self.get_instrument(symbol) is None:
+            raise KeyError(f"instrument not found: {symbol}")
+        # The shared foundation owns refresh and publication; consumers never enqueue
+        # provider work or write a second copy of the daily facts.
+
+    def pending_sync(self) -> list[dict[str, Any]]:
+        return []
+
+    def recent_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        del limit
+        return []
+
+    def quality_issues(self, limit: int = 100) -> list[dict[str, Any]]:
+        del limit
+        health = self.foundation.health()
+        if health["ok"]:
+            return []
+        return [
+            {
+                "code": "foundation_unavailable",
+                "severity": "error",
+                "message": str(health.get("error") or "foundation unavailable"),
+                "rows": 0,
+            }
+        ]
+
+    def write_daily(
+        self, frame: pd.DataFrame, *, symbol: str, adjustment: str
+    ) -> list[str]:
+        del frame, symbol, adjustment
+        raise PermissionError("A-share foundation consumers are read-only")

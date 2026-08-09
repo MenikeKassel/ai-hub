@@ -10,7 +10,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes_operator_plugin import KOL_OPERATOR_SCHEMA, _build_command, run_operator  # noqa: E402
+from hermes_operator_plugin import (  # noqa: E402
+    KOL_OPERATOR_SCHEMA,
+    _build_command,
+    run_operator,
+)
 
 
 class HermesOperatorPluginTests(unittest.TestCase):
@@ -20,7 +24,7 @@ class HermesOperatorPluginTests(unittest.TestCase):
         self.assertIn("status", action_schema["enum"])
         self.assertIn("approve-draft", action_schema["enum"])
         self.assertIn("discover-accounts", action_schema["enum"])
-        self.assertIn("accept-candidate", action_schema["enum"])
+        self.assertNotIn("accept-candidate", action_schema["enum"])
         self.assertFalse(KOL_OPERATOR_SCHEMA["parameters"]["additionalProperties"])
 
     def test_discovery_actions_expose_fixed_fields_without_source_mutation(self) -> None:

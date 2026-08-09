@@ -7,7 +7,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-
 REPO_ROOT = Path(
     os.environ.get("AI_HUB_HOME")
     or os.environ.get("AI_HUB_ROOT")
@@ -39,7 +38,6 @@ ACTIONS = {
     "discover-accounts",
     "list-candidates",
     "score-candidate",
-    "accept-candidate",
     "reject-candidate",
     "retry-candidate",
     "kol-profile",

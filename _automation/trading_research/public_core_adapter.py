@@ -6,7 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = ROOT / "_runtime" / "trading" / "public-core"
 
@@ -15,7 +14,6 @@ def main() -> int:
     if sys.argv[1:2] == ["serve-private"]:
         try:
             import uvicorn
-
             from kol_discovery_runtime import create_private_app
         except ImportError as exc:
             raise SystemExit(
@@ -25,7 +23,11 @@ def main() -> int:
         host = os.environ.get("KAW_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise SystemExit("private KOL runtime must bind to loopback")
-        uvicorn.run(create_private_app(), host=host, port=int(os.environ.get("KAW_PORT", "8765")))
+        uvicorn.run(
+            create_private_app(),
+            host=host,
+            port=int(os.environ.get("KAW_PORT", "8125")),
+        )
         return 0
     try:
         from kol_audit.cli import run
