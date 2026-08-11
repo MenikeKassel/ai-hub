@@ -559,6 +559,26 @@ def _send_pending_notifications(store: KolStore) -> list[str]:
 
 
 def kol_update(args: argparse.Namespace) -> None:
+    KOL_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = KOL_ROOT / "kol-update.lock"
+    lock = FileLock(str(lock_path), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(json.dumps({
+            "ok": True,
+            "status": "already_running",
+            "dry_run": bool(args.dry_run),
+            "lock": str(lock_path),
+        }, ensure_ascii=False))
+        return
+    try:
+        _kol_update_locked(args)
+    finally:
+        lock.release()
+
+
+def _kol_update_locked(args: argparse.Namespace) -> None:
     store = KolStore(KOL_ROOT)
     if not store.events_path.exists():
         raise RuntimeError("KOL event store is not initialized; run kol-init first")

@@ -1209,6 +1209,8 @@ class AKShareCheckpointProvider:
         self.sina = AKShareSinaProvider()
         self.eastmoney = AKShareProvider()
         self._used_sources: set[str] = set()
+        self._stock_cache: dict[tuple[str, date, date, bool], pd.DataFrame] = {}
+        self._benchmark_cache: dict[tuple[date, date], pd.DataFrame] = {}
 
     @property
     def name(self) -> str:
@@ -1233,10 +1235,18 @@ class AKShareCheckpointProvider:
         *,
         adjusted: bool,
     ) -> pd.DataFrame:
-        return self._call("fetch_stock", symbol, start, end, adjusted=adjusted)
+        key = (str(symbol), start, end, bool(adjusted))
+        if key not in self._stock_cache:
+            self._stock_cache[key] = self._call(
+                "fetch_stock", symbol, start, end, adjusted=adjusted
+            )
+        return self._stock_cache[key].copy()
 
     def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
-        return self._call("fetch_benchmark", start, end)
+        key = (start, end)
+        if key not in self._benchmark_cache:
+            self._benchmark_cache[key] = self._call("fetch_benchmark", start, end)
+        return self._benchmark_cache[key].copy()
 
 
 def _notification(kind: str, key: str, message: str, event_id: str = "") -> dict[str, str]:
@@ -1342,6 +1352,7 @@ def update_kol_tracking(
     all_marks: list[dict[str, str]] = []
     checkpoints_to_freeze: list[dict[str, str]] = []
     checkpoint_source_failures: set[str] = set()
+    checkpoint_verifier_open = False
 
     tracked_event_count = sum(
         event.status in {"active", "completed"} for event in events
@@ -1423,7 +1434,7 @@ def update_kol_tracking(
             for row in result.checkpoints
             if (row["event_id"], row["horizon"]) not in existing_checkpoints
         ]
-        if event_checkpoints and verifier is not None:
+        if event_checkpoints and verifier is not None and not checkpoint_verifier_open:
             try:
                 secondary_raw = verifier.fetch_stock(event.symbol, start, as_of, adjusted=False)
                 secondary_benchmark = verifier.fetch_benchmark(start, as_of)
@@ -1441,6 +1452,7 @@ def update_kol_tracking(
                         notifications.append(conflict)
                 event_checkpoints = verified_rows
             except Exception as exc:
+                checkpoint_verifier_open = True
                 source_key = f"checkpoint_source_failure:{verifier.name}"
                 if source_key not in checkpoint_source_failures:
                     checkpoint_source_failures.add(source_key)
