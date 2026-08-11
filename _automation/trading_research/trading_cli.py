@@ -24,7 +24,7 @@ from typing import Any, Iterable, Sequence
 from filelock import FileLock, Timeout
 
 from kol_tracker import (
-    AKShareProvider,
+    AKShareCheckpointProvider,
     EventRecord,
     KolStore,
     WarehousePriceProvider,
@@ -566,7 +566,7 @@ def kol_update(args: argparse.Namespace) -> None:
     result = update_kol_tracking(
         store,
         WarehousePriceProvider(MARKET_ROOT / "warehouse"),
-        AKShareProvider(),
+        AKShareCheckpointProvider(),
         as_of=as_of,
         dashboard_path=KOL_DASHBOARD,
         dry_run=args.dry_run,

@@ -243,6 +243,7 @@ class KolStore:
         self.backups_dir = self.root / "backups"
         self.logs_dir = self.root / "logs"
         self.returns_lock_path = self.root / "returns.lock"
+        self._events_backup_created = False
         self.root.mkdir(parents=True, exist_ok=True)
         self._migrate_derived_return_fields()
 
@@ -334,11 +335,38 @@ class KolStore:
                 os.unlink(temp_name)
 
     def _backup_events(self) -> None:
-        if not self.events_path.exists():
+        if self._events_backup_created or not self.events_path.exists():
             return
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S-%f")
         shutil.copy2(self.events_path, self.backups_dir / f"{stamp}_events.csv")
+        self._events_backup_created = True
+        self._prune_backups()
+
+    def _prune_backups(self) -> None:
+        """Keep a small rolling set: 3 immediate, 7 daily and 4 weekly."""
+        if not self.backups_dir.is_dir():
+            return
+        files = [path for path in self.backups_dir.iterdir() if path.is_file()]
+        if len(files) <= 20:
+            return
+        ordered = sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)
+        keep = set(ordered[:3])
+        daily: dict[str, Path] = {}
+        weekly: dict[str, Path] = {}
+        for path in ordered:
+            moment = datetime.fromtimestamp(path.stat().st_mtime, tz=SHANGHAI)
+            daily.setdefault(moment.date().isoformat(), path)
+            year, week, _ = moment.isocalendar()
+            weekly.setdefault(f"{year}-W{week:02d}", path)
+        keep.update(list(daily.values())[:7])
+        keep.update(list(weekly.values())[:4])
+        for path in files:
+            if path not in keep:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def _backup_dataset(self, path: Path) -> None:
         if not path.exists():
@@ -346,6 +374,7 @@ class KolStore:
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S-%f")
         shutil.copy2(path, self.backups_dir / f"{stamp}_{path.name}")
+        self._prune_backups()
 
     def load_events(self) -> list[EventRecord]:
         return [EventRecord.from_row(row) for row in self._read_csv(self.events_path)]
@@ -1114,6 +1143,102 @@ class AKShareProvider:
         return frame.reset_index(drop=True)
 
 
+class AKShareSinaProvider:
+    """Use AKShare's Sina-backed daily endpoints for checkpoint verification."""
+
+    name = "akshare-sina"
+
+    @staticmethod
+    def _configure_direct_hosts() -> None:
+        hosts = {"hq.sinajs.cn", "quotes.sina.cn", "finance.sina.com.cn"}
+        for key in ("NO_PROXY", "no_proxy"):
+            current = {
+                item.strip()
+                for item in os.environ.get(key, "").split(",")
+                if item.strip()
+            }
+            current.update(hosts)
+            os.environ[key] = ",".join(sorted(current))
+
+    @staticmethod
+    def _symbol(symbol: str) -> str:
+        prefix = "sh" if str(symbol).startswith(("6", "9")) else "sz"
+        return prefix + str(symbol).zfill(6)
+
+    def __init__(self) -> None:
+        self._configure_direct_hosts()
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        import akshare as ak  # type: ignore
+
+        frame = ak.stock_zh_a_daily(
+            symbol=self._symbol(symbol),
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="qfq" if adjusted else "",
+        )
+        if frame.empty:
+            raise RuntimeError(f"AKShare Sina returned no data for {symbol}")
+        return _provider_frame(frame)
+
+    def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
+        import akshare as ak  # type: ignore
+
+        frame = ak.stock_zh_index_daily(symbol="sh000300")
+        frame = _provider_frame(frame)
+        selected = frame[
+            (frame["date"] >= pd.Timestamp(start))
+            & (frame["date"] <= pd.Timestamp(end))
+        ]
+        if selected.empty:
+            raise RuntimeError("AKShare Sina returned no CSI 300 data")
+        return selected.reset_index(drop=True)
+
+
+class AKShareCheckpointProvider:
+    """Sina first, Eastmoney only as a bounded fallback."""
+
+    def __init__(self) -> None:
+        self.sina = AKShareSinaProvider()
+        self.eastmoney = AKShareProvider()
+        self._used_sources: set[str] = set()
+
+    @property
+    def name(self) -> str:
+        return "+".join(sorted(self._used_sources)) or self.sina.name
+
+    def _call(self, method: str, *args: object, **kwargs: object) -> pd.DataFrame:
+        errors: list[str] = []
+        for provider in (self.sina, self.eastmoney):
+            try:
+                frame = getattr(provider, method)(*args, **kwargs)
+                self._used_sources.add(provider.name)
+                return frame
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+        raise RuntimeError("; ".join(errors))
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        return self._call("fetch_stock", symbol, start, end, adjusted=adjusted)
+
+    def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
+        return self._call("fetch_benchmark", start, end)
+
+
 def _notification(kind: str, key: str, message: str, event_id: str = "") -> dict[str, str]:
     return {"kind": kind, "key": key, "message": message, "event_id": event_id}
 
@@ -1216,6 +1341,7 @@ def update_kol_tracking(
     awaiting_market_data: list[str] = []
     all_marks: list[dict[str, str]] = []
     checkpoints_to_freeze: list[dict[str, str]] = []
+    checkpoint_source_failures: set[str] = set()
 
     tracked_event_count = sum(
         event.status in {"active", "completed"} for event in events
@@ -1315,14 +1441,16 @@ def update_kol_tracking(
                         notifications.append(conflict)
                 event_checkpoints = verified_rows
             except Exception as exc:
-                notifications.append(
-                    _notification(
-                        "source_failure",
-                        f"checkpoint_source_failure:{as_of.isoformat()}:{event.event_id}:{verifier.name}",
-                        f"{event.event_id} 节点交叉验证源 {verifier.name} 失败：{exc}，节点暂不冻结。",
-                        event.event_id,
+                source_key = f"checkpoint_source_failure:{verifier.name}"
+                if source_key not in checkpoint_source_failures:
+                    checkpoint_source_failures.add(source_key)
+                    notifications.append(
+                        _notification(
+                            "source_failure",
+                            source_key,
+                            f"节点交叉验证源 {verifier.name} 失败：{exc}，本轮节点暂不冻结。",
+                        )
                     )
-                )
                 event_checkpoints = [
                     {**row, "secondary_source": verifier.name, "verification_status": "secondary_unavailable"}
                     for row in event_checkpoints
