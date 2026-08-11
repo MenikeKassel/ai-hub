@@ -41,11 +41,13 @@ only routine control plane for the local workbench. The console is served at
 5. For `startup_failed`, `port_conflict`, or `unhealthy`, report the structured
    error and stop. Do not call terminal or try another port.
 
+Failure states are exactly `startup_failed/port_conflict/unhealthy`.
+
 `running=true` requires a healthy API response. A listener without a healthy
 endpoint is `unhealthy` and is not a reason to start a second process.
 
 The compact state machine is: `status -> running=false: call start once`.
-After a start error, never use the `terminal` or `read_file` tool; report the
+After a start error, never use `terminal` or `read_file`; report the
 operator error and use `delegate-to-codex` for maintenance.
 
 ## Routine actions

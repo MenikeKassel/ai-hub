@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 
@@ -91,8 +92,16 @@ def find_codex() -> str:
     raise FileNotFoundError("Codex CLI was not found on PATH")
 
 
-def build_prompt(task: str) -> str:
-    return """You are executing a task delegated by the user's local Hermes agent.
+def build_prompt(task: str, *, workspace: Path, branch: str = "") -> str:
+    worktree_rule = ""
+    if branch:
+        worktree_rule = f"""
+This is a Hermes source-maintenance worktree. Work only in this worktree on
+branch `{branch}`. Do not edit the base checkout, runtime databases,
+credentials, or scheduled-task definitions. Commit the tested change and open
+a PR if GitHub access is available; never merge it automatically.
+"""
+    return f"""You are executing a task delegated by the user's local Hermes agent.
 
 Work autonomously through implementation and proportionate verification. Read the
 workspace instructions (AGENTS.md and referenced docs) before changing files.
@@ -100,9 +109,66 @@ Preserve unrelated user changes. Never expose secrets. Do not place trades or ma
 irreversible external changes unless the task explicitly says the user already
 confirmed that exact action. End with a concise report of the outcome, changed
 files, verification, and any blocker.
+{worktree_rule}
+Delegated workspace: {workspace}
 
 Delegated user request:
 """ + task
+
+
+def _git_root(workspace: Path) -> Path | None:
+    completed = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return Path(value).resolve() if value else None
+
+
+def prepare_hermes_write_worktree(workspace: Path) -> tuple[Path, str]:
+    """Keep Hermes write delegations out of the live ai-hub checkout."""
+    root = _git_root(workspace)
+    if root is None or root.name.casefold() != "ai-hub":
+        return workspace, ""
+    task_id = os.environ.get("HERMES_TASK_ID", "").strip()
+    if not task_id:
+        task_id = f"task-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    safe_task_id = "".join(char if char.isalnum() or char in "-_" else "-" for char in task_id)
+    safe_task_id = safe_task_id.strip("-")[:80] or f"task-{uuid.uuid4().hex[:8]}"
+    branch = f"hermes/{safe_task_id}"
+    worktree_root = root.parent / "_worktrees" / "ai-hub-hermes"
+    worktree = worktree_root / safe_task_id
+    if worktree.exists():
+        existing = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if existing.returncode == 0 and existing.stdout.strip() == branch:
+            return worktree, branch
+        raise RuntimeError(f"Hermes worktree already exists with another branch: {worktree}")
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "git worktree add failed").strip()
+        raise RuntimeError(detail[-2000:])
+    return worktree, branch
 
 
 def make_command(codex: str, workspace: Path, mode: str, output_file: Path) -> list[str]:
@@ -138,6 +204,9 @@ def main() -> int:
         if not workspace.is_dir():
             raise FileNotFoundError(f"workspace not found: {workspace}")
         codex = find_codex()
+        branch = ""
+        if args.mode == "write" and not args.dry_run:
+            workspace, branch = prepare_hermes_write_worktree(workspace)
 
         with tempfile.TemporaryDirectory(prefix="hermes-codex-") as temp_dir:
             output_file = Path(temp_dir) / "last-message.txt"
@@ -151,6 +220,7 @@ def main() -> int:
                         "mode": args.mode,
                         "codex": codex,
                         "task_chars": len(task),
+                        "worktree_branch": branch,
                     }
                 )
                 return 0
@@ -159,7 +229,7 @@ def main() -> int:
             env["NO_COLOR"] = "1"
             completed = subprocess.run(
                 command,
-                input=build_prompt(task),
+                input=build_prompt(task, workspace=workspace, branch=branch),
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -181,6 +251,7 @@ def main() -> int:
                         "ok": True,
                         "answer": answer,
                         "workspace": str(workspace),
+                        "worktree_branch": branch,
                         "mode": args.mode,
                         "elapsed_seconds": elapsed,
                     }
@@ -195,6 +266,8 @@ def main() -> int:
                     or f"Codex exited with code {completed.returncode}",
                     "exit_code": completed.returncode,
                     "elapsed_seconds": elapsed,
+                    "workspace": str(workspace),
+                    "worktree_branch": branch,
                 }
             )
             return 1

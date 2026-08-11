@@ -52,7 +52,10 @@ CODEX_DELEGATE_SCHEMA = {
             },
             "workspace": {
                 "type": "string",
-                "description": "Absolute workspace path under <AI_HUB_HOME>.",
+                "description": (
+                    "Absolute workspace path under <AI_HUB_HOME>. For write tasks "
+                    "against ai-hub, the delegate creates an isolated Hermes worktree."
+                ),
             },
         },
         "required": ["task"],
