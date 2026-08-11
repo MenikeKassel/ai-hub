@@ -15,8 +15,9 @@ if (-not $RepoRoot) {
 $runtime = Join-Path $RepoRoot "_runtime\trading"
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
-$env:FREESTOCKDB_ROOT = Join-Path $RepoRoot "stockdb"
-if (-not $env:FREESTOCKDB_DATA_ROOT) { $env:FREESTOCKDB_DATA_ROOT = "<MARKET_DATA_HOME>\free-stockdb" }
+$workspaceRoot = Split-Path -Parent $RepoRoot
+$env:FREESTOCKDB_ROOT = Join-Path $workspaceRoot "stockdb"
+$env:FREESTOCKDB_DATA_ROOT = "<MARKET_DATA_HOME>\free-stockdb"
 $env:PYTHONPATH = ""
 Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
 Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue

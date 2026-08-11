@@ -475,6 +475,27 @@ def create_app(
     app.state.discovery_scorer_error = discovery_scorer_error
 
     def safe_market_health() -> dict[str, Any]:
+        # Health must stay responsive while a sync/update process owns the
+        # DuckDB lock.  Do not queue a UI request behind a long market job.
+        try:
+            with market_store.lock(timeout=0.05):
+                pass
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if any(token in lowered for token in ("lock", "timeout", "already open", "cannot open file")):
+                return {
+                    "ok": False,
+                    "status": "degraded",
+                    "market_status": "market_locked",
+                    "daily_data_status": "market_locked",
+                    "market_session_status": "unknown",
+                    "database": str(market_store.db_path),
+                    "lagging_symbols": [],
+                    "lagging_symbol_count": 0,
+                    "error_type": "database_lock",
+                    "error": "market database is busy; retry after the current task completes",
+                }
         try:
             return market_store.health()
         except Exception as exc:

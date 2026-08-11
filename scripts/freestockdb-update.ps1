@@ -10,7 +10,8 @@ if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).
 if (-not $DataRoot) {
     $DataRoot = if ($env:FREESTOCKDB_DATA_ROOT) { $env:FREESTOCKDB_DATA_ROOT } else { "<MARKET_DATA_HOME>\free-stockdb" }
 }
-$env:FREESTOCKDB_ROOT = Join-Path $RepoRoot "stockdb"
+$workspaceRoot = Split-Path -Parent $RepoRoot
+$env:FREESTOCKDB_ROOT = Join-Path $workspaceRoot "stockdb"
 $env:FREESTOCKDB_DATA_ROOT = $DataRoot
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
