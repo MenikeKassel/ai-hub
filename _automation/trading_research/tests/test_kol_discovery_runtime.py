@@ -55,7 +55,7 @@ class FakeClient:
 
 
 class KolDiscoveryRuntimeTests(unittest.TestCase):
-    def test_registry_exposes_all_nine_platforms_with_capture_health(self) -> None:
+    def test_registry_exposes_all_nine_platforms_and_marks_unverified_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = build_provider_registry(Path(tmp))
             platforms = registry.platforms()
@@ -65,11 +65,9 @@ class KolDiscoveryRuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(item["health"]["configured"] is False for item in platforms)
         )
-        self.assertTrue(
-            next(item for item in platforms if item["platform"] == "douyin")[
-                "capabilities"
-            ]["transcript"]
-        )
+        douyin = next(item for item in platforms if item["platform"] == "douyin")
+        self.assertEqual("manual_only", douyin["health"]["mode"])
+        self.assertFalse(douyin["capabilities"]["transcript"])
 
     def test_local_capture_has_stable_identity_and_platform_content_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

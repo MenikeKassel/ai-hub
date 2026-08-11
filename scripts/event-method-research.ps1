@@ -31,8 +31,17 @@ try {
     if (-not (Test-Path -LiteralPath $python)) {
         throw "Trading Python not found: $python"
     }
-    $output = & $python $cli kol-method-research-run --pending --max-events $MaxEvents --with-minute 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
+    $stdoutPath = Join-Path $logDirectory (".event-research-" + [guid]::NewGuid().ToString("N") + ".out")
+    $stderrPath = Join-Path $logDirectory (".event-research-" + [guid]::NewGuid().ToString("N") + ".err")
+    try {
+        & $python $cli kol-method-research-run --pending --max-events $MaxEvents --with-minute 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
+        $output = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
     if ($output.Trim()) { Write-ResearchLog $output.Trim() }
     if ($exitCode -eq 3 -and $output -match '"status":\s*"busy"') {
         Write-ResearchLog "Skipped: a manual or scheduled research run already owns the file lock."

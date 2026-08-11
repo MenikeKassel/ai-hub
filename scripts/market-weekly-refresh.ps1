@@ -6,6 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$env:FREESTOCKDB_ROOT = Join-Path $RepoRoot "stockdb"
+if (-not $env:FREESTOCKDB_DATA_ROOT) { $env:FREESTOCKDB_DATA_ROOT = "<MARKET_DATA_HOME>\free-stockdb" }
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
 $logDirectory = Join-Path $RepoRoot "_runtime\trading\market\logs"

@@ -3071,11 +3071,17 @@ def market_weekly(args: argparse.Namespace) -> None:
         errors.append("akshare_etf_master: timed out after 45 seconds")
     lead_reconciliation = _extract_leads_to_market()
     snapshots = 0
+    auxiliary_circuit_open = False
+    auxiliary_failure_reported = False
+    auxiliary_skipped = 0
     if not args.master_only:
         for instrument in store.list_instruments():
             if instrument["lifecycle"] not in {"pinned", "tracking"} or instrument["instrument_type"] != "stock":
                 continue
             for dataset in ("valuation", "financial_summary", "announcements", "fund_flow"):
+                if auxiliary_circuit_open:
+                    auxiliary_skipped += 1
+                    continue
                 command = [
                     sys.executable,
                     str(Path(__file__).resolve()),
@@ -3100,11 +3106,21 @@ def market_weekly(args: argparse.Namespace) -> None:
                     if completed.returncode == 0:
                         snapshots += int(json.loads(completed.stdout.strip()).get("saved", False))
                     else:
-                        errors.append(
-                            f"{instrument['symbol']}:{dataset}: {(completed.stderr or completed.stdout)[-1000:]}"
-                        )
+                        if not auxiliary_failure_reported:
+                            errors.append(
+                                "akshare auxiliary provider circuit opened after "
+                                f"{instrument['symbol']}:{dataset}: "
+                                f"{(completed.stderr or completed.stdout)[-1000:]}"
+                            )
+                            auxiliary_failure_reported = True
+                        auxiliary_circuit_open = True
                 except subprocess.TimeoutExpired:
-                    errors.append(f"{instrument['symbol']}:{dataset}: timed out after 45 seconds")
+                    if not auxiliary_failure_reported:
+                        errors.append(
+                            f"akshare auxiliary provider circuit opened after {instrument['symbol']}:{dataset}: timed out after 45 seconds"
+                        )
+                        auxiliary_failure_reported = True
+                    auxiliary_circuit_open = True
     errors = [*master_errors, *errors]
     alert_sent = _send_transition_alert(
         "market_master_failed",
@@ -3119,6 +3135,8 @@ def market_weekly(args: argparse.Namespace) -> None:
                 "master_rows": imported,
                 "stock_leads": lead_reconciliation,
                 "snapshots": snapshots,
+                "auxiliary_circuit_open": auxiliary_circuit_open,
+                "auxiliary_skipped": auxiliary_skipped,
                 "errors": errors,
                 "alert_sent": alert_sent,
             },

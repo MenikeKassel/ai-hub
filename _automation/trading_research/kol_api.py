@@ -119,6 +119,16 @@ class KolBackfillRequest(BaseModel):
     count: int = Field(default=200, ge=1)
 
 
+class DiscoveryRunRequest(BaseModel):
+    platform: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    query: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class DiscoveryDecisionRequest(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
 class DigestAuthorProfileInput(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     profile_url: str = Field(min_length=20, max_length=500)
@@ -404,6 +414,46 @@ def create_app(
     rapid_ocr_runner = Path(__file__).with_name("rapid_ocr_batch.py")
     initialize_seed_kols(post_store)
 
+    # The discovery core is mounted into this application.  It shares the
+    # existing posts.db and KOL identity tables, so discovery cannot create a
+    # second universe of accounts or require a second console port.
+    discovery_store = None
+    discovery_service = None
+    discovery_registry = None
+    discovery_scorer = None
+    discovery_error = ""
+    discovery_scorer_error = ""
+    try:
+        from kol_audit.discovery.scoring import CandidateScorer
+        from kol_audit.discovery.service import DiscoveryService
+        from kol_audit.discovery.store import DiscoveryStore
+        from kol_discovery_runtime import build_provider_registry
+
+        capture_root = Path(
+            os.environ.get(
+                "KOL_DISCOVERY_CAPTURE_ROOT",
+                str(config.runtime_root / "kol-discovery" / "captures"),
+            )
+        )
+        discovery_store = DiscoveryStore(kol_root / "posts.db", post_store)
+        discovery_registry = build_provider_registry(capture_root)
+        discovery_service = DiscoveryService(discovery_store, discovery_registry)
+    except Exception as exc:
+        discovery_error = str(exc)
+        logger.warning("Full-platform discovery is unavailable: %s", exc)
+    if discovery_store is not None:
+        try:
+            from kol_audit.discovery.scoring import CandidateScorer
+            from kol_discovery_runtime import OpenCodeGoCandidateScoreProvider
+
+            discovery_scorer = CandidateScorer(
+                discovery_store,
+                OpenCodeGoCandidateScoreProvider(),
+            )
+        except Exception as exc:
+            discovery_scorer_error = str(exc)
+            logger.warning("Discovery AI scoring is unavailable: %s", exc)
+
     app = FastAPI(title="KOL Research Console", version="3.0.0")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
     app.state.settings = config
@@ -417,6 +467,12 @@ def create_app(
     app.state.review_agent = review_agent
     app.state.recommendation_drafts = recommendation_drafts
     app.state.deepseek_credentials = deepseek_credentials
+    app.state.discovery_store = discovery_store
+    app.state.discovery_service = discovery_service
+    app.state.discovery_registry = discovery_registry
+    app.state.discovery_scorer = discovery_scorer
+    app.state.discovery_error = discovery_error
+    app.state.discovery_scorer_error = discovery_scorer_error
 
     def safe_market_health() -> dict[str, Any]:
         try:
@@ -679,6 +735,138 @@ def create_app(
     @app.get("/api/kols")
     def list_kols(status: str | None = None) -> list[dict[str, Any]]:
         return post_store.list_kols(status)
+
+    def require_discovery(*, require_scorer: bool = False) -> tuple[Any, Any, Any, Any]:
+        if not all(
+            value is not None
+            for value in (
+                discovery_store,
+                discovery_service,
+                discovery_registry,
+            )
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=f"full-platform discovery unavailable: {discovery_error or 'not configured'}",
+            )
+        if require_scorer and discovery_scorer is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"discovery AI scoring unavailable: {discovery_scorer_error or 'not configured'}",
+            )
+        return discovery_store, discovery_service, discovery_registry, discovery_scorer
+
+    @app.get("/api/discovery/platforms")
+    def discovery_platforms() -> list[dict[str, Any]]:
+        _store, _service, registry, _scorer = require_discovery()
+        return registry.platforms()
+
+    @app.post("/api/discovery/runs", status_code=201)
+    def start_discovery(body: DiscoveryRunRequest) -> dict[str, Any]:
+        _store, service, _registry, _scorer = require_discovery()
+        try:
+            return service.run(body.platform, body.query, limit=body.limit)
+        except KeyError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/discovery/runs/{run_id}")
+    def discovery_run(run_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/discovery/candidates")
+    def discovery_candidates(
+        state: str | None = None,
+        platform: str | None = None,
+        query: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        store, _service, _registry, _scorer = require_discovery()
+        return store.list_candidates(
+            state=state,
+            platform=platform,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/discovery/candidates/{candidate_id}")
+    def discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_candidate(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/score")
+    def score_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        _store, _service, _registry, scorer = require_discovery(require_scorer=True)
+        try:
+            return scorer.score(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/accept")
+    def accept_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.accept(candidate_id, note=body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/reject")
+    def reject_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.reject(candidate_id, body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/retry")
+    def retry_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.retry(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/discovery/kols/{kol_id}/profile")
+    def discovery_kol_profile(kol_id: int) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        kol = post_store.get_kol(kol_id)
+        if kol is None:
+            raise HTTPException(404, "KOL not found")
+        return {"kol": kol, "history": store.profile_history(kol_id)}
+
+    @app.post("/api/discovery/kols/{kol_id}/fetch", status_code=202)
+    def discovery_kol_fetch(kol_id: int, body: KolBackfillRequest) -> dict[str, Any]:
+        require_discovery()
+        try:
+            return post_store.queue_backfill(kol_id, body.count)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/digest-authors")
     def digest_authors(limit: int = Query(default=200, ge=1, le=500)) -> list[dict[str, Any]]:
@@ -2142,6 +2330,13 @@ def create_app(
         review_summary = review_agent.summary()
         market_component = safe_market_health()
         freestock_component = safe_freestockdb_health()
+        discovery_platforms_value = (
+            discovery_registry.platforms()
+            if discovery_registry is not None
+            else []
+        )
+        discovery_available = discovery_registry is not None
+        discovery_scoring_available = discovery_scorer is not None
         return {
             "ok": True,
             "date": date.today().isoformat(),
@@ -2195,6 +2390,13 @@ def create_app(
             "morning_runs": recommendation_drafts.recent_morning_runs(5),
             "digest_task": _task_status("Research_Data_Digest_Daily"),
             "review_agent": review_summary,
+            "discovery": {
+                "available": discovery_available,
+                "scoring_available": discovery_scoring_available,
+                "platforms": discovery_platforms_value,
+                "error": discovery_error,
+                "scoring_error": discovery_scorer_error,
+            },
             "market": market_component,
             "freestockdb": freestock_component,
             "component_status": {
@@ -2231,6 +2433,11 @@ def create_app(
                         "unknown",
                     ),
                     "ok": bool(freestock_component.get("ok")),
+                },
+                "discovery": {
+                    "status": "ready" if discovery_available else "unavailable",
+                    "platform_count": len(discovery_platforms_value),
+                    "scoring_status": "ready" if discovery_scoring_available else "degraded",
                 },
             },
             "pipeline_refresh": read_refresh_state(config.runtime_root),

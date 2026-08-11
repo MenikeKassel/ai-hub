@@ -5,14 +5,12 @@ param(
         "import-zhihu", "onboard-zhihu",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
         "reject-draft", "list-events", "event-action",
-        "start-discovery", "open-discovery",
         "platform-status", "discover-accounts", "list-candidates", "score-candidate",
         "reject-candidate", "retry-candidate", "kol-profile", "fetch-kol"
     )]
     [string]$Action = "status",
     [string]$RepoRoot = "",
     [int]$Port = 8123,
-    [int]$DiscoveryPort = 8125,
     [int]$Id = 0,
     [string]$Handle = "",
     [string]$DisplayName = "",
@@ -50,7 +48,6 @@ if (-not $RepoRoot) {
 }
 
 $url = "http://127.0.0.1:$Port"
-$discoveryUrl = "http://127.0.0.1:$DiscoveryPort"
 $fetchPidPath = Join-Path $RepoRoot "_runtime\trading\kol\logs\kol-post-fetch.pid"
 $uiRuntime = Join-Path $RepoRoot "_runtime\trading\kol\ui"
 $uiPidPath = Join-Path $uiRuntime "server.pid"
@@ -177,19 +174,11 @@ function Invoke-KolApi {
 }
 
 function Get-DiscoveryStatus {
-    try {
-        return Invoke-Utf8Json "GET" "$discoveryUrl/api/v1/pipeline/status" $null 10
-    } catch {
-        return $null
-    }
+    return Get-PipelineStatus
 }
 
 function Require-DiscoveryServer {
-    $status = Get-DiscoveryStatus
-    if (-not $status) {
-        throw "KOL discovery console is not reachable. Run -Action start-discovery first."
-    }
-    return $status
+    return Require-Server
 }
 
 function Invoke-KolDiscoveryApi {
@@ -200,7 +189,7 @@ function Invoke-KolDiscoveryApi {
         $Body = $null
     )
     Require-DiscoveryServer | Out-Null
-    return Invoke-Utf8Json $Method "$discoveryUrl$Path" $Body 60
+    return Invoke-KolApi $Method $Path $Body
 }
 
 function Start-KolTask {
@@ -494,32 +483,13 @@ switch ($Action) {
         }
         Write-Result (Invoke-KolApi "PATCH" "/api/events/$EventId" $body)
     }
-    "start-discovery" {
-        if (Get-DiscoveryStatus) {
-            Write-Result @{ ok = $true; action = "already_running"; url = $discoveryUrl }
-            break
-        }
-        & (Join-Path $RepoRoot "scripts\start-kol-discovery.ps1") `
-            -RepoRoot $RepoRoot -Port $DiscoveryPort -NoBrowser
-        if (-not (Get-DiscoveryStatus)) { throw "KOL discovery console did not become ready" }
-        Write-Result @{ ok = $true; action = "started"; url = $discoveryUrl }
-    }
-    "open-discovery" {
-        if (-not (Get-DiscoveryStatus)) {
-            & (Join-Path $RepoRoot "scripts\start-kol-discovery.ps1") `
-                -RepoRoot $RepoRoot -Port $DiscoveryPort -NoBrowser
-        }
-        if (-not (Get-DiscoveryStatus)) { throw "KOL discovery console did not become ready" }
-        Start-Process $discoveryUrl
-        Write-Result @{ ok = $true; action = "opened"; url = $discoveryUrl }
-    }
     "platform-status" {
-        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/v1/platforms")
+        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/discovery/platforms")
     }
     "discover-accounts" {
         if (-not $Query) { throw "discover-accounts requires -Query" }
         $slug = $Platform.ToLowerInvariant()
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/discovery/runs" @{
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/runs" @{
             platform = $slug
             query = $Query
             limit = $Limit
@@ -534,26 +504,26 @@ switch ($Action) {
             $parameters += "state=$([Uri]::EscapeDataString($CandidateState))"
         }
         $parameters += "limit=$Limit"
-        Write-Result (Invoke-KolDiscoveryApi "GET" ("/api/v1/candidates?" + ($parameters -join "&")))
+        Write-Result (Invoke-KolDiscoveryApi "GET" ("/api/discovery/candidates?" + ($parameters -join "&")))
     }
     "score-candidate" {
         if (-not $CandidateId) { throw "score-candidate requires -CandidateId" }
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/candidates/$CandidateId/score" @{})
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/score" @{})
     }
     "reject-candidate" {
         if (-not $CandidateId -or -not $Note) { throw "reject-candidate requires -CandidateId and -Note" }
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/candidates/$CandidateId/reject" @{ note = $Note })
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/reject" @{ note = $Note })
     }
     "retry-candidate" {
         if (-not $CandidateId) { throw "retry-candidate requires -CandidateId" }
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/candidates/$CandidateId/retry" @{})
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/retry" @{})
     }
     "kol-profile" {
         if ($Id -le 0) { throw "kol-profile requires -Id" }
-        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/v1/kols/$Id/profile")
+        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/discovery/kols/$Id/profile")
     }
     "fetch-kol" {
         if ($Id -le 0) { throw "fetch-kol requires -Id" }
-        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/v1/kols/$Id/fetch" @{ count = [Math]::Min($Limit, 100); days = $Days })
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/kols/$Id/fetch" @{ count = [Math]::Min($Limit, 100) })
     }
 }

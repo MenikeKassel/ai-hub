@@ -122,7 +122,7 @@ class HermesOperatorContractTests(unittest.TestCase):
         self.assertIn("Codex-independent", skill)
         self.assertIn("explicit draft ID", skill)
 
-    def test_hermes_is_operator_only_and_source_changes_route_to_codex(self) -> None:
+    def test_hermes_is_operator_only_and_source_changes_use_worktree_pr(self) -> None:
         skill = (ROOT / "_skills" / "kol-research-operator" / "SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -130,8 +130,11 @@ class HermesOperatorContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Hermes 是工作台操作者", skill)
-        self.assertIn("2026-08-06 起用户已授予 Hermes 直接修改 ai-hub 源代码的权限", skill)
+        self.assertIn("Hermes operates the workbench", skill)
+        self.assertIn("canonical skill source", skill)
+        self.assertIn("<AI_HUB_HOME>\\_worktrees\\ai-hub-hermes", skill)
+        self.assertIn("hermes/<task-id>", skill)
+        self.assertIn("opening a PR", skill)
         self.assertIn("Use only the native `kol_operator` tool", skill)
         self.assertIn("Never use the `terminal` or `read_file` tool", skill)
         self.assertNotIn("pre_tool_call", installer)

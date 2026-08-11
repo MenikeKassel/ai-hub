@@ -1,11 +1,17 @@
 ﻿[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
+    [string]$DataRoot = "",
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+if (-not $DataRoot) {
+    $DataRoot = if ($env:FREESTOCKDB_DATA_ROOT) { $env:FREESTOCKDB_DATA_ROOT } else { "<MARKET_DATA_HOME>\free-stockdb" }
+}
+$env:FREESTOCKDB_ROOT = Join-Path $RepoRoot "stockdb"
+$env:FREESTOCKDB_DATA_ROOT = $DataRoot
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"

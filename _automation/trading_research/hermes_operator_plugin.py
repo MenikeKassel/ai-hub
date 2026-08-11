@@ -32,8 +32,6 @@ ACTIONS = {
     "reject-draft",
     "list-events",
     "event-action",
-    "start-discovery",
-    "open-discovery",
     "platform-status",
     "discover-accounts",
     "list-candidates",

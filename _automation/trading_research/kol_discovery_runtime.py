@@ -77,6 +77,21 @@ PLATFORM_CAPABILITIES = {
     ),
 }
 
+# JSON capture files are useful for fixtures and manual imports, but they are
+# not evidence that a live platform adapter works.  Keep unverified platforms
+# visible in the registry while reporting them as manual_only instead of
+# advertising a false live capability.
+for _platform in {
+    "xiaohongshu",
+    "douyin",
+    "bilibili",
+    "weibo",
+    "wechat_rss",
+    "xueqiu",
+    "taoguba",
+}:
+    PLATFORM_CAPABILITIES[_platform] = PlatformCapabilities()
+
 
 def _read_items(path: Path, keys: tuple[str, ...]) -> list[dict[str, Any]]:
     if not path.is_file():
@@ -119,6 +134,8 @@ class LocalCaptureAccountProvider:
             "configured": self.accounts_path.is_file(),
             "accounts_capture": self.accounts_path.is_file(),
             "content_capture": self.content_path.is_file(),
+            "mode": "manual_only" if self.platform not in {"x", "zhihu"} else "local_capture",
+            "live_adapter": False,
         }
 
     def _accounts(self) -> list[dict[str, Any]]:

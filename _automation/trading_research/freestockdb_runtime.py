@@ -1332,18 +1332,32 @@ class FreeStockDBRuntime:
                 self._start_service()
                 restarted = True
         result_health = self.doctor(include_samples=True) if restarted else health
+        provider_details = result_health.get("provider") or {}
+        service_ready = bool(
+            result_health.get("service_ok", result_health.get("ok"))
+            and not result_health.get("connection_leak")
+            and not provider_details.get("sample_errors")
+        )
+        data_fresh = bool(result_health.get("data_fresh", result_health.get("ok")))
         result = {
-            "ok": bool(result_health.get("ok")),
+            # Repair is a service operation.  A stale vendor dataset is an
+            # update concern and must not make a healthy HTTP service look
+            # unrepairable.
+            "ok": service_ready,
+            "service_ready": service_ready,
+            "data_fresh": data_fresh,
             "status": (
                 "repaired"
-                if restarted and result_health.get("ok")
+                if restarted and service_ready and data_fresh
+                else "repaired_stale"
+                if restarted and service_ready
                 else "restart_failed"
                 if restarted
                 else "waiting_for_second_failure"
                 if not should_restart
                 else "unhealthy"
             ),
-            "repair_failures": 0 if result_health.get("ok") else failures,
+            "repair_failures": 0 if service_ready else failures,
             "restarted": restarted,
             "migration": migration,
             "recovery": recovery,
