@@ -268,6 +268,8 @@ input:focus, select:focus, textarea:focus { border-color: #6b8d82; box-shadow: 0
 .morning-delivery.ready { border-left-color: var(--green); }
 .morning-delivery.late, .morning-delivery.missed { border-left-color: var(--red); }
 .morning-delivery small { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.platform-breakdown { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 12px; }
+.platform-breakdown span { white-space: nowrap; }
 .morning-review-layout .post-list, .morning-review-layout .review-detail { height: 100%; max-height: none; min-height: 0; }
 .morning-classification { margin-top: 14px; margin-bottom: 0; }
 .morning-source-error { margin-top: 14px; margin-bottom: 0; }

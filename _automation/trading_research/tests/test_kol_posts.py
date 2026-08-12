@@ -302,6 +302,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(2, result.failed_kols)
         self.assertEqual(1, result.new_posts)
         self.assertEqual("failed", result.auth_status)
+        self.assertEqual(2, result.platform_breakdown["x"]["target"])
+        self.assertEqual(2, result.platform_breakdown["x"]["failed"])
+        self.assertEqual(1, result.platform_breakdown["zhihu"]["success"])
 
     def test_stale_fetch_run_is_closed_without_touching_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

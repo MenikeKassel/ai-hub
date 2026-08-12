@@ -259,6 +259,15 @@ export interface MorningReview {
     stage: string
     progress_current: number
     progress_total: number
+    platform_breakdown?: Record<string, {
+      target: number
+      success: number
+      failed: number
+      blocked: number
+      rate_limited: number
+      provider_failed: number
+      pending: number
+    }>
   }
   posts: Post[]
   drafts: RecommendationDraft[]

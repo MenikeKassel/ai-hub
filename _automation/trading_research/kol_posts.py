@@ -198,6 +198,7 @@ class FetchSummary:
     queue_pending: int = 0
     rate_limit_paused: bool = False
     blocked_platforms: list[str] = field(default_factory=list)
+    platform_breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -961,7 +962,8 @@ class KolPostStore:
                     gap_kols_json TEXT NOT NULL DEFAULT '[]',
                     fallback_kols_json TEXT NOT NULL DEFAULT '[]',
                     shadow_failed_kols_json TEXT NOT NULL DEFAULT '[]',
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS fetch_queue (
                     batch_key TEXT NOT NULL,
@@ -1199,7 +1201,8 @@ class KolPostStore:
                     stage TEXT NOT NULL DEFAULT 'queued',
                     progress_current INTEGER NOT NULL DEFAULT 0,
                     progress_total INTEGER NOT NULL DEFAULT 0,
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS idx_fetch_attempts_run ON fetch_attempts(run_id,id);
                 CREATE INDEX IF NOT EXISTS idx_provider_comparisons_run ON provider_comparisons(run_id,id);
@@ -1310,6 +1313,7 @@ class KolPostStore:
                     "total_kols": "INTEGER NOT NULL DEFAULT 0",
                     "processed_kols": "INTEGER NOT NULL DEFAULT 0",
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
                 "kols": {
                     "last_success_at": "TEXT NOT NULL DEFAULT ''",
@@ -1362,6 +1366,7 @@ class KolPostStore:
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
                     "progress_current": "INTEGER NOT NULL DEFAULT 0",
                     "progress_total": "INTEGER NOT NULL DEFAULT 0",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
             }
             for table, columns in migrations.items():
@@ -1457,6 +1462,7 @@ class KolPostStore:
             ("gap_kols_json", "gap_kols", []),
             ("fallback_kols_json", "fallback_kols", []),
             ("shadow_failed_kols_json", "shadow_failed_kols", []),
+            ("platform_breakdown_json", "platform_breakdown", {}),
             ("errors_json", "errors", []),
             ("warnings_json", "warnings", []),
         ]:
@@ -3261,9 +3267,9 @@ class KolPostStore:
             "blocked"
             if summary.blocked_platforms and summary.successful_kols == 0
             else "failed"
-            if summary.successful_kols == 0 and summary.failed_kols
+            if summary.successful_kols == 0 and (summary.failed_kols or summary.blocked_platforms)
             else "partial"
-            if summary.failed_kols
+            if summary.failed_kols or summary.blocked_platforms
             else "success"
         )
         with self.connect() as db:
@@ -3273,7 +3279,7 @@ class KolPostStore:
                     processed_kols=CASE WHEN total_kols>0 THEN total_kols ELSE ? END,
                     successful_kols=?,failed_kols=?,
                     new_posts=?,candidate_posts=?,auth_status=?,gap_kols_json=?,fallback_kols_json=?,
-                    shadow_failed_kols_json=?,errors_json=? WHERE run_id=?
+                    shadow_failed_kols_json=?,platform_breakdown_json=?,errors_json=? WHERE run_id=?
                 """,
                 (
                     now_iso(),
@@ -3287,6 +3293,7 @@ class KolPostStore:
                     _json(summary.gap_kols),
                     _json(summary.fallback_kols),
                     _json(summary.shadow_failed_kols),
+                    _json(summary.platform_breakdown),
                     _json(summary.errors),
                     summary.run_id,
                 ),
@@ -5061,6 +5068,7 @@ def run_post_fetch(
             requested_count=requested_depth,
         )
         active_kols = store.pending_fetch_queue(batch_key)
+    selected_kols = list(active_kols)
     run_id = (
         f"dry-run-{uuid.uuid4().hex}"
         if dry_run
@@ -5079,6 +5087,23 @@ def run_post_fetch(
     platform_auth_failures: set[str] = set()
     platform_blocked_errors: dict[str, str] = {}
     blocked_reported: set[str] = set()
+    platform_breakdown: dict[str, dict[str, Any]] = {}
+    for kol in selected_kols:
+        platform_key = str(kol.get("platform") or "X").casefold()
+        platform_breakdown.setdefault(
+            platform_key,
+            {
+                "target": 0,
+                "success": 0,
+                "failed": 0,
+                "blocked": 0,
+                "rate_limited": 0,
+                "provider_failed": 0,
+                "pending": 0,
+            },
+        )["target"] += 1
+    for value in platform_breakdown.values():
+        value["pending"] = value["target"]
     providers_by_platform = {
         str(key).casefold(): value for key, value in (platform_providers or {}).items()
     }
@@ -5110,6 +5135,10 @@ def run_post_fetch(
                     new_posts=new_posts,
                     candidate_posts=candidate_posts,
                 )
+            platform_breakdown[platform]["blocked"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             continue
         if platform in platform_auth_failures:
             if batch_key:
@@ -5126,6 +5155,11 @@ def run_post_fetch(
                     new_posts=new_posts,
                     candidate_posts=candidate_posts,
                 )
+            platform_breakdown[platform]["failed"] += 1
+            platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             continue
         if batch_key and not dry_run:
             store.mark_fetch_queue_running(batch_key, int(kol["id"]))
@@ -5287,6 +5321,10 @@ def run_post_fetch(
                     else:
                         store.complete_fetch_queue_item(batch_key, int(kol["id"]))
             successful += 1
+            platform_breakdown[platform]["success"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
         except Exception as exc:
             attempts = list(getattr(exc, "attempts", []))
             rate_limited_this_account = isinstance(exc, TwitterRateLimitError) or any(
@@ -5313,6 +5351,14 @@ def run_post_fetch(
                     reason=str(exc),
                     source="fetch",
                 )
+            platform_breakdown[platform]["failed"] += 1
+            if rate_limited_this_account:
+                platform_breakdown[platform]["rate_limited"] += 1
+            else:
+                platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             if batch_key and not dry_run:
                 error_code = (
                     "rate_limited"
@@ -5376,6 +5422,7 @@ def run_post_fetch(
         queue_pending=int(queue_status["pending"]),
         rate_limit_paused=rate_limit_paused,
         blocked_platforms=sorted(platform_blocked_errors),
+        platform_breakdown=platform_breakdown,
     )
     if not dry_run:
         store.finish_fetch_run(summary)

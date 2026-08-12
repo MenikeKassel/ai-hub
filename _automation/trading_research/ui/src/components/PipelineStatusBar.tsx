@@ -40,11 +40,14 @@ export default function PipelineStatusBar() {
   const deliveryProgress = delivery && !delivery.completed_at && delivery.latest_run_id
     ? `${delivery.latest_phase || 'pipeline'} · ${delivery.stage || delivery.latest_status} · ${delivery.progress_current}/${delivery.progress_total}`
     : ''
+  const platformSummary = delivery?.platform_breakdown
+    ? Object.entries(delivery.platform_breakdown).map(([platform, item]) => `${platform.toUpperCase()} ${item.success}/${item.target}`).join(' · ')
+    : ''
 
   return <div className="pipeline-status-bar" aria-label="数据流水线状态">
     <div><RadioTower size={15} /><span><small>最近帖子采集</small><strong>{shortTime(value?.latest_fetch_at)}</strong></span><i className={value?.latest_fetch_status === 'success' ? 'ok' : 'warn'} /></div>
     <div title={`最近 AI：${shortTime(value?.latest_ai_at)}`}><Bot size={15} /><span><small>AI 队列</small><strong title={aiQueueLabel}>{aiQueueLabel}</strong></span><i className={value?.pending_ai || value?.failed_ai ? 'warn' : 'ok'} /></div>
-    <div><CalendarCheck size={15} /><span><small>晨报交付</small><strong title={deliveryProgress}>{delivery?.completed_at ? `${deliveryLabels[delivery.status] || delivery.status} · ${shortTime(delivery.completed_at)}` : deliveryProgress || deliveryLabels[delivery?.status || ''] || '尚未交付'}</strong></span><i className={delivery?.status === 'ready' ? 'ok' : 'warn'} /></div>
+    <div><CalendarCheck size={15} /><span><small>晨报交付</small><strong title={`${deliveryProgress} ${platformSummary}`}>{delivery?.completed_at ? `${deliveryLabels[delivery.status] || delivery.status} · ${shortTime(delivery.completed_at)}` : deliveryProgress || deliveryLabels[delivery?.status || ''] || '尚未交付'}</strong></span><i className={delivery?.status === 'ready' ? 'ok' : 'warn'} /></div>
     <div><CandlestickChart size={15} /><span><small>行情交易日</small><strong>{marketDetail}</strong></span><i className={marketClosed || marketInSession || !value?.lagging_symbols?.length ? 'ok' : 'warn'} /></div>
   </div>
 }

@@ -114,9 +114,11 @@ class DirectProfileProvider:
                 "status": "ready" if configured else "needs_login",
                 "reason": "explicit profile lookup via twitter-cli" if configured else "X credentials are not configured",
             }
-        script = Path(getattr(self.collector, "script_path", ""))
-        user_data = Path(getattr(self.collector, "user_data_dir", ""))
-        configured = script.is_file() and user_data.is_dir()
+        script_value = str(getattr(self.collector, "script_path", "") or "").strip()
+        user_data_value = str(getattr(self.collector, "user_data_dir", "") or "").strip()
+        script = Path(script_value) if script_value else None
+        user_data = Path(user_data_value) if user_data_value else None
+        configured = bool(script and user_data and script.is_file() and user_data.is_dir())
         return {
             "configured": configured,
             "mode": "direct_profile",

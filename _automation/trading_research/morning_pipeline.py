@@ -82,6 +82,7 @@ class MorningPipeline:
             ),
             "successful_kols": 0,
             "failed_kols": 0,
+            "platform_breakdown": {},
         }
         errors: list[str] = []
         try:
@@ -114,6 +115,27 @@ class MorningPipeline:
                         getattr(fetched, "failed_kols", 0)
                         if not isinstance(fetched, dict)
                             else fetched.get("failed_kols", 0)
+                    )
+                    stages["platform_breakdown"] = (
+                        getattr(fetched, "platform_breakdown", {})
+                        if not isinstance(fetched, dict)
+                        else fetched.get("platform_breakdown", {})
+                    ) or {}
+                    fetch_errors = (
+                        getattr(fetched, "errors", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("errors", [])
+                    ) or []
+                    errors.extend(f"fetch: {str(error)[:1000]}" for error in fetch_errors)
+                    blocked_platforms = (
+                        getattr(fetched, "blocked_platforms", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("blocked_platforms", [])
+                    ) or []
+                    errors.extend(
+                        f"fetch: {platform} provider circuit is blocked"
+                        for platform in blocked_platforms
+                        if not any(str(platform) in str(error) for error in errors)
                     )
                     queue_total = int(
                         getattr(fetched, "queue_total", 0)

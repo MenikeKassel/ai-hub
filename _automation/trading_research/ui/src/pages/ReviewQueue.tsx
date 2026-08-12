@@ -313,6 +313,7 @@ export default function ReviewQueue() {
         : delivery.latest_run_id
           ? `${delivery.latest_phase || 'pipeline'} · ${delivery.stage || delivery.latest_status} · ${delivery.progress_current}/${delivery.progress_total}`
           : '完整晨报尚未启动；帖子补抓成功后仍需运行完整晨报。'}{delivery.completed_at ? ` · ${formatDate(delivery.completed_at)}` : ''}</p>
+      {delivery.platform_breakdown && <div className="platform-breakdown">{Object.entries(delivery.platform_breakdown).map(([platform, value]) => <span key={platform}><b>{platform === 'x' ? 'X' : platform === 'zhihu' ? '知乎' : platform}</b> {value.success}/{value.target} 成功{value.rate_limited ? ` · 限流 ${value.rate_limited}` : ''}{value.blocked ? ` · 熔断 ${value.blocked}` : ''}{value.provider_failed ? ` · 失败 ${value.provider_failed}` : ''}</span>)}</div>}
       {delivery.errors.length > 0 && <details className="morning-delivery-errors"><summary>{delivery.errors.length} 组异常，展开查看</summary><small>{delivery.errors.join('；')}</small></details>}
     </div>}
     <div className="metric-grid metric-grid-five morning-metrics" aria-label="晨间队列筛选">
