@@ -1748,6 +1748,9 @@ def _foundation_status() -> dict[str, Any]:
     quality_status = "valid" if not missing else "failed"
     if not benchmark_available and not missing:
         quality_status = "partial"
+    coverage = reader.coverage(str(release.get("as_of") or ""))
+    if not coverage.get("complete") and not missing:
+        quality_status = "partial"
     try:
         disk = shutil.disk_usage(FOUNDATION_ROOT)
         free_bytes = int(disk.free)
@@ -1762,6 +1765,8 @@ def _foundation_status() -> dict[str, Any]:
         "dataset_paths": paths,
         "benchmark_available": benchmark_available,
         "benchmark_error": benchmark_error,
+        "coverage": coverage,
+        "coverage_complete": bool(coverage.get("complete")),
         "free_bytes": free_bytes,
     }
 
@@ -1779,7 +1784,7 @@ def _run_foundation_refresh(target: date) -> dict[str, Any]:
     python = FOUNDATION_REPO / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         return {"ok": False, "status": "environment_missing", "error": str(python)}
-    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "180"))
+    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "900"))
     command = [
         str(python),
         "-m",
@@ -1837,7 +1842,11 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
         before_as_of = str(before.get("as_of") or "")
         refresh = {"ok": True, "status": "not_needed"}
         refresh_required = bool(
-            before_as_of and date.fromisoformat(before_as_of) < target
+            before_as_of
+            and (
+                date.fromisoformat(before_as_of) < target
+                or before.get("coverage_complete") is False
+            )
         )
         if refresh_required:
             refresh = _run_foundation_refresh(target)

@@ -104,6 +104,42 @@ class FoundationMarketReader:
                 "error": str(error),
             }
 
+    def coverage(self, trade_date: str | None = None) -> dict[str, Any]:
+        """Measure daily cross-section coverage without changing the foundation."""
+        release = self.release()
+        selected_date = trade_date or str(release["as_of"])
+        try:
+            instruments = pd.read_parquet(
+                self.dataset_path("instruments", release),
+                columns=["symbol", "status"],
+            )
+            active = int(instruments["status"].fillna("active").eq("active").sum())
+            daily = pd.read_parquet(
+                self.dataset_path("daily_raw", release),
+                filters=[("trade_date", "=", date.fromisoformat(selected_date))],
+                columns=["symbol"],
+            )
+            observed = int(daily["symbol"].nunique())
+            threshold = 0.90
+            return {
+                "trade_date": selected_date,
+                "active_catalog": active,
+                "observed": observed,
+                "coverage_ratio": round(observed / active, 4) if active else 0.0,
+                "threshold": threshold,
+                "complete": bool(active and observed >= int(active * threshold)),
+            }
+        except (FileNotFoundError, OSError, ValueError, KeyError) as error:
+            return {
+                "trade_date": selected_date,
+                "active_catalog": 0,
+                "observed": 0,
+                "coverage_ratio": 0.0,
+                "threshold": 0.90,
+                "complete": False,
+                "error": str(error),
+            }
+
     def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
         values = self.read_daily_many([symbol], adjustment=adjustment)
         return values.get(str(symbol).split(".", 1)[0], pd.DataFrame())
