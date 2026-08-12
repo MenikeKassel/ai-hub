@@ -425,9 +425,19 @@ switch ($Action) {
         if ($DryRun) { $arguments += "--dry-run" }
         $output = & $python @arguments 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
-        $jsonLine = $output -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1
-        if (-not $jsonLine) { throw "data-refresh returned no structured JSON: $($output.Trim())" }
-        Write-Output $jsonLine.Trim()
+        $text = $output.Trim()
+        $first = $text.IndexOf('{')
+        $last = $text.LastIndexOf('}')
+        if ($first -lt 0 -or $last -le $first) {
+            throw "data-refresh returned no structured JSON: $text"
+        }
+        $jsonText = $text.Substring($first, $last - $first + 1)
+        try {
+            $json = $jsonText | ConvertFrom-Json
+        } catch {
+            throw "data-refresh returned invalid JSON: $($_.Exception.Message); output=$text"
+        }
+        $json | ConvertTo-Json -Depth 30 -Compress
     }
     "returns" { Write-Result (Start-KolTask "KOL_Return_Tracker_Daily") }
     "import-zhihu" {

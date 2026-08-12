@@ -1888,7 +1888,7 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=float(os.environ.get("KOL_UPDATE_TIMEOUT_SECONDS", "600")),
+                    timeout=float(os.environ.get("KOL_UPDATE_TIMEOUT_SECONDS", "1800")),
                     check=False,
                 )
                 update = {
