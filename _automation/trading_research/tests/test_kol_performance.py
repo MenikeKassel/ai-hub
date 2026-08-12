@@ -16,7 +16,7 @@ from kol_performance import (  # noqa: E402
 from kol_tracker import EventRecord, KolStore  # noqa: E402
 
 
-def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01") -> EventRecord:
+def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01", direction: str = "long", warning: str = "") -> EventRecord:
     return EventRecord(
         event_id=event_id,
         kol_name="Fixture KOL",
@@ -26,12 +26,13 @@ def event(event_id: str, source: str, symbol: str, *, posted: str = "2026-01-01"
         posted_at=f"{posted}T09:00:00+08:00",
         symbol=symbol,
         security_name="Fixture",
-        direction="long",
+        direction=direction,
         thesis="Fixture thesis",
         status="active",
         kol_id="7",
         kol_handle="fixture",
         source_post_id=source,
+        execution_warning=warning,
     )
 
 
@@ -79,6 +80,140 @@ class KolPerformanceTests(unittest.TestCase):
             self.assertEqual(2, metrics["event_count"])
             self.assertEqual(2, metrics["unique_symbols"])
             self.assertAlmostEqual(0.13, metrics["median_excess"])
+
+    def test_short_events_are_excluded_from_batch_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-1", "600001", direction="short"),
+                event("E3", "POST-2", "600002", direction="short"),
+            ], backup=False)
+            store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-10", 0.04),
+                checkpoint("E2", "2026-01-10", 0.99),
+            ])
+            result = KolPerformanceService(store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            metrics = result["rows"][0]["metrics"]
+            self.assertEqual(1, metrics["batch_count"])
+            self.assertEqual(1, metrics["event_count"])
+            self.assertEqual(1, metrics["unique_symbols"])
+            self.assertEqual(0, metrics["unmatured_batch_count"])
+            self.assertAlmostEqual(0.04, metrics["median_excess"])
+
+    def test_long_only_metrics_carry_directional_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-2", "600001"),
+            ], backup=False)
+            store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-10", 0.04),
+                checkpoint("E2", "2026-01-10", 0.06),
+            ])
+            result = KolPerformanceService(store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            metrics = result["rows"][0]["metrics"]
+            self.assertEqual(2, metrics["batch_count"])
+            self.assertEqual(2, metrics["event_count"])
+            self.assertEqual(2, metrics["long_event_count"])
+            self.assertEqual(0, metrics["short_event_count"])
+            self.assertEqual(2, metrics["executable_long_event_count"])
+            self.assertEqual(2, metrics["audit_event_count"])
+            self.assertAlmostEqual(0.05, metrics["median_excess"])
+
+    def test_short_only_events_have_no_samples_but_report_short_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            store.save_events([
+                event("S1", "POST-1", "600000", direction="short"),
+                event("S2", "POST-2", "600001", direction="short"),
+            ], backup=False)
+            store.freeze_checkpoints([checkpoint("S1", "2026-01-10", 0.99)])
+            result = KolPerformanceService(store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            metrics = result["rows"][0]["metrics"]
+            self.assertEqual(0, metrics["batch_count"])
+            self.assertEqual(0, metrics["event_count"])
+            self.assertEqual(0, metrics["long_event_count"])
+            self.assertEqual(2, metrics["short_event_count"])
+            self.assertEqual(0, metrics["executable_long_event_count"])
+            self.assertEqual(2, metrics["audit_event_count"])
+            self.assertEqual("no_mature_samples", metrics["sample_status"])
+            self.assertIsNone(metrics["median_excess"])
+
+    def test_mixed_long_and_short_counts_do_not_change_long_returns_or_rank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_long, tempfile.TemporaryDirectory() as tmp_mixed:
+            long_store = KolStore(Path(tmp_long))
+            long_store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-2", "600001"),
+            ], backup=False)
+            long_store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-01", 0.04),
+                checkpoint("E2", "2026-01-01", 0.06),
+            ])
+            mixed_store = KolStore(Path(tmp_mixed))
+            mixed_store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-2", "600001"),
+                event("S1", "POST-3", "600002", direction="short"),
+            ], backup=False)
+            mixed_store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-01", 0.04),
+                checkpoint("E2", "2026-01-01", 0.06),
+                checkpoint("S1", "2026-01-10", 0.99),
+            ])
+            long_result = KolPerformanceService(long_store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            mixed_result = KolPerformanceService(mixed_store).compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+            long_metrics = long_result["rows"][0]["metrics"]
+            mixed_metrics = mixed_result["rows"][0]["metrics"]
+            for field in (
+                "batch_count", "event_count", "long_event_count", "unique_symbols",
+                "recommendation_days", "median_return", "mean_return", "median_excess",
+                "mean_excess", "win_rate", "median_mae", "median_mfe", "worst_batch_excess",
+                "p10_excess", "sample_status",
+            ):
+                self.assertEqual(long_metrics[field], mixed_metrics[field], field)
+            self.assertEqual(0, long_metrics["short_event_count"])
+            self.assertEqual(1, mixed_metrics["short_event_count"])
+            self.assertEqual(3, mixed_metrics["audit_event_count"])
+            self.assertEqual(long_result["rows"][0]["rank"], mixed_result["rows"][0]["rank"])
+            # short_event_count is audit caliber: it survives the recent window
+            # even when the long return sample is filtered out.
+            recent = KolPerformanceService(mixed_store).compute(as_of=date(2026, 1, 12), horizon="1W", window="7")
+            recent_metrics = recent["rows"][0]["metrics"]
+            self.assertEqual(0, recent_metrics["long_event_count"])
+            self.assertEqual(1, recent_metrics["short_event_count"])
+            self.assertEqual(1, recent_metrics["audit_event_count"])
+
+    def test_executable_long_count_excludes_primary_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            store.save_events([
+                event("E1", "POST-1", "600000"),
+                event("E2", "POST-2", "600001", warning="conditional_intraday_entry_unverified"),
+                event("E3", "POST-3", "600002", warning="secondhand"),
+            ], backup=False)
+            store.freeze_checkpoints([
+                checkpoint("E1", "2026-01-10", 0.04),
+                checkpoint("E2", "2026-01-10", 0.99),
+                checkpoint("E3", "2026-01-10", 0.99),
+            ])
+            service = KolPerformanceService(store)
+            primary = service.compute(as_of=date(2026, 1, 12), horizon="1W", window="all", primary_only=True)
+            primary_metrics = primary["rows"][0]["metrics"]
+            self.assertEqual(1, primary_metrics["batch_count"])
+            self.assertEqual(1, primary_metrics["long_event_count"])
+            self.assertEqual(1, primary_metrics["executable_long_event_count"])
+            # The secondary view admits the warned events into the sample, so the
+            # sample count exceeds the executable long universe count.
+            secondary = service.compute(as_of=date(2026, 1, 12), horizon="1W", window="all", primary_only=False)
+            secondary_metrics = secondary["rows"][0]["metrics"]
+            self.assertEqual(2, secondary_metrics["batch_count"])
+            self.assertEqual(2, secondary_metrics["long_event_count"])
+            self.assertEqual(1, secondary_metrics["executable_long_event_count"])
+            self.assertEqual(0, secondary_metrics["short_event_count"])
+            self.assertEqual(2, secondary_metrics["audit_event_count"])
 
     def test_different_posts_remain_separate_and_recent_window_uses_trade_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

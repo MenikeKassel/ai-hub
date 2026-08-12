@@ -59,13 +59,13 @@ Edge/Chrome fallback before API/Jina readers. The fallback:
 Manual probe:
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\zhihu_local_capture.py --url "https://www.zhihu.com/question/<qid>/answer/<aid>" --browser edge --profile-directory "Default" --user-data-dir "<USER_HOME>\AppData\Local\hermes\browser-profiles\zhihu-edge" --json
+python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\zhihu_local_capture.py --url "https://www.zhihu.com/question/<qid>/answer/<aid>" --browser edge --profile-directory "Default" --user-data-dir "C:\Users\YOUR_USER\AppData\Local\hermes\browser-profiles\zhihu-edge" --json
 ```
 
 If browser DevTools is unreachable, close Edge/Chrome and start it with remote debugging, then rerun:
 
 ```powershell
-& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="<USER_HOME>\AppData\Local\hermes\browser-profiles\zhihu-edge" --profile-directory="Default" --new-window "https://www.zhihu.com"
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="C:\Users\YOUR_USER\AppData\Local\hermes\browser-profiles\zhihu-edge" --profile-directory="Default" --new-window "https://www.zhihu.com"
 ```
 
 ## Response Format

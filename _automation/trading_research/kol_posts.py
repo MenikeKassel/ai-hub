@@ -44,7 +44,6 @@ LONG_WORDS = {
     "买入",
     "建仓",
     "低吸",
-    "关注",
     "推荐",
     "布局",
     "机会",
@@ -54,7 +53,7 @@ LONG_WORDS = {
     "马前炮",
     "个股分享",
 }
-SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "风险", "见顶", "离场"}
+SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "见顶", "离场"}
 RETROSPECTIVE_WORDS = {"昨天推荐", "此前推荐", "已经涨停", "成功涨停", "回顾", "复盘"}
 FINANCE_WORDS = {"A股", "股票", "个股", "板块", "涨停", "跌停", "K线", "指数", "业绩", "估值", "资金", "成交量", "主力"}
 STRUCTURED_REVIEW_VERSION = "structured-text-v2"
@@ -198,6 +197,7 @@ class FetchSummary:
     queue_completed: int = 0
     queue_pending: int = 0
     rate_limit_paused: bool = False
+    blocked_platforms: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -478,7 +478,19 @@ class RuleClassifier:
         finance_hits = sorted(word for word in FINANCE_WORDS if word in content)
         if finance_hits:
             reasons.append("finance_language")
-        direction = "long" if len(long_hits) > len(short_hits) else "short" if short_hits else ""
+        # Direction needs a strict majority of directional words; a tie
+        # (e.g. one bullish and one bearish token) yields no direction
+        # rather than defaulting to short.
+        if long_hits and not short_hits:
+            direction = "long"
+        elif short_hits and not long_hits:
+            direction = "short"
+        elif long_hits and len(long_hits) > len(short_hits):
+            direction = "long"
+        elif short_hits and len(short_hits) > len(long_hits):
+            direction = "short"
+        else:
+            direction = ""
         retrospective = any(word in content for word in RETROSPECTIVE_WORDS)
         evidence_type = "retrospective" if retrospective else "original_pre_event"
         if value("post_type") in {"retweet", "aggregation"}:
@@ -682,7 +694,6 @@ class RuleClassifier:
 
 def validate_event_draft(draft: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    rate_limit_paused = False
     symbol = str(draft.get("symbol") or "")
     if not re.fullmatch(r"\d{6}", symbol):
         errors.append("one_symbol_per_event")
@@ -3156,7 +3167,15 @@ class KolPostStore:
             )
 
     def finish_fetch_run(self, summary: FetchSummary) -> None:
-        status = "failed" if summary.successful_kols == 0 and summary.failed_kols else "partial" if summary.failed_kols else "success"
+        status = (
+            "blocked"
+            if summary.blocked_platforms and summary.successful_kols == 0
+            else "failed"
+            if summary.successful_kols == 0 and summary.failed_kols
+            else "partial"
+            if summary.failed_kols
+            else "success"
+        )
         with self.connect() as db:
             db.execute(
                 """
@@ -3498,6 +3517,57 @@ class ZhihuProfileProvider:
         self.port = int(port)
         self.runner = runner
         self.timeout_seconds = max(30, min(int(timeout_seconds), 300))
+        self.session_prepared = False
+        self.preflight_error = ""
+
+    def prepare_session(self, handle: str) -> None:
+        """Preflight the shared browser once before a Zhihu batch."""
+        if self.session_prepared:
+            return
+        if not self.script_path.is_file():
+            raise ZhihuProviderError(f"Zhihu capture script is missing: {self.script_path}")
+        command = [
+            self.python_command,
+            str(self.script_path),
+            "--handle",
+            handle,
+            "--port",
+            str(self.port),
+            "--profile-directory",
+            self.profile_directory,
+            "--prepare-only",
+        ]
+        if self.browser_path:
+            command.extend(["--browser-path", self.browser_path])
+        if self.user_data_dir:
+            command.extend(["--user-data-dir", self.user_data_dir])
+        try:
+            completed = self.runner(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.preflight_error = (
+                f"Zhihu browser preflight timed out after {self.timeout_seconds} seconds"
+            )
+            raise ZhihuProviderError(self.preflight_error) from exc
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            self.preflight_error = f"Zhihu browser preflight returned invalid JSON: {exc}"
+            raise ZhihuProviderError(self.preflight_error) from exc
+        if completed.returncode != 0 or not payload.get("ok"):
+            self.preflight_error = str(
+                payload.get("error") or completed.stderr or "Zhihu browser preflight failed"
+            )[-2000:]
+            raise ZhihuProviderError(self.preflight_error)
+        self.session_prepared = True
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
         if not self.script_path.is_file():
@@ -3514,6 +3584,7 @@ class ZhihuProfileProvider:
             str(self.port),
             "--profile-directory",
             self.profile_directory,
+            "--no-launch",
         ]
         if self.browser_path:
             command.extend(["--browser-path", self.browser_path])
@@ -4905,12 +4976,40 @@ def run_post_fetch(
     authentication_failed = False
     rate_limit_paused = False
     platform_auth_failures: set[str] = set()
+    platform_blocked_errors: dict[str, str] = {}
+    blocked_reported: set[str] = set()
     providers_by_platform = {
         str(key).casefold(): value for key, value in (platform_providers or {}).items()
     }
+    zhihu_kols = [
+        kol for kol in active_kols
+        if str(kol.get("platform") or "X").casefold() == "zhihu"
+    ]
+    zhihu_provider = providers_by_platform.get("zhihu", provider)
+    if zhihu_kols and hasattr(zhihu_provider, "prepare_session"):
+        try:
+            zhihu_provider.prepare_session(str(zhihu_kols[0].get("handle") or ""))
+        except Exception as exc:
+            platform_blocked_errors["zhihu"] = str(exc)
     for index, kol in enumerate(active_kols):
         platform = str(kol.get("platform") or "X").casefold()
         selected_provider = providers_by_platform.get(platform, provider)
+        if platform in platform_blocked_errors:
+            if platform not in blocked_reported:
+                errors.append(
+                    f"{platform} batch blocked before account fetch: {platform_blocked_errors[platform]}"
+                )
+                blocked_reported.add(platform)
+            if not dry_run:
+                store.update_fetch_progress(
+                    run_id,
+                    processed_kols=index + 1,
+                    successful_kols=successful,
+                    failed_kols=failed,
+                    new_posts=new_posts,
+                    candidate_posts=candidate_posts,
+                )
+            continue
         if platform in platform_auth_failures:
             if batch_key:
                 break
@@ -5160,6 +5259,7 @@ def run_post_fetch(
         queue_completed=int(queue_status["completed"]),
         queue_pending=int(queue_status["pending"]),
         rate_limit_paused=rate_limit_paused,
+        blocked_platforms=sorted(platform_blocked_errors),
     )
     if not dry_run:
         store.finish_fetch_run(summary)

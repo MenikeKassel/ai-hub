@@ -1,4 +1,6 @@
-﻿akshare>=1.10.0
+﻿# Top-level readable declarations. Reproducible installs use requirements.lock
+# (pip install -r requirements.lock). CI installs from the lock file.
+akshare>=1.10.0
 baostock>=0.8.9
 pandas>=2.0.0
 duckdb>=1.3.0,<2.0.0

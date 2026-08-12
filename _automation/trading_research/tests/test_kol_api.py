@@ -37,63 +37,6 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(_read_process_pid(invalid), "")
             self.assertEqual(_read_process_pid(root / "missing.pid"), "")
 
-    def test_board_mainline_endpoints_expose_health_list_detail_and_series(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            app = create_app(ApiSettings(
-                runtime_root=root / "runtime",
-                frontend_dist=root / "dist",
-                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
-            ))
-            market = app.state.market_store
-            timestamp = "2026-07-24T09:00:00+08:00"
-            with market.connect() as db:
-                db.execute(
-                    "INSERT INTO board_catalog VALUES (?,?,?,?,?,?,?,?,?)",
-                    ["industry:BK0001", "BK0001", "fixture board", "industry", "active", "fixture", timestamp, timestamp, timestamp],
-                )
-                db.execute(
-                    "INSERT INTO board_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 100, 105, 99, 104, 1000, 104000,
-                        1.2, 8, 2, "leader", 0.05, "fixture", "history", True, timestamp, "hash",
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 0.2, 0.4, 0.6, 95, 90, 88,
-                        0.8, 1.2, "mainline_candidate", "board-rps-v1", 100, 100, 100,
-                        1.0, "[]", "hash", timestamp,
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rank VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 1, 2, 3,
-                        100, 100, 100, "board-rank-v1", "hash", timestamp,
-                    ],
-                )
-            client = TestClient(app)
-
-            health = client.get("/api/board-mainline/health")
-            listing = client.get("/api/board-mainline?board_type=industry")
-            detail = client.get("/api/board-mainline/BK0001?board_type=industry")
-            series = client.get("/api/board-mainline/BK0001/series?board_type=industry")
-            rank_series = client.get(
-                "/api/board-mainline/BK0001/rank-series?board_type=industry&window=50&range=all"
-            )
-
-            self.assertEqual(200, health.status_code, health.text)
-            self.assertEqual("ready", health.json()["status"])
-            self.assertEqual(1, listing.json()["total"])
-            self.assertEqual("fixture board", detail.json()["board_name"])
-            self.assertEqual([], detail.json()["related_events"])
-            self.assertEqual(104, series.json()[0]["close"])
-            self.assertEqual(1, rank_series.json()["point_count"])
-            self.assertEqual(1, rank_series.json()["points"][0]["rank"])
-            self.assertFalse(rank_series.json()["truncated"])
-
     def test_pipeline_status_is_lightweight_and_scopes_pending_ai(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

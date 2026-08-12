@@ -57,6 +57,10 @@ export interface KolLeaderboardRow {
   score: number | null
   event_count: number
   executable_event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   horizons: Record<'1W' | '1M' | '3M' | '6M', KolHorizonMetrics>
 }
 
@@ -68,6 +72,10 @@ export interface KolLeaderboard {
 export interface KolPerformanceMetrics extends KolHorizonMetrics {
   batch_count: number
   event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   recommendation_days: number
   unique_symbols: number
   unmatured_batch_count: number
@@ -490,6 +498,30 @@ export interface MarketHealth {
   runs?: MarketRun[]
   queue?: Array<{ queue_key: string; symbol: string; status: string; reason: string; last_error: string }>
   freestockdb?: FreeStockDBHealth
+  foundation?: {
+    ok?: boolean
+    release_id?: string
+    as_of?: string
+    root?: string
+    coverage?: {
+      trade_date?: string
+      active_catalog?: number
+      observed?: number
+      coverage_ratio?: number
+      threshold?: number
+      complete?: boolean
+    }
+    coverage_complete?: boolean
+  }
+}
+
+export interface FoundationRefreshState {
+  status: 'idle' | 'running' | 'completed' | 'degraded'
+  as_of?: string
+  started_at?: string
+  finished_at?: string
+  output_tail?: string
+  returncode?: number
 }
 
 export interface FreeStockDBHealth {
@@ -606,6 +638,7 @@ export interface EventTechnicalContext {
   source_hash: string
   error: string
   computed_at: string
+  foundation_release_id?: string
 }
 
 export interface MarketDailyBar {
@@ -647,150 +680,6 @@ export interface MarketIndicatorSeries {
   available_to: string
   row_count: number
   rows: MarketIndicatorBar[]
-}
-
-export type BoardType = 'industry' | 'concept'
-export type BoardMainlineStatus =
-  | 'persistent_candidate'
-  | 'mainline_candidate'
-  | 'strong_watch'
-  | 'rps_only'
-  | 'partial_universe'
-  | 'neutral'
-
-export interface BoardMainlineItem {
-  board_key: string
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  trade_date: string
-  close: number
-  turnover: number | null
-  up_count: number | null
-  down_count: number | null
-  leader_name: string
-  leader_change: number | null
-  return_50: number | null
-  return_120: number | null
-  return_250: number | null
-  rps_50: number | null
-  rps_120: number | null
-  rps_250: number | null
-  breadth: number | null
-  turnover_ratio_20: number | null
-  status: BoardMainlineStatus
-  coverage_ratio: number
-  warnings: string[]
-}
-
-export interface BoardMainlinePage {
-  items: BoardMainlineItem[]
-  total: number
-  page: number
-  page_size: number
-  total_pages: number
-}
-
-export interface BoardSeriesBar {
-  trade_date: string
-  open: number | null
-  high: number | null
-  low: number | null
-  close: number
-  volume: number | null
-  amount: number | null
-  turnover: number | null
-  up_count: number | null
-  down_count: number | null
-  source_kind: string
-  rps_50: number | null
-  rps_120: number | null
-  rps_250: number | null
-  breadth: number | null
-  turnover_ratio_20: number | null
-  status: BoardMainlineStatus | null
-  warnings: string[]
-  rank_50?: number | null
-  rank_120?: number | null
-  rank_250?: number | null
-  universe_size_50?: number | null
-  universe_size_120?: number | null
-  universe_size_250?: number | null
-}
-
-export interface BoardRankPoint {
-  trade_date: string
-  rank: number
-  universe_size: number
-  rps: number | null
-  period_return: number | null
-  status: BoardMainlineStatus | null
-  warnings: string[]
-}
-
-export interface BoardRankSeries {
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  window: 50 | 120 | 250
-  range?: '120' | '250' | 'all'
-  available_from: string
-  available_to: string
-  display_from: string
-  display_to: string
-  total_point_count: number
-  returned_point_count: number
-  point_count: number
-  truncated: boolean
-  points: BoardRankPoint[]
-}
-
-export interface BoardRelatedEvent {
-  event_id: string
-  kol_name: string
-  platform: string
-  posted_at: string
-  symbol: string
-  security_name: string
-  direction: 'long' | 'short'
-  status: string
-  source_url: string
-}
-
-export interface BoardMainlineDetail {
-  board_key: string
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  status: string
-  provider: string
-  first_seen_at: string
-  last_seen_at: string
-  updated_at: string
-  latest: BoardMainlineItem | null
-  members: Array<{ symbol: string; security_name: string; snapshot_date: string }>
-  related_events: BoardRelatedEvent[]
-}
-
-export interface BoardMainlineHealth {
-  status: 'empty' | 'backfilling' | 'ready' | 'partial_coverage' | 'source_blocked' | 'failed'
-  formula_version: string
-  catalog_counts: Partial<Record<BoardType, number>>
-  rps_counts: Partial<Record<BoardType, number>>
-  coverage_ratios: Partial<Record<BoardType, number>>
-  latest_trade_dates: Partial<Record<BoardType, string>>
-  pending_backfill: number
-  latest_run: null | {
-    run_id: string
-    operation: string
-    status: string
-    processed: number
-    succeeded: number
-    failed: number
-    started_at: string
-    completed_at: string
-    error: string
-  }
 }
 
 export interface Event {

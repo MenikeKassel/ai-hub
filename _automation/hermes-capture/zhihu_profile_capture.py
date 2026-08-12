@@ -23,20 +23,38 @@ def main() -> int:
     parser.add_argument("--profile-directory", default="Default")
     parser.add_argument("--user-data-dir", default="")
     parser.add_argument("--no-launch", action="store_true")
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Ensure the browser DevTools endpoint is available without opening a profile tab.",
+    )
     parser.add_argument("--wait", type=int, default=30)
     parser.add_argument("--max-chars", type=int, default=80000)
     args = parser.parse_args()
 
-    result = capture_profile_answers(
-        handle=args.handle,
-        limit=args.limit,
-        port=args.port,
-        browser_path=args.browser_path or local.default_browser_path(args.browser),
-        profile_directory=args.profile_directory,
-        user_data_dir=args.user_data_dir,
-        launch=not args.no_launch,
-        wait_seconds=args.wait,
-        max_chars=args.max_chars,
+    capture_kwargs = {
+        "handle": args.handle,
+        "limit": args.limit,
+        "port": args.port,
+        "browser_path": args.browser_path or local.default_browser_path(args.browser),
+        "profile_directory": args.profile_directory,
+        "user_data_dir": args.user_data_dir,
+        "launch": not args.no_launch,
+        "wait_seconds": args.wait,
+        "max_chars": args.max_chars,
+    }
+    result = (
+        prepare_browser(
+            port=args.port,
+            browser_path=capture_kwargs["browser_path"],
+            profile_directory=args.profile_directory,
+            user_data_dir=args.user_data_dir,
+            profile_url=f"https://www.zhihu.com/people/{urllib.parse.quote(args.handle.strip().strip('/'))}/answers",
+            launch=not args.no_launch,
+            wait_seconds=args.wait,
+        )
+        if args.prepare_only
+        else capture_profile_answers(**capture_kwargs)
     )
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
@@ -58,22 +76,17 @@ def capture_profile_answers(
     if not clean_handle or len(clean_handle) > 100:
         return {"ok": False, "error": "invalid Zhihu member handle", "posts": []}
     profile_url = f"https://www.zhihu.com/people/{urllib.parse.quote(clean_handle)}/answers"
-    endpoint = local.wait_for_cdp(port, seconds=2)
-    if not endpoint and launch:
-        local.launch_chrome(
-            browser_path,
-            profile_directory,
-            user_data_dir,
-            port,
-            profile_url,
-        )
-        endpoint = local.wait_for_cdp(port, seconds=wait_seconds)
-    if not endpoint:
-        return {
-            "ok": False,
-            "error": "Zhihu browser DevTools is unavailable",
-            "posts": [],
-        }
+    prepared = prepare_browser(
+        port=port,
+        browser_path=browser_path,
+        profile_directory=profile_directory,
+        user_data_dir=user_data_dir,
+        profile_url=profile_url,
+        launch=launch,
+        wait_seconds=wait_seconds,
+    )
+    if not prepared.get("ok"):
+        return {**prepared, "posts": []}
 
     tab: dict[str, Any] | None = None
     try:
@@ -111,6 +124,36 @@ def capture_profile_answers(
     finally:
         if tab:
             close_tab(port, tab)
+
+
+def prepare_browser(
+    *,
+    port: int,
+    browser_path: str,
+    profile_directory: str,
+    user_data_dir: str,
+    profile_url: str,
+    launch: bool,
+    wait_seconds: int,
+) -> dict[str, Any]:
+    """Ensure one shared browser session is ready for a whole Zhihu batch."""
+    endpoint = local.wait_for_cdp(port, seconds=2)
+    if not endpoint and launch:
+        local.launch_chrome(
+            browser_path,
+            profile_directory,
+            user_data_dir,
+            port,
+            profile_url,
+        )
+        endpoint = local.wait_for_cdp(port, seconds=wait_seconds)
+    if not endpoint:
+        return {
+            "ok": False,
+            "error": "Zhihu browser DevTools is unavailable",
+            "port": port,
+        }
+    return {"ok": True, "port": port, "endpoint": endpoint}
 
 
 def open_or_find_profile_tab(port: int, handle: str, url: str) -> dict[str, Any]:

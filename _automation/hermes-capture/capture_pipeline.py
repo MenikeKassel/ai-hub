@@ -80,12 +80,14 @@ VALUE_SCORE_BY_COMMAND = {
 
 def load_config(path: Path) -> dict[str, Any]:
     defaults = {
-        "notion_database_id": "28552633-5cd6-800e-96b4-c9d97bba2c58",
+        # 真实数据库 ID 不硬编码: 通过环境变量 NOTION_DATABASE_ID 或 config.yaml 提供
+        "notion_database_id": os.environ.get("NOTION_DATABASE_ID", ""),
         "notion_version": "2022-06-28",
         "vault_path": "",  # 已废弃(第二大脑项目终止,2026-08-06)
         "obsidian_inbox_dir": "00_Inbox",
         "obsidian_project_allowlist": "",
-        "notion_env_files": r"<USER_HOME>\.hermes\.env;<USER_HOME>\AppData\Local\hermes\.env",
+        # .env 文件列表(分号分隔)通过环境变量 NOTION_ENV_FILES 提供, 不硬编码用户路径
+        "notion_env_files": os.environ.get("NOTION_ENV_FILES", ""),
         "max_content_chars": "8000",
         "enable_zhihu_local_browser": "true",
         "zhihu_local_browser": "auto",
@@ -113,6 +115,14 @@ def load_config(path: Path) -> dict[str, Any]:
         value = value.strip().strip('"').strip("'")
         if key.strip():
             defaults[key.strip()] = value
+    # 环境变量优先于配置文件, 便于不修改 config.yaml 也能覆盖
+    for key, env_name in (
+        ("notion_database_id", "NOTION_DATABASE_ID"),
+        ("notion_env_files", "NOTION_ENV_FILES"),
+    ):
+        env_value = os.environ.get(env_name, "")
+        if env_value:
+            defaults[key] = env_value
     return defaults
 
 
@@ -1400,7 +1410,7 @@ def should_write_obsidian(item: dict[str, Any], config: dict[str, Any]) -> bool:
 
     configured = str(config.get("obsidian_project_allowlist", "")).strip()
     if not configured:
-        # 第二大脑 v2.2.1:捕获阶段不再写 Obsidian;知识提升统一走 /wiki(second-brain-engine)
+        # Obsidian 写入已停用(2026-08-06): allowlist 为空即不写
         return False
 
     allowed_projects = {
@@ -1439,6 +1449,12 @@ def manual_supplement_result(item: dict[str, Any]) -> dict[str, Any]:
 
 def _persist_item(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     env_files = [part for part in str(config["notion_env_files"]).split(";") if part]
+    database_id = str(config.get("notion_database_id") or "").strip()
+    if not database_id or database_id == "REPLACE_WITH_NOTION_DATABASE_ID":
+        raise ValueError(
+            "Notion 数据库 ID 未配置: 请设置环境变量 NOTION_DATABASE_ID, "
+            "或在 config.yaml 中填写真实的 notion_database_id"
+        )
     notion_key = load_notion_key(env_files)
     field_config = {
         key.removeprefix("field_"): str(value)
@@ -1447,7 +1463,7 @@ def _persist_item(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any
     }
     notion = NotionClient(
         notion_key,
-        str(config["notion_database_id"]),
+        database_id,
         str(config.get("notion_version", "2022-06-28")),
         fields=field_config,
     )

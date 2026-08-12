@@ -443,6 +443,28 @@ class MarketDataTests(unittest.TestCase):
             self.assertEqual(result.run_id, manifests[-1]["run_id"])
             self.assertEqual(2, len(store.read_daily("600900", adjustment="raw")))
 
+    def test_write_daily_handles_empty_and_invalid_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketStore(Path(tmp) / "market")
+
+            # Empty frame: silent no-op (previously raised KeyError and
+            # crashed the whole market sync).
+            self.assertEqual([], store.write_daily(pd.DataFrame(), symbol="600900", adjustment="qfq"))
+
+            # Missing the grouping column: clear ValueError instead of KeyError.
+            with self.assertRaises(ValueError):
+                store.write_daily(
+                    pd.DataFrame({"close": [1.0]}),
+                    symbol="600900",
+                    adjustment="qfq",
+                )
+
+            # A valid frame still round-trips.
+            frame = daily_frame().rename(columns={"date": "trade_date"})
+            paths = store.write_daily(frame, symbol="600900", adjustment="qfq")
+            self.assertEqual(1, len(paths))
+            self.assertEqual(len(frame), len(store.read_daily("600900", adjustment="qfq")))
+
     def test_sync_drops_provider_rows_outside_requested_date_range(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = MarketStore(Path(tmp) / "market")

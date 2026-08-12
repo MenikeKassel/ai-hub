@@ -41,11 +41,11 @@ export default function Kols() {
     {view === 'performance' && <div className="panel kol-leaderboard">
       <div className="panel-heading"><div><h2>KOL阶段表现</h2><span>只统计已冻结、已验证且可执行的看多推荐事件</span></div><span className="badge neutral">按超额收益审计</span></div>
       <div className="scope-note"><BarChart3 size={15} />看空事件保留审计记录，但不计入收益、胜率或排名；阶段表现已升级为独立工作台，支持平台分组、批次等权、近期窗口和趋势查看。<button className="text-button" onClick={() => { window.location.hash = '/performance' }}>打开 KOL 表现</button></div>
-      <div className="table-scroll"><table><thead><tr><th>排名</th><th>KOL</th><th>阶段</th><th>可执行事件</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
+      <div className="table-scroll"><table><thead><tr><th>排名</th><th>KOL</th><th>阶段</th><th>可执行/看多</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
       <tbody>{leaderboard.data?.rows.map((row) => <tr key={row.kol_name}>
         <td className="mono">{row.rank || '-'}</td><td><strong>{row.kol_name}</strong>{row.score !== null && <span className="secondary-line">观察分 {row.score.toFixed(2)}</span>}</td>
         <td><span className={`badge ${row.tier === 'reliable' || row.tier === 'long_term' ? 'green' : row.tier === 'provisional' || row.tier === 'watch' ? 'amber' : 'neutral'}`}>{({ collecting: '样本中', watch: '观察中', provisional: '初步排名', reliable: '较可信', long_term: '长期验证' } as const)[row.tier]}</span></td>
-        <td>{row.executable_event_count} / {row.event_count}</td>
+        <td>{row.executable_long_event_count} / {row.long_event_count}<span className="secondary-line">看空 {row.short_event_count} 条仅审计</span></td>
         {(['1W', '1M', '3M', '6M'] as const).map((horizon) => { const value = row.horizons[horizon]; return <td key={horizon}><strong>{percent(value.median_excess)}</strong><span className="secondary-line">{value.samples} 条 · 胜率 {percent(value.win_rate)}</span></td> })}
       </tr>)}</tbody></table></div>
       {!leaderboard.isLoading && !leaderboard.data?.rows.length && <div className="empty-state compact">尚无可统计KOL</div>}
