@@ -1939,6 +1939,13 @@ def _backfill_event_contexts(
         and (event_ids is None or event.event_id in event_ids)
         and (symbols is None or event.symbol in symbols)
     ]
+    foundation_release_id = ""
+    foundation = getattr(market_store, "foundation", None)
+    if foundation is not None:
+        try:
+            foundation_release_id = str(foundation.release().get("release_id", ""))
+        except Exception:
+            foundation_release_id = ""
     for event in events:
         expected_trade_date: date | None = None
         try:
@@ -1952,6 +1959,7 @@ def _backfill_event_contexts(
                 posted_at=event.posted_at,
                 qfq_prices=frame,
                 expected_trade_date=expected_trade_date,
+                foundation_release_id=foundation_release_id,
             )
             changed = market_store.save_event_technical_context(
                 context.to_record(),
@@ -1969,6 +1977,7 @@ def _backfill_event_contexts(
                     posted_at=event.posted_at,
                     expected_trade_date=expected_trade_date,
                     error=str(exc),
+                    foundation_release_id=foundation_release_id,
                 )
                 market_store.save_event_technical_context(failed.to_record())
             except Exception:

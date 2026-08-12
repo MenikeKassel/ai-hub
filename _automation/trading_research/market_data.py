@@ -407,7 +407,8 @@ class MarketStore:
                     warnings_json VARCHAR NOT NULL,
                     source_hash VARCHAR NOT NULL,
                     error VARCHAR NOT NULL,
-                    computed_at VARCHAR NOT NULL
+                    computed_at VARCHAR NOT NULL,
+                    foundation_release_id VARCHAR NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS event_intraday_context(
                     snapshot_id VARCHAR PRIMARY KEY,
@@ -493,6 +494,16 @@ class MarketStore:
                     }
                     if "direction" not in intraday_columns:
                         db.execute("ALTER TABLE event_intraday_context ADD COLUMN direction VARCHAR DEFAULT 'long'")
+                    context_columns = {
+                        str(row[0])
+                        for row in db.execute(
+                            "SELECT column_name FROM information_schema.columns WHERE table_name='event_technical_context'"
+                        ).fetchall()
+                    }
+                    if "foundation_release_id" not in context_columns:
+                        db.execute(
+                            "ALTER TABLE event_technical_context ADD COLUMN foundation_release_id VARCHAR DEFAULT ''"
+                        )
                     if context_table_exists and not context_has_snapshot_id:
                         db.execute(
                             """
@@ -514,9 +525,9 @@ class MarketStore:
                         db.execute("DROP TABLE event_technical_context_v3")
                     count = db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0]
                     if count:
-                        db.execute("UPDATE schema_meta SET version=8")
+                        db.execute("UPDATE schema_meta SET version=9")
                     else:
-                        db.execute("INSERT INTO schema_meta VALUES (8)")
+                        db.execute("INSERT INTO schema_meta VALUES (9)")
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
@@ -539,6 +550,7 @@ class MarketStore:
             "macd_hist", "macd_hist_pct", "atr14", "atr14_pct", "volume_ratio_5",
             "return_20d", "distance_60d_high", "history_bars", "status",
             "warnings_json", "source_hash", "error", "computed_at",
+            "foundation_release_id",
         ]
         missing = [column for column in columns if column not in record]
         if missing:
@@ -549,7 +561,22 @@ class MarketStore:
                 [record["snapshot_id"]],
             ).fetchone()
             if exists:
-                return False
+                if not force:
+                    return False
+                assignments = ",".join(f"{column}=?" for column in columns if column != "snapshot_id")
+                values = [record[column] for column in columns if column != "snapshot_id"]
+                values.append(record["snapshot_id"])
+                db.execute("BEGIN TRANSACTION")
+                try:
+                    db.execute(
+                        f"UPDATE event_technical_context SET {assignments} WHERE snapshot_id=?",
+                        values,
+                    )
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
+                return True
             db.execute("BEGIN TRANSACTION")
             try:
                 placeholders = ",".join("?" for _ in columns)

@@ -623,6 +623,7 @@ export interface EventTechnicalContext {
   source_hash: string
   error: string
   computed_at: string
+  foundation_release_id?: string
 }
 
 export interface MarketDailyBar {
