@@ -21,6 +21,7 @@ ACTIONS = {
     "collect",
     "review",
     "market",
+    "data-refresh",
     "returns",
     "import-zhihu",
     "onboard-zhihu",
@@ -97,6 +98,12 @@ KOL_OPERATOR_SCHEMA = {
                 "type": "string",
                 "description": "Review date in YYYY-MM-DD form.",
             },
+            "as_of": {
+                "type": "string",
+                "description": "Completed market date in YYYY-MM-DD form, or auto.",
+            },
+            "notify": {"type": "boolean", "default": False},
+            "dry_run": {"type": "boolean", "default": False},
             "note": {"type": "string"},
             "event_id": {"type": "string"},
             "event_action": {
@@ -159,6 +166,7 @@ def _build_command(args: dict[str, Any]) -> list[str]:
         "candidate_state": "-CandidateState",
         "limit": "-Limit",
         "days": "-Days",
+        "as_of": "-AsOf",
     }
     for field, switch in switches.items():
         value = args.get(field)
@@ -166,6 +174,10 @@ def _build_command(args: dict[str, Any]) -> list[str]:
             command.extend((switch, str(value)))
     if args.get("force") is True:
         command.append("-Force")
+    if args.get("notify") is True:
+        command.append("-Notify")
+    if args.get("dry_run") is True:
+        command.append("-DryRun")
     return command
 
 
@@ -186,6 +198,7 @@ def _parse_operator_output(stdout: str) -> dict[str, Any] | list[Any]:
 def run_operator(args: dict[str, Any], **_: Any) -> str:
     try:
         command = _build_command(args)
+        timeout = 900 if args.get("action") == "data-refresh" else 90
         completed = subprocess.run(
             command,
             cwd=str(REPO_ROOT),
@@ -193,7 +206,7 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=90,
+            timeout=timeout,
             check=False,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW
@@ -215,7 +228,13 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
         return _json_result(_parse_operator_output(completed.stdout))
     except subprocess.TimeoutExpired:
         return _json_result(
-            {"ok": False, "error": "KOL operator timed out after 90 seconds"}
+            {
+                "ok": False,
+                "error": (
+                    "KOL operator timed out after "
+                    f"{900 if args.get('action') == 'data-refresh' else 90} seconds"
+                ),
+            }
         )
     except Exception as exc:
         return _json_result({"ok": False, "error": str(exc)})

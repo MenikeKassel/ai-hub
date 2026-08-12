@@ -1,5 +1,5 @@
 import type {
-  Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
+  Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -93,6 +93,10 @@ export const api = {
       method: 'POST', body: JSON.stringify({ symbols }),
     }),
   marketHealth: () => request<MarketHealth>('/api/market/health'),
+  foundationRefresh: (asOf = 'auto', notify = true) => request<{ ok: boolean; status: string; as_of?: string }>('/api/market/foundation-refresh', {
+    method: 'POST', body: JSON.stringify({ as_of: asOf, notify }),
+  }),
+  foundationRefreshStatus: () => request<FoundationRefreshState>('/api/market/foundation-refresh'),
   freestockdbHealth: () => request<FreeStockDBHealth>('/api/market/providers/freestockdb'),
   updateFreeStockDB: (dryRun = false) => request<{ ok: boolean; status: string; dry_run: boolean }>('/api/market/providers/freestockdb/update', {
     method: 'POST', body: JSON.stringify({ dry_run: dryRun }),

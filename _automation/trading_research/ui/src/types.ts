@@ -500,6 +500,15 @@ export interface MarketHealth {
   freestockdb?: FreeStockDBHealth
 }
 
+export interface FoundationRefreshState {
+  status: 'idle' | 'running' | 'completed' | 'degraded'
+  as_of?: string
+  started_at?: string
+  finished_at?: string
+  output_tail?: string
+  returncode?: number
+}
+
 export interface FreeStockDBHealth {
   ok: boolean
   service_ok?: boolean

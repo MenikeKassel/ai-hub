@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateSet(
-        "status", "doctor", "start", "open", "collect", "review", "market", "returns",
+        "status", "doctor", "start", "open", "collect", "review", "market", "data-refresh", "returns",
         "import-zhihu", "onboard-zhihu",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
         "reject-draft", "list-events", "event-action",
@@ -25,6 +25,7 @@ param(
     [ValidateSet("", "active", "paused")]
     [string]$Status = "",
     [string]$ReviewDate = (Get-Date -Format "yyyy-MM-dd"),
+    [string]$AsOf = "auto",
     [string]$Note = "",
     [string]$EventId = "",
     [string]$CandidateId = "",
@@ -37,7 +38,9 @@ param(
     [int]$Days = 30,
     [ValidateSet("", "activate", "exclude", "restore", "archive")]
     [string]$EventAction = "",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Notify,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -414,6 +417,16 @@ switch ($Action) {
         Write-Result (Start-KolTask "KOL_Morning_Pipeline")
     }
     "market" { Write-Result (Start-KolTask "Market_Data_Sync_Daily") }
+    "data-refresh" {
+        $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
+        $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
+        $arguments = @($cli, "kol-data-refresh", "--as-of", $AsOf)
+        if ($Notify) { $arguments += "--notify" }
+        if ($DryRun) { $arguments += "--dry-run" }
+        $output = & $python @arguments 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
+        Write-Output $output.Trim()
+    }
     "returns" { Write-Result (Start-KolTask "KOL_Return_Tracker_Daily") }
     "import-zhihu" {
         $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"

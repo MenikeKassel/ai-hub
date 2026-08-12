@@ -57,6 +57,11 @@ operator error and use `delegate-to-codex` for maintenance.
 - `review`: run optional AI prefill; if blocked, report that raw posts remain
   safe and manual review is available.
 - `market`: synchronize market data.
+- `data-refresh`: update the shared A-share foundation and then refresh KOL
+  returns from the single published release. Use `as_of=auto` unless the user
+  explicitly supplies a completed trading date. This operation may take up to
+  15 minutes and returns `degraded` if an upstream provider times out; never
+  interpret an old release as current.
 - `returns`: update KOL returns.
 - `doctor`: inspect the console, task and provider state.
 - `list-kols`, `add-kol`, `set-kol-status`: manage explicit KOL identities.
@@ -91,6 +96,11 @@ data is `repaired_stale`, not a current dataset. FreeStockDB is an optional
 fallback; its failure must not block BaoStock returns. Use the operator market
 action and report `stale`, `degraded`, or `failed` when validation is not
 complete. Never edit live data, credentials, schedules, or the database.
+
+The formal daily source is `F:\ai-data\ashare`. The operator must not run
+provider scripts directly or write `ai-hub\_runtime\trading\market` as a
+second daily fact store. To update the latest completed data, call
+`kol_operator({"action":"data-refresh","as_of":"auto","notify":true})`.
 
 ## Status language
 

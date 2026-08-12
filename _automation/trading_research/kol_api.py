@@ -65,9 +65,11 @@ from review_agent import ReviewAgentRepository, rollback_decision
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
+from foundation_market_client import FoundationBackedMarketStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
+FOUNDATION_ROOT = Path(os.environ.get("ASHARE_FOUNDATION_ROOT", r"F:\ai-data\ashare"))
 OPERATOR_TASKS = {
     "morning": "KOL_Morning_Pipeline",
     "fetch": "KOL_Post_Fetch_Daily",
@@ -155,6 +157,11 @@ class DeepSeekCredentialRequest(BaseModel):
 
 class PerformanceRefreshRequest(BaseModel):
     as_of: str | None = None
+
+
+class FoundationRefreshRequest(BaseModel):
+    as_of: str = Field(default="auto", pattern=r"^(auto|\d{4}-\d{2}-\d{2})$")
+    notify: bool = True
 
 
 class Draft(BaseModel):
@@ -367,7 +374,16 @@ def create_app(
     post_store.interrupt_stale_fetch_runs()
     event_store = KolStore(kol_root)
     performance = KolPerformanceService(event_store, post_store=post_store)
-    market_store = MarketStore(config.runtime_root / "market")
+    local_market_store = MarketStore(config.runtime_root / "market")
+    default_runtime = Path(
+        os.environ.get("TRADING_RUNTIME_ROOT", ROOT / "_runtime" / "trading")
+    ).resolve()
+    market_store = (
+        FoundationBackedMarketStore(local_market_store, FOUNDATION_ROOT)
+        if (FOUNDATION_ROOT / "current.json").is_file()
+        and config.runtime_root.resolve() == default_runtime
+        else local_market_store
+    )
     freestockdb_runtime = FreeStockDBRuntime(
         config.freestockdb_root,
         config.freestockdb_url,
@@ -1665,6 +1681,76 @@ def create_app(
             except KeyError as exc:
                 raise HTTPException(404, str(exc)) from exc
         return {"ok": True, "queued_symbols": queued}
+
+    def run_foundation_refresh_job(as_of: str, notify: bool, state_path: Path) -> None:
+        command = [
+            sys.executable,
+            str(ROOT / "_automation" / "trading_research" / "trading_cli.py"),
+            "kol-data-refresh",
+            "--as-of",
+            as_of,
+        ]
+        if notify:
+            command.append("--notify")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=900,
+                check=False,
+            )
+            output = (completed.stdout or completed.stderr or "").strip()
+            state = {
+                "status": "completed" if completed.returncode == 0 else "degraded",
+                "returncode": completed.returncode,
+                "output_tail": output[-4000:],
+                "finished_at": now_iso(),
+            }
+        except subprocess.TimeoutExpired:
+            state = {
+                "status": "degraded",
+                "returncode": -1,
+                "output_tail": "shared foundation refresh timed out after 900 seconds",
+                "finished_at": now_iso(),
+            }
+        temporary = state_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, state_path)
+
+    @app.post("/api/market/foundation-refresh", status_code=202)
+    def refresh_foundation(
+        body: FoundationRefreshRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            current = {}
+        if current.get("status") == "running":
+            return {"ok": True, "status": "already_running", "state": current}
+        state_path.write_text(
+            json.dumps(
+                {"status": "running", "as_of": body.as_of, "started_at": now_iso()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        background_tasks.add_task(run_foundation_refresh_job, body.as_of, body.notify, state_path)
+        return {"ok": True, "status": "triggered", "as_of": body.as_of}
+
+    @app.get("/api/market/foundation-refresh")
+    def foundation_refresh_status() -> dict[str, Any]:
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {"status": "idle"}
 
     @app.get("/api/market/health")
     def market_health() -> dict[str, Any]:

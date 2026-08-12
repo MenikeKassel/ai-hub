@@ -1784,9 +1784,9 @@ def _run_foundation_refresh(target: date) -> dict[str, Any]:
         str(python),
         "-m",
         "ashare_data_foundation.cli",
-        "refresh",
         "--data-root",
         str(FOUNDATION_ROOT),
+        "refresh",
         "--as-of",
         target.isoformat(),
         "--primary",
@@ -1836,7 +1836,10 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
         before = _foundation_status()
         before_as_of = str(before.get("as_of") or "")
         refresh = {"ok": True, "status": "not_needed"}
-        if before_as_of and date.fromisoformat(before_as_of) < target:
+        refresh_required = bool(
+            before_as_of and date.fromisoformat(before_as_of) < target
+        )
+        if refresh_required:
             refresh = _run_foundation_refresh(target)
         after = _foundation_status()
         effective_text = str(after.get("as_of") or before_as_of)
@@ -1850,7 +1853,11 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
             "status": "skipped",
             "reason": "foundation release unavailable",
         }
-        if after.get("ok") and effective_text:
+        if (
+            after.get("ok")
+            and effective_text
+            and (not refresh_required or refresh.get("ok"))
+        ):
             command = [
                 sys.executable,
                 str(Path(__file__).resolve()),
@@ -1887,8 +1894,16 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
                 }
         steps.extend([{"step": "foundation_after", **after}, {"step": "kol_update", **update}])
         payload = {
-            "ok": bool(after.get("ok") and update.get("ok")),
-            "status": "completed" if update.get("ok") else "degraded",
+            "ok": bool(
+                after.get("ok")
+                and update.get("ok")
+                and (not refresh_required or refresh.get("ok"))
+            ),
+            "status": (
+                "completed"
+                if update.get("ok") and (not refresh_required or refresh.get("ok"))
+                else "degraded"
+            ),
             "requested_as_of": target.isoformat(),
             "effective_as_of": effective.isoformat(),
             "foundation_release_id": after.get("release_id") or before.get("release_id", ""),
