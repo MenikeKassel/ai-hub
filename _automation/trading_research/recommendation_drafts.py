@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -661,6 +662,90 @@ class RecommendationDraftRepository:
                 params,
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def create_bulk_snapshot(
+        self,
+        *,
+        review_date: str,
+        queue_scope: str,
+        status_filter: str = "ready",
+        ttl_seconds: int = 300,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if queue_scope not in {"morning", "backlog"}:
+            raise ValueError("invalid queue scope")
+        if status_filter != "ready":
+            raise ValueError("bulk approval only supports ready drafts")
+        drafts = self.list_drafts(
+            review_date=review_date,
+            queue_scope=queue_scope,
+            status="ready",
+            limit=max(1, min(limit, 200)),
+        )
+        approvable: list[dict[str, Any]] = []
+        skipped: dict[str, int] = {}
+        for draft in drafts:
+            reasons = list(draft.get("attention_reasons") or [])
+            if reasons:
+                for reason in reasons:
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                continue
+            approvable.append(draft)
+        token = secrets.token_urlsafe(24)
+        created = datetime.now(timezone.utc)
+        expires = created + timedelta(seconds=max(30, min(ttl_seconds, 900)))
+        with self.post_store.connect() as db:
+            db.execute(
+                """
+                INSERT INTO recommendation_bulk_snapshots(
+                    token,review_date,queue_scope,status_filter,draft_ids_json,created_at,expires_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    token,
+                    review_date,
+                    queue_scope,
+                    status_filter,
+                    _json([int(item["id"]) for item in approvable]),
+                    created.isoformat(timespec="seconds"),
+                    expires.isoformat(timespec="seconds"),
+                ),
+            )
+            db.execute(
+                "DELETE FROM recommendation_bulk_snapshots WHERE expires_at<? OR used_at<>''",
+                (created.isoformat(timespec="seconds"),),
+            )
+        return {
+            "snapshot_token": token,
+            "review_date": review_date,
+            "queue_scope": queue_scope,
+            "status_filter": status_filter,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "drafts": approvable,
+            "count": len(approvable),
+            "skipped": skipped,
+        }
+
+    def consume_bulk_snapshot(self, token: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self.post_store.connect() as db:
+            row = db.execute(
+                "SELECT * FROM recommendation_bulk_snapshots WHERE token=?",
+                (token,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("bulk approval snapshot not found or expired")
+            if str(row["used_at"] or ""):
+                raise ValueError("bulk approval snapshot has already been used")
+            if str(row["expires_at"]) < now:
+                raise ValueError("bulk approval snapshot has expired")
+            db.execute(
+                "UPDATE recommendation_bulk_snapshots SET used_at=? WHERE token=? AND used_at=''",
+                (now, token),
+            )
+        value = dict(row)
+        value["draft_ids"] = _loads(value.pop("draft_ids_json", "[]"), [])
+        return value
 
     def get_draft(self, draft_id: int) -> dict[str, Any]:
         with self.post_store.connect() as db:

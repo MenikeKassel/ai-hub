@@ -829,6 +829,16 @@ class KolPostStore:
                     updated_at TEXT NOT NULL,
                     UNIQUE(platform,handle)
                 );
+                CREATE TABLE IF NOT EXISTS kol_account_status_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'system',
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kol_account_status_history
+                    ON kol_account_status_history(kol_id, observed_at DESC);
                 CREATE TABLE IF NOT EXISTS posts (
                     post_id TEXT PRIMARY KEY,
                     kol_id INTEGER NOT NULL REFERENCES kols(id),
@@ -1159,6 +1169,16 @@ class KolPostStore:
                     actor TEXT NOT NULL DEFAULT 'human',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS recommendation_bulk_snapshots (
+                    token TEXT PRIMARY KEY,
+                    review_date TEXT NOT NULL,
+                    queue_scope TEXT NOT NULL,
+                    status_filter TEXT NOT NULL,
+                    draft_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS morning_runs (
                     run_id TEXT PRIMARY KEY,
                     review_date TEXT NOT NULL,
@@ -1300,6 +1320,10 @@ class KolPostStore:
                     "backfill_completed_depth": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_result_count": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_warning": "TEXT NOT NULL DEFAULT ''",
+                    "external_account_id": "TEXT NOT NULL DEFAULT ''",
+                    "availability_status": "TEXT NOT NULL DEFAULT 'active'",
+                    "availability_reason": "TEXT NOT NULL DEFAULT ''",
+                    "availability_checked_at": "TEXT NOT NULL DEFAULT ''",
                 },
                 "classifications": {
                     "model_summary": "TEXT NOT NULL DEFAULT ''",
@@ -1512,15 +1536,65 @@ class KolPostStore:
         assert result is not None
         return result
 
-    def list_kols(self, status: str | None = None) -> list[dict[str, Any]]:
+    def set_account_availability(
+        self,
+        kol_id: int,
+        status: str,
+        *,
+        reason: str = "",
+        source: str = "system",
+    ) -> dict[str, Any]:
+        allowed = {
+            "active", "rate_limited", "provider_failed", "protected",
+            "suspected_unavailable", "suspended", "deleted", "renamed", "paused",
+        }
+        if status not in allowed:
+            raise ValueError(f"invalid account availability status: {status}")
+        timestamp = now_iso()
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE kols SET availability_status=?,availability_reason=?,
+                    availability_checked_at=?,updated_at=? WHERE id=?
+                """,
+                (status, reason[:2000], timestamp, timestamp, kol_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"KOL not found: {kol_id}")
+            db.execute(
+                """
+                INSERT INTO kol_account_status_history(kol_id,status,reason,source,observed_at)
+                VALUES(?,?,?,?,?)
+                """,
+                (kol_id, status, reason[:2000], source[:100], timestamp),
+            )
+        result = self.get_kol(kol_id)
+        assert result is not None
+        return result
+
+    def account_availability_history(self, kol_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM kol_account_status_history WHERE kol_id=? ORDER BY observed_at DESC LIMIT ?",
+                (kol_id, max(1, min(limit, 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_kols(self, status: str | None = None, platform: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM kols"
-        params: tuple[Any, ...] = ()
+        conditions: list[str] = []
+        params: list[Any] = []
         if status:
-            query += " WHERE status=?"
-            params = (status,)
+            conditions.append("status=?")
+            params.append(status)
+        if platform:
+            conditions.append("lower(platform)=?")
+            params.append(platform.casefold())
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY display_name COLLATE NOCASE"
         with self.connect() as db:
-            return [dict(row) for row in db.execute(query, params).fetchall()]
+            return [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
 
     def get_kol(self, kol_id: int) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -3021,6 +3095,7 @@ class KolPostStore:
                 SELECT k.*
                 FROM fetch_queue q JOIN kols k ON k.id=q.kol_id
                 WHERE q.batch_key=? AND k.status='active'
+                  AND COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','protected','paused')
                   AND (
                     q.state='queued'
                     OR (q.state='cooldown' AND (q.not_before='' OR q.not_before<=?))
