@@ -44,7 +44,6 @@ LONG_WORDS = {
     "买入",
     "建仓",
     "低吸",
-    "关注",
     "推荐",
     "布局",
     "机会",
@@ -54,7 +53,7 @@ LONG_WORDS = {
     "马前炮",
     "个股分享",
 }
-SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "风险", "见顶", "离场"}
+SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "见顶", "离场"}
 RETROSPECTIVE_WORDS = {"昨天推荐", "此前推荐", "已经涨停", "成功涨停", "回顾", "复盘"}
 FINANCE_WORDS = {"A股", "股票", "个股", "板块", "涨停", "跌停", "K线", "指数", "业绩", "估值", "资金", "成交量", "主力"}
 STRUCTURED_REVIEW_VERSION = "structured-text-v2"
@@ -198,6 +197,8 @@ class FetchSummary:
     queue_completed: int = 0
     queue_pending: int = 0
     rate_limit_paused: bool = False
+    blocked_platforms: list[str] = field(default_factory=list)
+    platform_breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -478,7 +479,19 @@ class RuleClassifier:
         finance_hits = sorted(word for word in FINANCE_WORDS if word in content)
         if finance_hits:
             reasons.append("finance_language")
-        direction = "long" if len(long_hits) > len(short_hits) else "short" if short_hits else ""
+        # Direction needs a strict majority of directional words; a tie
+        # (e.g. one bullish and one bearish token) yields no direction
+        # rather than defaulting to short.
+        if long_hits and not short_hits:
+            direction = "long"
+        elif short_hits and not long_hits:
+            direction = "short"
+        elif long_hits and len(long_hits) > len(short_hits):
+            direction = "long"
+        elif short_hits and len(short_hits) > len(long_hits):
+            direction = "short"
+        else:
+            direction = ""
         retrospective = any(word in content for word in RETROSPECTIVE_WORDS)
         evidence_type = "retrospective" if retrospective else "original_pre_event"
         if value("post_type") in {"retweet", "aggregation"}:
@@ -682,7 +695,6 @@ class RuleClassifier:
 
 def validate_event_draft(draft: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    rate_limit_paused = False
     symbol = str(draft.get("symbol") or "")
     if not re.fullmatch(r"\d{6}", symbol):
         errors.append("one_symbol_per_event")
@@ -818,6 +830,16 @@ class KolPostStore:
                     updated_at TEXT NOT NULL,
                     UNIQUE(platform,handle)
                 );
+                CREATE TABLE IF NOT EXISTS kol_account_status_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'system',
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kol_account_status_history
+                    ON kol_account_status_history(kol_id, observed_at DESC);
                 CREATE TABLE IF NOT EXISTS posts (
                     post_id TEXT PRIMARY KEY,
                     kol_id INTEGER NOT NULL REFERENCES kols(id),
@@ -940,7 +962,8 @@ class KolPostStore:
                     gap_kols_json TEXT NOT NULL DEFAULT '[]',
                     fallback_kols_json TEXT NOT NULL DEFAULT '[]',
                     shadow_failed_kols_json TEXT NOT NULL DEFAULT '[]',
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS fetch_queue (
                     batch_key TEXT NOT NULL,
@@ -1148,6 +1171,16 @@ class KolPostStore:
                     actor TEXT NOT NULL DEFAULT 'human',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS recommendation_bulk_snapshots (
+                    token TEXT PRIMARY KEY,
+                    review_date TEXT NOT NULL,
+                    queue_scope TEXT NOT NULL,
+                    status_filter TEXT NOT NULL,
+                    draft_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS morning_runs (
                     run_id TEXT PRIMARY KEY,
                     review_date TEXT NOT NULL,
@@ -1168,7 +1201,8 @@ class KolPostStore:
                     stage TEXT NOT NULL DEFAULT 'queued',
                     progress_current INTEGER NOT NULL DEFAULT 0,
                     progress_total INTEGER NOT NULL DEFAULT 0,
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS idx_fetch_attempts_run ON fetch_attempts(run_id,id);
                 CREATE INDEX IF NOT EXISTS idx_provider_comparisons_run ON provider_comparisons(run_id,id);
@@ -1279,6 +1313,7 @@ class KolPostStore:
                     "total_kols": "INTEGER NOT NULL DEFAULT 0",
                     "processed_kols": "INTEGER NOT NULL DEFAULT 0",
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
                 "kols": {
                     "last_success_at": "TEXT NOT NULL DEFAULT ''",
@@ -1289,6 +1324,10 @@ class KolPostStore:
                     "backfill_completed_depth": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_result_count": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_warning": "TEXT NOT NULL DEFAULT ''",
+                    "external_account_id": "TEXT NOT NULL DEFAULT ''",
+                    "availability_status": "TEXT NOT NULL DEFAULT 'active'",
+                    "availability_reason": "TEXT NOT NULL DEFAULT ''",
+                    "availability_checked_at": "TEXT NOT NULL DEFAULT ''",
                 },
                 "classifications": {
                     "model_summary": "TEXT NOT NULL DEFAULT ''",
@@ -1327,6 +1366,7 @@ class KolPostStore:
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
                     "progress_current": "INTEGER NOT NULL DEFAULT 0",
                     "progress_total": "INTEGER NOT NULL DEFAULT 0",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
             }
             for table, columns in migrations.items():
@@ -1422,6 +1462,7 @@ class KolPostStore:
             ("gap_kols_json", "gap_kols", []),
             ("fallback_kols_json", "fallback_kols", []),
             ("shadow_failed_kols_json", "shadow_failed_kols", []),
+            ("platform_breakdown_json", "platform_breakdown", {}),
             ("errors_json", "errors", []),
             ("warnings_json", "warnings", []),
         ]:
@@ -1464,8 +1505,9 @@ class KolPostStore:
             cursor = db.execute(
                 """
                 INSERT INTO kols(
-                    display_name,platform,handle,profile_url,domain,status,tracking_mode,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    display_name,platform,handle,profile_url,domain,status,tracking_mode,
+                    external_account_id,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     display_name.strip() or clean_handle,
@@ -1475,6 +1517,7 @@ class KolPostStore:
                     domain.strip(),
                     status,
                     tracking_mode,
+                    clean_handle,
                     timestamp,
                     timestamp,
                 ),
@@ -1501,15 +1544,70 @@ class KolPostStore:
         assert result is not None
         return result
 
-    def list_kols(self, status: str | None = None) -> list[dict[str, Any]]:
+    def set_account_availability(
+        self,
+        kol_id: int,
+        status: str,
+        *,
+        reason: str = "",
+        source: str = "system",
+    ) -> dict[str, Any]:
+        allowed = {
+            "active", "rate_limited", "provider_failed", "protected",
+            "suspected_unavailable", "suspended", "deleted", "renamed", "paused",
+        }
+        if status not in allowed:
+            raise ValueError(f"invalid account availability status: {status}")
+        timestamp = now_iso()
+        with self.connect() as db:
+            previous = db.execute(
+                "SELECT availability_status,availability_reason FROM kols WHERE id=?",
+                (kol_id,),
+            ).fetchone()
+            cursor = db.execute(
+                """
+                UPDATE kols SET availability_status=?,availability_reason=?,
+                    availability_checked_at=?,updated_at=? WHERE id=?
+                """,
+                (status, reason[:2000], timestamp, timestamp, kol_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"KOL not found: {kol_id}")
+            if previous is None or str(previous["availability_status"] or "active") != status or str(previous["availability_reason"] or "") != reason[:2000]:
+                db.execute(
+                    """
+                    INSERT INTO kol_account_status_history(kol_id,status,reason,source,observed_at)
+                    VALUES(?,?,?,?,?)
+                    """,
+                    (kol_id, status, reason[:2000], source[:100], timestamp),
+                )
+        result = self.get_kol(kol_id)
+        assert result is not None
+        return result
+
+    def account_availability_history(self, kol_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM kol_account_status_history WHERE kol_id=? ORDER BY observed_at DESC LIMIT ?",
+                (kol_id, max(1, min(limit, 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_kols(self, status: str | None = None, platform: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM kols"
-        params: tuple[Any, ...] = ()
+        conditions: list[str] = []
+        params: list[Any] = []
         if status:
-            query += " WHERE status=?"
-            params = (status,)
+            conditions.append("status=?")
+            params.append(status)
+        if platform:
+            conditions.append("lower(platform)=?")
+            params.append(platform.casefold())
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY display_name COLLATE NOCASE"
         with self.connect() as db:
-            return [dict(row) for row in db.execute(query, params).fetchall()]
+            return [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
 
     def get_kol(self, kol_id: int) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -1619,6 +1717,12 @@ class KolPostStore:
                 """
                 UPDATE kols
                 SET last_post_id=?,last_fetched_at=?,last_success_at=?,fetch_status=?,
+                    availability_status=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN 'active' ELSE availability_status END,
+                    availability_reason=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN '' ELSE availability_reason END,
                     last_gap_at=CASE WHEN ?='gap_detected' THEN ? ELSE last_gap_at END,
                     consecutive_failures=?,backfill_requested=?,backfill_status=?,
                     backfill_completed_depth=?,backfill_result_count=?,backfill_warning=?,
@@ -1629,6 +1733,8 @@ class KolPostStore:
                     stored_post_id,
                     timestamp,
                     last_success_at,
+                    status,
+                    status,
                     status,
                     status,
                     timestamp,
@@ -3010,6 +3116,7 @@ class KolPostStore:
                 SELECT k.*
                 FROM fetch_queue q JOIN kols k ON k.id=q.kol_id
                 WHERE q.batch_key=? AND k.status='active'
+                  AND COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','protected','paused')
                   AND (
                     q.state='queued'
                     OR (q.state='cooldown' AND (q.not_before='' OR q.not_before<=?))
@@ -3156,7 +3263,15 @@ class KolPostStore:
             )
 
     def finish_fetch_run(self, summary: FetchSummary) -> None:
-        status = "failed" if summary.successful_kols == 0 and summary.failed_kols else "partial" if summary.failed_kols else "success"
+        status = (
+            "blocked"
+            if summary.blocked_platforms and summary.successful_kols == 0
+            else "failed"
+            if summary.successful_kols == 0 and (summary.failed_kols or summary.blocked_platforms)
+            else "partial"
+            if summary.failed_kols or summary.blocked_platforms
+            else "success"
+        )
         with self.connect() as db:
             db.execute(
                 """
@@ -3164,7 +3279,7 @@ class KolPostStore:
                     processed_kols=CASE WHEN total_kols>0 THEN total_kols ELSE ? END,
                     successful_kols=?,failed_kols=?,
                     new_posts=?,candidate_posts=?,auth_status=?,gap_kols_json=?,fallback_kols_json=?,
-                    shadow_failed_kols_json=?,errors_json=? WHERE run_id=?
+                    shadow_failed_kols_json=?,platform_breakdown_json=?,errors_json=? WHERE run_id=?
                 """,
                 (
                     now_iso(),
@@ -3178,6 +3293,7 @@ class KolPostStore:
                     _json(summary.gap_kols),
                     _json(summary.fallback_kols),
                     _json(summary.shadow_failed_kols),
+                    _json(summary.platform_breakdown),
                     _json(summary.errors),
                     summary.run_id,
                 ),
@@ -3498,6 +3614,57 @@ class ZhihuProfileProvider:
         self.port = int(port)
         self.runner = runner
         self.timeout_seconds = max(30, min(int(timeout_seconds), 300))
+        self.session_prepared = False
+        self.preflight_error = ""
+
+    def prepare_session(self, handle: str) -> None:
+        """Preflight the shared browser once before a Zhihu batch."""
+        if self.session_prepared:
+            return
+        if not self.script_path.is_file():
+            raise ZhihuProviderError(f"Zhihu capture script is missing: {self.script_path}")
+        command = [
+            self.python_command,
+            str(self.script_path),
+            "--handle",
+            handle,
+            "--port",
+            str(self.port),
+            "--profile-directory",
+            self.profile_directory,
+            "--prepare-only",
+        ]
+        if self.browser_path:
+            command.extend(["--browser-path", self.browser_path])
+        if self.user_data_dir:
+            command.extend(["--user-data-dir", self.user_data_dir])
+        try:
+            completed = self.runner(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.preflight_error = (
+                f"Zhihu browser preflight timed out after {self.timeout_seconds} seconds"
+            )
+            raise ZhihuProviderError(self.preflight_error) from exc
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            self.preflight_error = f"Zhihu browser preflight returned invalid JSON: {exc}"
+            raise ZhihuProviderError(self.preflight_error) from exc
+        if completed.returncode != 0 or not payload.get("ok"):
+            self.preflight_error = str(
+                payload.get("error") or completed.stderr or "Zhihu browser preflight failed"
+            )[-2000:]
+            raise ZhihuProviderError(self.preflight_error)
+        self.session_prepared = True
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
         if not self.script_path.is_file():
@@ -3514,6 +3681,7 @@ class ZhihuProfileProvider:
             str(self.port),
             "--profile-directory",
             self.profile_directory,
+            "--no-launch",
         ]
         if self.browser_path:
             command.extend(["--browser-path", self.browser_path])
@@ -3726,7 +3894,7 @@ class FallbackXPostProvider:
     name = "auto"
 
     def __init__(self, primary: XPostProvider, fallback: XPostProvider, mode: str = "enabled"):
-        if mode not in {"enabled", "shadow"}:
+        if mode not in {"enabled", "shadow", "disabled"}:
             raise ValueError(f"unsupported fallback mode: {mode}")
         self.primary = primary
         self.fallback = fallback
@@ -3750,6 +3918,11 @@ class FallbackXPostProvider:
         )
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
+        if self.mode == "disabled":
+            return _provider_result(
+                self.primary.fetch_user_posts(handle, max_count),
+                self.primary.name,
+            )
         attempts: list[ProviderAttempt] = []
         warnings: list[str] = []
         primary_error: Exception | None = None
@@ -3897,7 +4070,7 @@ def build_x_post_provider(
         return primary
     if mode == "nitter":
         return fallback
-    return FallbackXPostProvider(primary, fallback, mode=fallback_mode)
+    return FallbackXPostProvider(primary, fallback, mode=fallback_mode if fallback_mode in {"enabled", "shadow", "disabled"} else "shadow")
 
 
 def download_images(
@@ -4848,11 +5021,17 @@ def run_post_fetch(
     rate_limit_cooldown_seconds: int = 1800,
     max_gap_pages: int = 3,
     dry_run: bool = False,
+    fresh_first_page: bool = False,
 ) -> FetchSummary:
     rule_classifier = classifier or RuleClassifier()
     if not dry_run:
         store.interrupt_stale_fetch_runs()
     active_kols = store.list_kols("active")
+    active_kols = [
+        kol for kol in active_kols
+        if str(kol.get("availability_status") or "active")
+        not in {"suspended", "deleted", "protected", "paused"}
+    ]
     if platforms:
         allowed_platforms = {value.casefold() for value in platforms}
         active_kols = [
@@ -4889,6 +5068,7 @@ def run_post_fetch(
             requested_count=requested_depth,
         )
         active_kols = store.pending_fetch_queue(batch_key)
+    selected_kols = list(active_kols)
     run_id = (
         f"dry-run-{uuid.uuid4().hex}"
         if dry_run
@@ -4905,12 +5085,61 @@ def run_post_fetch(
     authentication_failed = False
     rate_limit_paused = False
     platform_auth_failures: set[str] = set()
+    platform_blocked_errors: dict[str, str] = {}
+    blocked_reported: set[str] = set()
+    platform_breakdown: dict[str, dict[str, Any]] = {}
+    for kol in selected_kols:
+        platform_key = str(kol.get("platform") or "X").casefold()
+        platform_breakdown.setdefault(
+            platform_key,
+            {
+                "target": 0,
+                "success": 0,
+                "failed": 0,
+                "blocked": 0,
+                "rate_limited": 0,
+                "provider_failed": 0,
+                "pending": 0,
+            },
+        )["target"] += 1
+    for value in platform_breakdown.values():
+        value["pending"] = value["target"]
     providers_by_platform = {
         str(key).casefold(): value for key, value in (platform_providers or {}).items()
     }
+    zhihu_kols = [
+        kol for kol in active_kols
+        if str(kol.get("platform") or "X").casefold() == "zhihu"
+    ]
+    zhihu_provider = providers_by_platform.get("zhihu", provider)
+    if zhihu_kols and hasattr(zhihu_provider, "prepare_session"):
+        try:
+            zhihu_provider.prepare_session(str(zhihu_kols[0].get("handle") or ""))
+        except Exception as exc:
+            platform_blocked_errors["zhihu"] = str(exc)
     for index, kol in enumerate(active_kols):
         platform = str(kol.get("platform") or "X").casefold()
         selected_provider = providers_by_platform.get(platform, provider)
+        if platform in platform_blocked_errors:
+            if platform not in blocked_reported:
+                errors.append(
+                    f"{platform} batch blocked before account fetch: {platform_blocked_errors[platform]}"
+                )
+                blocked_reported.add(platform)
+            if not dry_run:
+                store.update_fetch_progress(
+                    run_id,
+                    processed_kols=index + 1,
+                    successful_kols=successful,
+                    failed_kols=failed,
+                    new_posts=new_posts,
+                    candidate_posts=candidate_posts,
+                )
+            platform_breakdown[platform]["blocked"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
+            continue
         if platform in platform_auth_failures:
             if batch_key:
                 break
@@ -4926,12 +5155,24 @@ def run_post_fetch(
                     new_posts=new_posts,
                     candidate_posts=candidate_posts,
                 )
+            platform_breakdown[platform]["failed"] += 1
+            platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             continue
         if batch_key and not dry_run:
             store.mark_fetch_queue_running(batch_key, int(kol["id"]))
         previous_last_id = str(kol.get("last_post_id") or "")
         last_fetched = str(kol.get("last_fetched_at") or "")
-        requested = max_count if platform == "zhihu" or last_fetched else 100
+        # Morning freshness pass intentionally uses a small first page.  Gap
+        # recovery is resumed by the persistent queue after every account had
+        # a chance to contribute its newest post.
+        requested = (
+            max_count
+            if platform == "zhihu" or last_fetched or fresh_first_page
+            else 100
+        )
         backfill_queued = str(kol.get("backfill_status") or "") == "queued"
         archive_only_backfill = (
             platform == "zhihu"
@@ -5080,6 +5321,10 @@ def run_post_fetch(
                     else:
                         store.complete_fetch_queue_item(batch_key, int(kol["id"]))
             successful += 1
+            platform_breakdown[platform]["success"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
         except Exception as exc:
             attempts = list(getattr(exc, "attempts", []))
             rate_limited_this_account = isinstance(exc, TwitterRateLimitError) or any(
@@ -5098,6 +5343,22 @@ def run_post_fetch(
             if isinstance(exc, TwitterAuthenticationError):
                 authentication_failed = True
                 platform_auth_failures.add(platform)
+            if not dry_run:
+                availability = "rate_limited" if rate_limited_this_account else "provider_failed"
+                store.set_account_availability(
+                    int(kol["id"]),
+                    availability,
+                    reason=str(exc),
+                    source="fetch",
+                )
+            platform_breakdown[platform]["failed"] += 1
+            if rate_limited_this_account:
+                platform_breakdown[platform]["rate_limited"] += 1
+            else:
+                platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             if batch_key and not dry_run:
                 error_code = (
                     "rate_limited"
@@ -5160,6 +5421,8 @@ def run_post_fetch(
         queue_completed=int(queue_status["completed"]),
         queue_pending=int(queue_status["pending"]),
         rate_limit_paused=rate_limit_paused,
+        blocked_platforms=sorted(platform_blocked_errors),
+        platform_breakdown=platform_breakdown,
     )
     if not dry_run:
         store.finish_fetch_run(summary)

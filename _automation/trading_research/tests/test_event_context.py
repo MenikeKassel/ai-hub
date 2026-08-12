@@ -280,7 +280,7 @@ class EventTechnicalContextTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='event_intraday_context'"
                 ).fetchone()[0]
 
-                self.assertEqual(8, version)
+                self.assertEqual(9, version)
             self.assertIn("snapshot_id", columns)
             self.assertEqual(1, intraday_tables)
             self.assertEqual("KOL-OLD", store.list_event_technical_contexts()[0]["event_id"])
@@ -316,6 +316,31 @@ class EventTechnicalContextTests(unittest.TestCase):
             self.assertEqual(["KOL-T005"], first["created"])
             self.assertEqual(["KOL-T005"], second["skipped"])
             self.assertEqual([], second["errors"])
+
+    def test_zero_reference_close_never_produces_inf_in_json(self) -> None:
+        # A zero close 20 sessions back makes return_20d divide by zero.
+        # The result must be None (JSON-safe), never inf ("Infinity").
+        import json as json_module
+
+        frame = feature_frame()
+        frame = frame.copy()
+        cutoff_index = len(frame) - 1
+        frame.loc[frame.index[cutoff_index - 20], "close"] = 0.0
+
+        context = compute_event_technical_context(
+            event_id="KOL-INF-GUARD",
+            symbol="600900",
+            posted_at=f"{frame.iloc[-1]['trade_date'].isoformat()}T16:05:00+08:00",
+            qfq_prices=frame,
+        )
+
+        self.assertIsNone(context.return_20d)
+        self.assertIn("insufficient_return_20d", context.warnings)
+        serialised = json_module.dumps(context.to_record(), ensure_ascii=False)
+        self.assertNotIn("Infinity", serialised)
+        self.assertNotIn("-Infinity", serialised)
+        # The serialised payload must round-trip as valid JSON.
+        json_module.loads(serialised)
 
 
 if __name__ == "__main__":

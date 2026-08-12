@@ -53,10 +53,7 @@ foreach ($legacyTask in "KOL_Morning_Initial", "KOL_Morning_Refresh") {
 Register-ResearchTask "KOL_Morning_Pipeline" "kol-morning-pipeline.ps1" $morningTriggers "Prepare and finalize the evidence-first KOL morning review queue before 09:00." $morningSettings "-Platform x"
 Register-ResearchTask "Research_Data_Digest_Daily" "research-data-digest.ps1" (New-ScheduledTaskTrigger -Daily -At "02:30") "Send one combined KOL, review-agent, and market data digest."
 Register-ResearchTask "Market_Data_Weekly" "market-weekly-refresh.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "10:00") "Refresh instrument master, financial, announcement, and vendor-labelled fund-flow snapshots."
-$boardSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 5) -Hidden
-Register-ResearchTask "Market_Board_Mainline_Daily" "board-mainline-sync.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "20:30") "Update Eastmoney industry/concept board snapshots and transparent RPS states." $boardSettings
-Register-ResearchTask "Market_Board_Mainline_Weekly" "board-mainline-sync.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "11:30") "Refresh board catalog, resume history backfill, and update candidate memberships." $boardSettings "-Weekly"
-Register-ResearchTask "KOL_Event_Method_Research" "event-method-research.ps1" (New-ScheduledTaskTrigger -Daily -At "02:00") "Complete point-in-time multi-method evidence and AI interpretation after the board job, with a 02:00 fallback." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3) -Hidden)
+Register-ResearchTask "KOL_Event_Method_Research" "event-method-research.ps1" (New-ScheduledTaskTrigger -Daily -At "02:00") "Complete point-in-time multi-method evidence and AI interpretation." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3) -Hidden)
 Register-ResearchTask "KOL_Performance_Weekly" "kol-performance-weekly.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At "08:50") "Send the weekly batch-weighted KOL performance summary after mature checkpoints settle." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -Hidden)
 
 if (Get-ScheduledTask -TaskName "KOL_Post_Classify_Daily" -ErrorAction SilentlyContinue) {
@@ -67,4 +64,4 @@ if (Get-ScheduledTask -TaskName "KOL_Review_Agent" -ErrorAction SilentlyContinue
 }
 
 if ($RunNow) { Start-ScheduledTask -TaskName "Market_Data_Sync_Daily" }
-Write-Host "Installed Zhihu fetch, morning orchestration, market sync, board RPS, event research, digest, and weekly market tasks."
+Write-Host "Installed Zhihu fetch, morning orchestration, market sync, event research, digest, and weekly market tasks."

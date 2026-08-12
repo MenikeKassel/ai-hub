@@ -16,15 +16,16 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 from filelock import FileLock, Timeout
 
 from kol_tracker import (
-    AKShareProvider,
+    AKShareCheckpointProvider,
     EventRecord,
     KolStore,
     WarehousePriceProvider,
@@ -87,19 +88,12 @@ from market_data import (
     normalise_daily_bars,
     sync_daily_bars,
 )
+from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 from purchased_daily import (
     PURCHASED_DAILY_PROVIDER,
     PurchasedDailyProvider,
     audit_purchased_daily_archive,
     import_historical_daily,
-)
-from board_mainline import (
-    BoardMainlineStore,
-    EastmoneyBoardProvider,
-    FallbackBoardProvider,
-    backfill_boards,
-    sync_board_snapshot,
-    sync_candidate_memberships,
 )
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
@@ -119,7 +113,7 @@ WATCHLIST = RUNTIME / "watchlist.csv"
 RUN_LOG = RUNTIME / "run_log.jsonl"
 PRICE_DIR = RUNTIME / "data" / "prices"
 REPORT_DIR = RUNTIME / "reports"
-OBSIDIAN_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", "<OBSIDIAN_VAULT>"))
+OBSIDIAN_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", Path(__file__).resolve().parents[1] / "_vault"))
 OBSIDIAN_PROJECTS = OBSIDIAN_VAULT / "04_Projects"
 KOL_ROOT = RUNTIME / "kol"
 KOL_DASHBOARD = KOL_ROOT / "reports" / "KOL推荐收益看板.md"
@@ -136,6 +130,11 @@ NITTER_RUNTIME = KOL_ROOT / "nitter"
 NOTIFICATION_STATE = KOL_ROOT / "notification_state.json"
 FALLBACK_MODE_STATE = KOL_ROOT / "fallback_mode.json"
 MARKET_ROOT = RUNTIME / "market"
+FOUNDATION_ROOT = Path(os.environ.get("ASHARE_FOUNDATION_ROOT", r"F:\ai-data\ashare"))
+FOUNDATION_REPO = Path(
+    os.environ.get("ASHARE_FOUNDATION_REPO", r"<AI_HUB_HOME>\ashare-data-foundation")
+)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 PURCHASED_DAILY_ROOT = Path(
     os.environ.get("PURCHASED_DAILY_ROOT", "<PURCHASED_DATA_HOME>/数据更新时间2026.7.31")
 )
@@ -567,17 +566,39 @@ def _send_pending_notifications(store: KolStore) -> list[str]:
 
 
 def kol_update(args: argparse.Namespace) -> None:
+    KOL_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = KOL_ROOT / "kol-update.lock"
+    lock = FileLock(str(lock_path), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(json.dumps({
+            "ok": True,
+            "status": "already_running",
+            "dry_run": bool(args.dry_run),
+            "lock": str(lock_path),
+        }, ensure_ascii=False))
+        return
+    try:
+        _kol_update_locked(args)
+    finally:
+        lock.release()
+
+
+def _kol_update_locked(args: argparse.Namespace) -> None:
     store = KolStore(KOL_ROOT)
     if not store.events_path.exists():
         raise RuntimeError("KOL event store is not initialized; run kol-init first")
     as_of = date.fromisoformat(args.as_of)
+    market_store = _market_store()
     result = update_kol_tracking(
         store,
-        WarehousePriceProvider(MARKET_ROOT / "warehouse"),
-        AKShareProvider(),
+        market_store,
+        AKShareCheckpointProvider(),
         as_of=as_of,
         dashboard_path=KOL_DASHBOARD,
         dry_run=args.dry_run,
+        event_ids={args.event_id} if getattr(args, "event_id", "") else None,
     )
     failures: list[str] = []
     performance_summary: dict[str, Any] | None = None
@@ -786,12 +807,19 @@ def _fallback_mode() -> str:
 
 
 def _post_provider(mode: str):
+    fallback_mode = _fallback_mode()
+    if fallback_mode in {"shadow", "enabled"}:
+        try:
+            if not timeline_health(NITTER_URL).get("ready"):
+                fallback_mode = "disabled"
+        except Exception:
+            fallback_mode = "disabled"
     return build_x_post_provider(
         mode,
         twitter_credentials=KeyringCredentialStore(),
         xtf_command=str(XTF_COMMAND),
         nitter_url=NITTER_URL,
-        fallback_mode=_fallback_mode(),
+        fallback_mode=fallback_mode,
     )
 
 
@@ -1561,6 +1589,7 @@ def kol_morning_pipeline(args: argparse.Namespace) -> None:
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
             batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
@@ -1573,6 +1602,10 @@ def kol_morning_pipeline(args: argparse.Namespace) -> None:
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     repository.interrupt_stale_runs()
@@ -1602,6 +1635,7 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
             batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
@@ -1614,6 +1648,10 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     interrupted = repository.interrupt_stale_runs()
@@ -1681,8 +1719,256 @@ def kol_ui_doctor(_: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-def _market_store() -> MarketStore:
-    return MarketStore(MARKET_ROOT)
+def _market_store() -> FoundationBackedMarketStore:
+    return FoundationBackedMarketStore(MarketStore(MARKET_ROOT), FOUNDATION_ROOT)
+
+
+def _resolve_foundation_as_of(value: str | None) -> date:
+    """Resolve an operator date without ever treating an open session as complete."""
+    if value and value != "auto":
+        return date.fromisoformat(value)
+    now = datetime.now(SHANGHAI)
+    candidate = now.date()
+    if now.time() < datetime_time(16, 0):
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _foundation_status() -> dict[str, Any]:
+    reader = FoundationMarketReader(FOUNDATION_ROOT)
+    health = reader.health()
+    if not health.get("ok"):
+        return {**health, "status": "unavailable", "quality_status": "failed"}
+    release = reader.release()
+    required = {
+        "daily_raw",
+        "daily_adjusted",
+        "instruments",
+        "trading_calendar",
+    }
+    missing: list[str] = []
+    paths: dict[str, str] = {}
+    for dataset in sorted(required):
+        try:
+            path = reader.dataset_path(dataset, release)
+            paths[dataset] = str(path)
+        except (FileNotFoundError, KeyError, TypeError, ValueError) as error:
+            missing.append(f"{dataset}: {error}")
+    benchmark_available = False
+    benchmark_error = ""
+    try:
+        benchmark_available = not reader.read_daily("000300", adjustment="raw").empty
+    except Exception as error:
+        benchmark_error = str(error)
+    quality_status = "valid" if not missing else "failed"
+    if not benchmark_available and not missing:
+        quality_status = "partial"
+    coverage = reader.coverage(str(release.get("as_of") or ""))
+    if not coverage.get("complete") and not missing:
+        quality_status = "partial"
+    try:
+        disk = shutil.disk_usage(FOUNDATION_ROOT)
+        free_bytes = int(disk.free)
+    except OSError:
+        free_bytes = None
+    return {
+        **health,
+        "status": "ready" if quality_status == "valid" else quality_status,
+        "quality_status": quality_status,
+        "required_datasets": sorted(required),
+        "missing_required_datasets": missing,
+        "dataset_paths": paths,
+        "benchmark_available": benchmark_available,
+        "benchmark_error": benchmark_error,
+        "coverage": coverage,
+        "coverage_complete": bool(coverage.get("complete")),
+        "free_bytes": free_bytes,
+    }
+
+
+def data_foundation_doctor(_: argparse.Namespace) -> None:
+    payload = _foundation_status()
+    payload["ok"] = bool(payload.get("ok") and not payload.get("missing_required_datasets"))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not payload["ok"]:
+        raise SystemExit(2)
+
+
+def _run_foundation_refresh(target: date) -> dict[str, Any]:
+    """Run the foundation publisher with a hard timeout and no partial promotion."""
+    python = FOUNDATION_REPO / ".venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        return {"ok": False, "status": "environment_missing", "error": str(python)}
+    # A full BaoStock gap repair may cover the active universe sequentially.
+    # Keep the operator bounded, but allow the planned 30-minute window.
+    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "1800"))
+    command = [
+        str(python),
+        "-m",
+        "ashare_data_foundation.cli",
+        "--data-root",
+        str(FOUNDATION_ROOT),
+        "refresh",
+        "--as-of",
+        target.isoformat(),
+        "--primary",
+        os.environ.get("ADF_PRIMARY_PROVIDER", "baostock"),
+        "--workers",
+        os.environ.get("ADF_WORKERS", "8"),
+        "--resume",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(FOUNDATION_REPO),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "status": "timed_out",
+            "timeout_seconds": timeout,
+            "command": command[:6] + ["..."],
+        }
+    output = (completed.stdout or completed.stderr or "").strip()
+    return {
+        "ok": completed.returncode == 0,
+        "status": "published" if completed.returncode == 0 else "failed",
+        "returncode": completed.returncode,
+        "output_tail": output[-2000:],
+    }
+
+
+def kol_data_refresh(args: argparse.Namespace) -> None:
+    """Refresh the shared release, then update every KOL consumer from one pointer."""
+    lock_path = KOL_ROOT / "foundation-refresh.lock"
+    lock = FileLock(str(lock_path), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(json.dumps({"ok": True, "status": "already_running", "lock": str(lock_path)}))
+        return
+    try:
+        target = _resolve_foundation_as_of(args.as_of)
+        before = _foundation_status()
+        before_as_of = str(before.get("as_of") or "")
+        refresh = {"ok": True, "status": "not_needed"}
+        refresh_required = bool(
+            before_as_of
+            and (
+                date.fromisoformat(before_as_of) < target
+                or before.get("coverage_complete") is False
+            )
+        )
+        if refresh_required:
+            refresh = _run_foundation_refresh(target)
+        after = _foundation_status()
+        effective_text = str(after.get("as_of") or before_as_of)
+        steps: list[dict[str, Any]] = [{"step": "foundation_before", **before}, {"step": "foundation_refresh", **refresh}]
+        if effective_text:
+            effective = min(target, date.fromisoformat(effective_text))
+        else:
+            effective = target
+        update = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "foundation release unavailable",
+        }
+        if (
+            after.get("ok")
+            and effective_text
+            and (not refresh_required or refresh.get("ok"))
+        ):
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "kol-update",
+                "--as-of",
+                effective.isoformat(),
+            ]
+            if args.notify:
+                command.append("--notify")
+            if args.dry_run:
+                command.append("--dry-run")
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=float(os.environ.get("KOL_UPDATE_TIMEOUT_SECONDS", "1800")),
+                    check=False,
+                )
+                update = {
+                    "ok": completed.returncode == 0,
+                    "status": "updated" if completed.returncode == 0 else "failed",
+                    "effective_as_of": effective.isoformat(),
+                    "output_tail": (completed.stdout or completed.stderr or "")[-4000:],
+                }
+            except subprocess.TimeoutExpired:
+                update = {
+                    "ok": False,
+                    "status": "timed_out",
+                    "effective_as_of": effective.isoformat(),
+                }
+        technical = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "returns update did not complete",
+        }
+        if update.get("ok") and not args.dry_run:
+            context_result = _backfill_event_contexts(
+                _market_store(),
+                KolStore(KOL_ROOT),
+                stale_only=True,
+            )
+            technical = {
+                "ok": bool(context_result.get("ok")),
+                "status": "updated" if context_result.get("ok") else "failed",
+                "created": len(context_result.get("created", [])),
+                "updated": len(context_result.get("updated", [])),
+                "skipped": len(context_result.get("skipped", [])),
+                "pending": len(context_result.get("pending", [])),
+                "errors": context_result.get("errors", []),
+            }
+        elif args.dry_run:
+            technical = {"ok": True, "status": "dry_run"}
+        steps.extend([
+            {"step": "foundation_after", **after},
+            {"step": "kol_update", **update},
+            {"step": "technical_context", **technical},
+        ])
+        payload = {
+            "ok": bool(
+                after.get("ok")
+                and update.get("ok")
+                and technical.get("ok")
+                and (not refresh_required or refresh.get("ok"))
+            ),
+            "status": (
+                "completed"
+                if update.get("ok") and technical.get("ok") and (not refresh_required or refresh.get("ok"))
+                else "degraded"
+            ),
+            "requested_as_of": target.isoformat(),
+            "effective_as_of": effective.isoformat(),
+            "foundation_release_id": after.get("release_id") or before.get("release_id", ""),
+            "steps": steps,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if not payload["ok"]:
+            raise SystemExit(2)
+    finally:
+        lock.release()
 
 
 def _backfill_event_contexts(
@@ -1692,6 +1978,7 @@ def _backfill_event_contexts(
     event_ids: set[str] | None = None,
     symbols: set[str] | None = None,
     force: bool = False,
+    stale_only: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "feature_version": FEATURE_VERSION,
@@ -1708,11 +1995,26 @@ def _backfill_event_contexts(
         and (event_ids is None or event.event_id in event_ids)
         and (symbols is None or event.symbol in symbols)
     ]
+    foundation_release_id = ""
+    foundation = getattr(market_store, "foundation", None)
+    if foundation is not None:
+        try:
+            foundation_release_id = str(foundation.release().get("release_id", ""))
+        except Exception:
+            foundation_release_id = ""
     for event in events:
         expected_trade_date: date | None = None
         try:
             input_hash = event_context_input_hash(event.symbol, event.posted_at)
             existing = market_store.get_event_technical_context(event.event_id, input_hash=input_hash)
+            if (
+                stale_only
+                and existing is not None
+                and str(existing.get("foundation_release_id") or "") == foundation_release_id
+                and str(existing.get("status") or "") not in {"pending", "failed"}
+            ):
+                result["skipped"].append(event.event_id)
+                continue
             expected_trade_date = market_store.latest_open_date(event_context_cutoff(event.posted_at))
             frame = market_store.read_daily(event.symbol, adjustment="qfq")
             context = compute_event_technical_context(
@@ -1721,6 +2023,7 @@ def _backfill_event_contexts(
                 posted_at=event.posted_at,
                 qfq_prices=frame,
                 expected_trade_date=expected_trade_date,
+                foundation_release_id=foundation_release_id,
             )
             changed = market_store.save_event_technical_context(
                 context.to_record(),
@@ -1738,6 +2041,7 @@ def _backfill_event_contexts(
                     posted_at=event.posted_at,
                     expected_trade_date=expected_trade_date,
                     error=str(exc),
+                    foundation_release_id=foundation_release_id,
                 )
                 market_store.save_event_technical_context(failed.to_record())
             except Exception:
@@ -2934,6 +3238,39 @@ def market_sync(args: argparse.Namespace) -> None:
     store = _market_store()
     _seed_market_instruments(store)
     requested_as_of = date.fromisoformat(args.as_of or date.today().isoformat())
+    if isinstance(store, FoundationBackedMarketStore):
+        # The consumer task must never call BaoStock/AKShare or write a second
+        # daily warehouse.  The foundation publisher owns refresh and atomic
+        # release selection; this task only rebuilds derived KOL context.
+        as_of = store.latest_open_date(requested_as_of)
+        if as_of is None:
+            raise SystemExit("shared foundation has no completed trading date")
+        payload: dict[str, Any] = {
+            "read_only_consumer": True,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "results": [],
+            "foundation_release_id": str(store.foundation.release().get("release_id", "")),
+            "foundation_as_of": str(store.foundation.release().get("as_of", "")),
+            "foundation_status": _foundation_status(),
+        }
+        requested = {value.strip() for value in (args.symbols or "").split(",") if value.strip()}
+        payload["technical_context"] = _backfill_event_contexts(
+            store,
+            KolStore(KOL_ROOT),
+            symbols=requested or None,
+        )
+        payload["intraday_context"] = backfill_event_intraday(
+            store,
+            KolStore(KOL_ROOT),
+            event_ids=None,
+        )
+        payload["as_of"] = as_of.isoformat()
+        payload["requested_as_of"] = requested_as_of.isoformat()
+        payload["calendar_error"] = ""
+        print(json.dumps({"ok": True, **payload}, ensure_ascii=False))
+        return
     calendar_error = ""
     try:
         open_dates = BaoStockMarketProvider().fetch_calendar(
@@ -3079,11 +3416,17 @@ def market_weekly(args: argparse.Namespace) -> None:
         errors.append("akshare_etf_master: timed out after 45 seconds")
     lead_reconciliation = _extract_leads_to_market()
     snapshots = 0
+    auxiliary_circuit_open = False
+    auxiliary_failure_reported = False
+    auxiliary_skipped = 0
     if not args.master_only:
         for instrument in store.list_instruments():
             if instrument["lifecycle"] not in {"pinned", "tracking"} or instrument["instrument_type"] != "stock":
                 continue
             for dataset in ("valuation", "financial_summary", "announcements", "fund_flow"):
+                if auxiliary_circuit_open:
+                    auxiliary_skipped += 1
+                    continue
                 command = [
                     sys.executable,
                     str(Path(__file__).resolve()),
@@ -3108,11 +3451,21 @@ def market_weekly(args: argparse.Namespace) -> None:
                     if completed.returncode == 0:
                         snapshots += int(json.loads(completed.stdout.strip()).get("saved", False))
                     else:
-                        errors.append(
-                            f"{instrument['symbol']}:{dataset}: {(completed.stderr or completed.stdout)[-1000:]}"
-                        )
+                        if not auxiliary_failure_reported:
+                            errors.append(
+                                "akshare auxiliary provider circuit opened after "
+                                f"{instrument['symbol']}:{dataset}: "
+                                f"{(completed.stderr or completed.stdout)[-1000:]}"
+                            )
+                            auxiliary_failure_reported = True
+                        auxiliary_circuit_open = True
                 except subprocess.TimeoutExpired:
-                    errors.append(f"{instrument['symbol']}:{dataset}: timed out after 45 seconds")
+                    if not auxiliary_failure_reported:
+                        errors.append(
+                            f"akshare auxiliary provider circuit opened after {instrument['symbol']}:{dataset}: timed out after 45 seconds"
+                        )
+                        auxiliary_failure_reported = True
+                    auxiliary_circuit_open = True
     errors = [*master_errors, *errors]
     alert_sent = _send_transition_alert(
         "market_master_failed",
@@ -3127,6 +3480,8 @@ def market_weekly(args: argparse.Namespace) -> None:
                 "master_rows": imported,
                 "stock_leads": lead_reconciliation,
                 "snapshots": snapshots,
+                "auxiliary_circuit_open": auxiliary_circuit_open,
+                "auxiliary_skipped": auxiliary_skipped,
                 "errors": errors,
                 "alert_sent": alert_sent,
             },
@@ -3184,129 +3539,6 @@ def market_aux_fetch(args: argparse.Namespace) -> None:
         print(json.dumps({"ok": False, "error": str(exc)[:2000]}, ensure_ascii=False))
         raise SystemExit(2)
     print(json.dumps({"ok": True, "saved": result.quality_status == "valid"}, ensure_ascii=False))
-
-
-def _board_store() -> BoardMainlineStore:
-    return BoardMainlineStore(_market_store())
-
-
-def market_board_doctor(_: argparse.Namespace) -> None:
-    store = _board_store()
-    provider = FallbackBoardProvider(
-        primary=EastmoneyBoardProvider(max_retries=1),
-    )
-    checks: dict[str, Any] = {
-        "ok": True,
-        "health": store.health(),
-        "provider": provider.name,
-        "catalog": {},
-    }
-    successes = 0
-    for board_type in ("industry", "concept"):
-        try:
-            frame = provider.fetch_catalog(board_type)
-            checks["catalog"][board_type] = {"ok": True, "rows": int(len(frame))}
-            successes += 1
-        except Exception as exc:
-            checks["catalog"][board_type] = {"ok": False, "error": str(exc)[:2000]}
-    checks["ok"] = successes > 0 or checks["health"]["status"] in {"ready", "backfilling"}
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
-
-
-def market_board_sync(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"}:
-        raise SystemExit(2)
-
-
-def market_board_backfill(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    provider = FallbackBoardProvider()
-    health = store.health()
-    catalog_total = sum(int(value) for value in health["catalog_counts"].values())
-    catalog_result: dict[str, Any] | None = None
-    if catalog_total == 0:
-        result = sync_board_snapshot(store, provider, as_of=as_of)
-        catalog_result = result.__dict__
-        if result.succeeded == 0:
-            print(
-                json.dumps(
-                    {"ok": False, "catalog": catalog_result, "health": store.health()},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            raise SystemExit(2)
-    result = backfill_boards(
-        store,
-        provider,
-        as_of=as_of,
-        days=args.days,
-        batch_size=args.batch_size,
-        board_type=None if args.board_type == "all" else args.board_type,
-    )
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "catalog": catalog_result,
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
-
-
-def market_board_rps(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of) if args.as_of else None
-    version = args.version if args.rebuild else "board-rps-v2"
-    if not re.fullmatch(r"board-rps-v\d+", version):
-        raise SystemExit("--version must look like board-rps-v2")
-    store = _board_store()
-    result = store.compute_rps(as_of=as_of, formula_version=version)
-    print(
-        json.dumps(
-            {"ok": bool(result.get("ok")), "result": result, "health": store.health()},
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if not result.get("ok"):
-        raise SystemExit(2)
-
-
-def market_board_memberships(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_candidate_memberships(
-        store,
-        FallbackBoardProvider(),
-        as_of=as_of,
-        limit=args.limit,
-    )
-    print(
-        json.dumps(
-            {
-                "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-                "result": result.__dict__,
-                "health": store.health(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
 
 
 def data_digest(args: argparse.Namespace) -> None:
@@ -3446,6 +3678,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_kol_update.add_argument("--as-of", required=True)
     p_kol_update.add_argument("--notify", action="store_true")
     p_kol_update.add_argument("--dry-run", action="store_true")
+    p_kol_update.add_argument("--event-id", help="update one event only")
     p_kol_update.set_defaults(func=kol_update)
 
     p_kol_returns_backfill = sub.add_parser(
@@ -3683,7 +3916,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
-    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=50)
+    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)
 
     p_morning_migrate = sub.add_parser(
@@ -3706,6 +3939,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_market_doctor = sub.add_parser("market-doctor", help="check market data dependencies and coverage")
     p_market_doctor.set_defaults(func=market_doctor)
+
+    p_foundation_doctor = sub.add_parser(
+        "data-foundation-doctor",
+        help="check the pinned shared A-share foundation release without network calls",
+    )
+    p_foundation_doctor.set_defaults(func=data_foundation_doctor)
+
+    p_foundation_refresh = sub.add_parser(
+        "kol-data-refresh",
+        help="refresh the shared A-share release and update KOL consumers from it",
+    )
+    p_foundation_refresh.add_argument(
+        "--as-of",
+        default="auto",
+        help="target completed trading date, or auto (never uses an open session)",
+    )
+    p_foundation_refresh.add_argument("--notify", action="store_true")
+    p_foundation_refresh.add_argument("--dry-run", action="store_true")
+    p_foundation_refresh.set_defaults(func=kol_data_refresh)
 
     p_purchased_daily_doctor = sub.add_parser(
         "market-purchased-daily-doctor",
@@ -3839,42 +4091,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_market_aux.add_argument("--as-of", required=True)
     p_market_aux.set_defaults(func=market_aux_fetch)
-
-    p_board_doctor = sub.add_parser(
-        "market-board-doctor", help="check the local board RPS store and Eastmoney provider"
-    )
-    p_board_doctor.set_defaults(func=market_board_doctor)
-
-    p_board_backfill = sub.add_parser(
-        "market-board-backfill", help="resume throttled industry and concept board history backfill"
-    )
-    p_board_backfill.add_argument("--resume", action="store_true")
-    p_board_backfill.add_argument("--days", type=int, default=320)
-    p_board_backfill.add_argument("--batch-size", type=int, default=80)
-    p_board_backfill.add_argument(
-        "--board-type", choices=["all", "industry", "concept"], default="all"
-    )
-    p_board_backfill.add_argument("--as-of")
-    p_board_backfill.set_defaults(func=market_board_backfill)
-
-    p_board_sync = sub.add_parser(
-        "market-board-sync", help="update the latest board snapshot without fabricating missing data"
-    )
-    p_board_sync.add_argument("--as-of")
-    p_board_sync.set_defaults(func=market_board_sync)
-
-    p_board_rps = sub.add_parser(
-        "market-board-rps", help="recompute board RPS from normalized local history"
-    )
-    p_board_rps.add_argument("--as-of")
-    p_board_rps.add_argument("--rebuild", action="store_true")
-    p_board_rps.add_argument("--version", default="board-rps-v2")
-    p_board_rps.set_defaults(func=market_board_rps)
-
-    p_board_memberships = sub.add_parser("market-board-memberships", help=argparse.SUPPRESS)
-    p_board_memberships.add_argument("--as-of")
-    p_board_memberships.add_argument("--limit", type=int, default=20)
-    p_board_memberships.set_defaults(func=market_board_memberships)
 
     p_digest = sub.add_parser("data-digest", help="emit one combined KOL and market data summary")
     p_digest.add_argument("--notify", action="store_true")

@@ -14,8 +14,8 @@ function Section($Name) {
 Section "Workspace"
 Write-Host "Repo: $Repo"
 Write-Host "Obsidian vault: <OBSIDIAN_VAULT>"
-Write-Host "Hermes runtime: <USER_HOME>\AppData\Local\hermes"
-Write-Host "Hermes user config: <USER_HOME>\.hermes"
+Write-Host "Hermes runtime: $env:LOCALAPPDATA\hermes"
+Write-Host "Hermes user config: $env:USERPROFILE\.hermes"
 
 Section "Git"
 git -C $Repo status --short

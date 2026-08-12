@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
-DEFAULT_STAGING_DIR = r"<AI_HUB_HOME>\ai-hub\_runtime\staging"
+DEFAULT_STAGING_DIR = str(Path(__file__).resolve().parents[2] / "_runtime" / "staging")
 DEFAULT_REPORT = r"<OBSIDIAN_VAULT>\06_Logs\2026-07-02-history-candidates-merged.md"
 
 X_STATUS_RE = re.compile(

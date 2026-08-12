@@ -1,0 +1,566 @@
+﻿"""Private capture adapters and AI scoring for the public KOL workbench core.
+
+The public package owns schemas, review state, and the HTTP API. This module only
+maps private/local capture output into that contract and keeps credentials out of
+the public repository.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urlparse
+
+import httpx
+from foundation_market_client import FoundationBackedMarketStore
+from kol_audit.api.app import ApiSettings, create_app
+from kol_audit.discovery.models import (
+    AccountContentResult,
+    DiscoveredAccount,
+    DiscoveryResult,
+    PlatformCapabilities,
+    ResolvedAccount,
+    content_id,
+)
+from kol_audit.discovery.scoring import CandidateScorer
+from kol_audit.discovery.service import PLATFORMS, ProviderRegistry
+from kol_audit.events.store import KolStore
+from kol_audit.market.store import MarketStore
+from kol_audit.posts.store import KolPostStore
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL, load_opencode_go_api_key
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RUNTIME_ROOT = ROOT / "_runtime" / "trading"
+DEFAULT_CAPTURE_ROOT = ROOT / "_runtime" / "trading" / "kol-discovery" / "captures"
+DEFAULT_FOUNDATION_ROOT = Path(
+    os.environ.get("ASHARE_FOUNDATION_ROOT", r"F:\ai-data\ashare")
+)
+
+
+class TruthfulProviderRegistry(ProviderRegistry):
+    """Private runtime registry that never equates an import provider with live access."""
+
+    def platforms(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for platform, display_name in PLATFORMS:
+            provider = self._providers.get(platform)
+            health = getattr(provider, "health", None)
+            provider_health = health() if callable(health) else {}
+            status = str(provider_health.get("status") or "untested")
+            result.append({
+                "platform": platform,
+                "display_name": display_name,
+                "available": bool(provider is not None and status in {"ready", "degraded"}),
+                "provider": provider.name if provider else "",
+                "capabilities": asdict(provider.capabilities()) if provider else {},
+                "health": provider_health,
+            })
+        return result
+
+
+def _direct_profile_handle(platform: str, reference: str) -> str:
+    value = str(reference or "").strip()
+    if not value:
+        raise ValueError(f"{platform} discovery requires a profile URL or handle")
+    if value.startswith("@"):
+        value = value[1:]
+    if "://" in value:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").casefold()
+        path = [part for part in parsed.path.split("/") if part]
+        if platform == "x" and host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            if not path or path[0] in {"i", "search", "explore", "home"}:
+                raise ValueError("X discovery requires an account profile URL, not a search or post URL")
+            value = path[0]
+        elif platform == "zhihu" and host in {"zhihu.com", "www.zhihu.com"}:
+            if len(path) < 2 or path[0] != "people":
+                raise ValueError("Zhihu discovery requires a /people/<url_token> profile URL")
+            value = path[1]
+        else:
+            raise ValueError(f"unsupported {platform} profile URL")
+    if any(char.isspace() for char in value) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", value):
+        raise ValueError(f"invalid {platform} profile handle")
+    return value
+
+
+class DirectProfileProvider:
+    """Use the existing authenticated collector for one explicit profile.
+
+    This deliberately supports profile resolution only. It is not a platform
+    search API and therefore cannot turn arbitrary keywords into candidates.
+    """
+
+    def __init__(self, platform: str, collector: Any, profile_base: str):
+        self.platform = platform
+        self.collector = collector
+        self.profile_base = profile_base.rstrip("/")
+        self.name = f"{collector.name}-direct-profile"
+
+    def capabilities(self) -> PlatformCapabilities:
+        return PLATFORM_CAPABILITIES[self.platform]
+
+    def health(self) -> dict[str, Any]:
+        if self.platform == "x":
+            configured = bool(getattr(self.collector.credentials, "configured", lambda: False)())
+            return {
+                "configured": configured,
+                "mode": "direct_profile",
+                "live_adapter": True,
+                "status": "ready" if configured else "needs_login",
+                "reason": "explicit profile lookup via twitter-cli" if configured else "X credentials are not configured",
+            }
+        script_value = str(getattr(self.collector, "script_path", "") or "").strip()
+        user_data_value = str(getattr(self.collector, "user_data_dir", "") or "").strip()
+        script = Path(script_value) if script_value else None
+        user_data = Path(user_data_value) if user_data_value else None
+        configured = bool(script and user_data and script.is_file() and user_data.is_dir())
+        return {
+            "configured": configured,
+            "mode": "direct_profile",
+            "live_adapter": True,
+            "status": "degraded" if configured else "needs_login",
+            "reason": (
+                "explicit profile lookup; one shared CDP preflight runs on discovery"
+                if configured else "Zhihu capture script or browser profile is missing"
+            ),
+        }
+
+    def resolve(self, reference: str) -> ResolvedAccount:
+        handle = _direct_profile_handle(self.platform, reference)
+        return ResolvedAccount(
+            platform=self.platform,
+            external_account_id=handle,
+            handle=handle,
+            display_name=handle,
+            profile_url=f"{self.profile_base}/{handle}",
+        )
+
+    @staticmethod
+    def _author(post: dict[str, Any], fallback: str) -> tuple[str, str]:
+        author = post.get("author") if isinstance(post.get("author"), dict) else {}
+        handle = str(author.get("screenName") or author.get("urlToken") or author.get("handle") or fallback).strip().lstrip("@")
+        name = str(author.get("name") or author.get("display_name") or handle).strip()
+        return handle, name
+
+    def discover(self, query: str, cursor: str | None, limit: int) -> DiscoveryResult:
+        if cursor:
+            return DiscoveryResult([], warnings=["direct profile discovery is single-shot"])
+        account = self.resolve(query)
+        if hasattr(self.collector, "prepare_session"):
+            self.collector.prepare_session(account.handle)
+        fetched = self.collector.fetch_user_posts(account.handle, 1)
+        posts = fetched.posts
+        handle, display_name = self._author(posts[0], account.handle) if posts else (account.handle, account.display_name)
+        external_id = account.external_account_id
+        if posts and isinstance(posts[0].get("author"), dict):
+            author = posts[0]["author"]
+            external_id = str(author.get("id") or author.get("id_str") or external_id)
+        warnings = list(fetched.warnings)
+        if not posts:
+            warnings.append("profile probe returned no posts; identity remains provisional")
+        profile_url = f"{self.profile_base}/{handle}"
+        evidence = [{
+            "evidence_type": "direct_profile_probe",
+            "url": profile_url,
+            "excerpt": str(posts[0].get("text") or "")[:300] if posts else "",
+        }]
+        return DiscoveryResult([
+            DiscoveredAccount(
+                platform=self.platform,
+                external_account_id=external_id,
+                handle=handle,
+                display_name=display_name,
+                profile_url=profile_url,
+                bio=str((posts[0].get("author") or {}).get("description") or "") if posts else "",
+                evidence=evidence,
+                raw={"probe_provider": fetched.provider, "probe_post_count": len(posts)},
+            )
+        ], warnings=warnings)
+
+    def fetch(self, account: ResolvedAccount, cursor: str | None, limit: int) -> AccountContentResult:
+        if hasattr(self.collector, "prepare_session"):
+            self.collector.prepare_session(account.handle)
+        fetched = self.collector.fetch_user_posts(account.handle, max(1, min(int(limit), 100)))
+        items: list[dict[str, Any]] = []
+        for item in fetched.posts:
+            external_id = str(item.get("id") or item.get("answer_id") or item.get("post_id") or "").strip()
+            if not external_id:
+                continue
+            items.append({**item, "external_item_id": external_id, "platform": self.platform, "post_id": content_id(self.platform, external_id)})
+        return AccountContentResult(items, warnings=list(fetched.warnings))
+
+PLATFORM_CAPABILITIES = {
+    "x": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, historical_backfill=True
+    ),
+    "zhihu": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, ocr=True, historical_backfill=True
+    ),
+    "xiaohongshu": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, ocr=True, historical_backfill=True
+    ),
+    "douyin": PlatformCapabilities(
+        discover=True,
+        resolve=True,
+        fetch=True,
+        ocr=True,
+        transcript=True,
+        historical_backfill=True,
+    ),
+    "bilibili": PlatformCapabilities(
+        discover=True,
+        resolve=True,
+        fetch=True,
+        ocr=True,
+        transcript=True,
+        historical_backfill=True,
+    ),
+    "weibo": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, ocr=True, historical_backfill=True
+    ),
+    "wechat_rss": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, historical_backfill=True
+    ),
+    "xueqiu": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, ocr=True, historical_backfill=True
+    ),
+    "taoguba": PlatformCapabilities(
+        discover=True, resolve=True, fetch=True, ocr=True, historical_backfill=True
+    ),
+}
+
+# JSON capture files are useful for fixtures and manual imports, but they are
+# not evidence that a live platform adapter works.  Keep unverified platforms
+# visible in the registry while reporting them as manual_only instead of
+# advertising a false live capability.
+for _platform in {
+    "xiaohongshu",
+    "douyin",
+    "bilibili",
+    "weibo",
+    "wechat_rss",
+    "xueqiu",
+    "taoguba",
+}:
+    PLATFORM_CAPABILITIES[_platform] = PlatformCapabilities()
+
+
+def _read_items(path: Path, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if isinstance(payload, dict):
+        for key in keys:
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        raise ValueError(f"capture file must contain an array: {path}")
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+class LocalCaptureAccountProvider:
+    """Read deterministic capture exports without embedding platform credentials."""
+
+    name = "ai-hub-local-capture-v1"
+
+    def __init__(self, platform: str, capture_root: Path):
+        if platform not in PLATFORM_CAPABILITIES:
+            raise ValueError(f"unsupported KOL platform: {platform}")
+        self.platform = platform
+        self.root = Path(capture_root) / platform
+
+    @property
+    def accounts_path(self) -> Path:
+        return self.root / "accounts.json"
+
+    @property
+    def content_path(self) -> Path:
+        return self.root / "content.json"
+
+    def capabilities(self) -> PlatformCapabilities:
+        return PLATFORM_CAPABILITIES[self.platform]
+
+    def health(self) -> dict[str, Any]:
+        accounts_capture = self.accounts_path.is_file()
+        content_capture = self.content_path.is_file()
+        if not accounts_capture:
+            status = "blocked"
+            reason = f"missing capture: {self.accounts_path}"
+        elif not content_capture:
+            status = "degraded"
+            reason = f"missing content capture: {self.content_path}"
+        else:
+            status = "manual_only"
+            reason = "JSON capture adapter is not a live platform provider"
+        return {
+            "configured": accounts_capture and content_capture,
+            "accounts_capture": accounts_capture,
+            "content_capture": content_capture,
+            "mode": "manual_only" if self.platform not in {"x", "zhihu"} else "local_capture",
+            "live_adapter": False,
+            "status": status,
+            "reason": reason,
+        }
+
+    def _accounts(self) -> list[dict[str, Any]]:
+        return _read_items(self.accounts_path, ("accounts", "items"))
+
+    def _resolved(self, value: dict[str, Any]) -> ResolvedAccount:
+        external_id = str(
+            value.get("external_account_id") or value.get("id") or ""
+        ).strip()
+        handle = (
+            str(value.get("handle") or value.get("screen_name") or external_id)
+            .strip()
+            .lstrip("@")
+        )
+        if not external_id or not handle:
+            raise ValueError(f"{self.platform} account is missing a stable identity")
+        return ResolvedAccount(
+            platform=self.platform,
+            external_account_id=external_id,
+            handle=handle,
+            display_name=str(
+                value.get("display_name") or value.get("name") or handle
+            ).strip(),
+            profile_url=str(value.get("profile_url") or value.get("url") or "").strip(),
+            bio=str(value.get("bio") or value.get("description") or "").strip(),
+            follower_count=(
+                int(value["follower_count"])
+                if value.get("follower_count") not in {None, ""}
+                else None
+            ),
+            raw=value,
+        )
+
+    def resolve(self, reference: str) -> ResolvedAccount:
+        needle = reference.strip().lstrip("@").casefold()
+        for value in self._accounts():
+            account = self._resolved(value)
+            if needle in {
+                account.external_account_id.casefold(),
+                account.handle.casefold(),
+                account.profile_url.casefold(),
+            }:
+                return account
+        raise KeyError(f"{self.platform} account not found: {reference}")
+
+    def discover(self, query: str, cursor: str | None, limit: int) -> DiscoveryResult:
+        if not self.accounts_path.is_file():
+            return DiscoveryResult(
+                [], warnings=[f"missing capture: {self.accounts_path}"]
+            )
+        needle = query.strip().casefold()
+        matches: list[DiscoveredAccount] = []
+        for value in self._accounts():
+            account = self._resolved(value)
+            evidence = (
+                value.get("evidence") if isinstance(value.get("evidence"), list) else []
+            )
+            haystack = "\n".join(
+                (
+                    account.handle,
+                    account.display_name,
+                    account.bio,
+                    json.dumps(evidence, ensure_ascii=False),
+                )
+            ).casefold()
+            if needle and needle not in haystack:
+                continue
+            matches.append(
+                DiscoveredAccount(
+                    **account.__dict__,
+                    evidence=[
+                        dict(item) for item in evidence if isinstance(item, dict)
+                    ],
+                )
+            )
+        start = max(0, int(cursor or 0))
+        selected = matches[start : start + max(1, limit)]
+        next_offset = start + len(selected)
+        return DiscoveryResult(
+            selected,
+            cursor=str(next_offset) if next_offset < len(matches) else None,
+        )
+
+    def fetch(
+        self,
+        account: ResolvedAccount,
+        cursor: str | None,
+        limit: int,
+    ) -> AccountContentResult:
+        if account.platform != self.platform:
+            raise ValueError("account platform does not match provider")
+        if not self.content_path.is_file():
+            return AccountContentResult(
+                [], warnings=[f"missing capture: {self.content_path}"]
+            )
+        values = []
+        for item in _read_items(self.content_path, ("content", "posts", "items")):
+            owner = str(item.get("external_account_id") or item.get("account_id") or "")
+            if owner != account.external_account_id:
+                continue
+            external_item_id = str(
+                item.get("external_item_id")
+                or item.get("item_id")
+                or item.get("id")
+                or ""
+            ).strip()
+            if not external_item_id:
+                raise ValueError(f"{self.platform} content is missing external_item_id")
+            values.append(
+                {
+                    **item,
+                    "post_id": content_id(self.platform, external_item_id),
+                    "platform": self.platform,
+                }
+            )
+        values.sort(
+            key=lambda item: str(item.get("posted_at") or item.get("created_at") or ""),
+            reverse=True,
+        )
+        start = max(0, int(cursor or 0))
+        selected = values[start : start + max(1, limit)]
+        next_offset = start + len(selected)
+        return AccountContentResult(
+            selected,
+            cursor=str(next_offset) if next_offset < len(values) else None,
+        )
+
+
+class OpenCodeGoCandidateScoreProvider:
+    """Score evidence only; the public core keeps admission human-controlled."""
+
+    name = f"opencode-go/{OPENCODE_GO_MODEL}"
+
+    def __init__(
+        self,
+        *,
+        key_loader: Callable[[], str] = load_opencode_go_api_key,
+        client: httpx.Client | None = None,
+        timeout_seconds: float = 90,
+    ):
+        self.key_loader = key_loader
+        self.client = client
+        self.timeout_seconds = max(1, timeout_seconds)
+
+    def score(
+        self, candidate: dict[str, Any], evidence: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        instruction = (
+            "Score a social-media research-account candidate using only the supplied evidence. "
+            "Return JSON with expertise, track_record, relevance, activity, and identity_quality "
+            "as numbers from 0 to 1, plus a reasons string array. Scores are triage aids only: "
+            "never accept, reject, rank securities, or make trading recommendations."
+        )
+        body = {
+            "model": OPENCODE_GO_MODEL,
+            "messages": [
+                {"role": "system", "content": instruction},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"candidate": candidate, "evidence": evidence},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                },
+            ],
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {self.key_loader()}"}
+        if self.client is None:
+            response = httpx.post(
+                OPENCODE_GO_API_URL,
+                headers=headers,
+                json=body,
+                timeout=self.timeout_seconds,
+            )
+        else:
+            response = self.client.post(
+                OPENCODE_GO_API_URL,
+                headers=headers,
+                json=body,
+                timeout=self.timeout_seconds,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+        if isinstance(content, str):
+            result = json.loads(content)
+        elif isinstance(content, dict):
+            result = content
+        else:
+            raise ValueError("OpenCode Go candidate score is not a JSON object")
+        if not isinstance(result, dict):
+            raise ValueError("OpenCode Go candidate score is not a JSON object")
+        return result
+
+
+def build_provider_registry(
+    capture_root: Path = DEFAULT_CAPTURE_ROOT,
+    *,
+    x_provider: Any | None = None,
+    zhihu_provider: Any | None = None,
+) -> ProviderRegistry:
+    providers: list[Any] = []
+    for platform, _name in PLATFORMS:
+        if platform == "x" and x_provider is not None:
+            providers.append(DirectProfileProvider("x", x_provider, "https://x.com"))
+        elif platform == "zhihu" and zhihu_provider is not None:
+            providers.append(DirectProfileProvider("zhihu", zhihu_provider, "https://www.zhihu.com/people"))
+        else:
+            providers.append(LocalCaptureAccountProvider(platform, capture_root))
+    return TruthfulProviderRegistry(providers)
+
+
+def create_private_app(
+    *,
+    runtime_root: Path = DEFAULT_RUNTIME_ROOT,
+    capture_root: Path = DEFAULT_CAPTURE_ROOT,
+    foundation_root: Path = DEFAULT_FOUNDATION_ROOT,
+    score_provider: OpenCodeGoCandidateScoreProvider | None = None,
+):
+    base = ApiSettings.default()
+    settings = ApiSettings(
+        runtime_root=Path(runtime_root),
+        frontend_dist=base.frontend_dist,
+        codex_schema=base.codex_schema,
+        twitter_command=base.twitter_command,
+        ai_provider=base.ai_provider,
+    )
+    trading_root = Path(runtime_root)
+    kol_root = trading_root / "kol"
+    market_store = FoundationBackedMarketStore(
+        MarketStore(trading_root / "market"),
+        foundation_root,
+    )
+    market_store.bootstrap_reference_data()
+    app = create_app(
+        settings,
+        provider_registry=build_provider_registry(capture_root),
+        post_store_override=KolPostStore(kol_root / "posts.db", kol_root / "media"),
+        event_store_override=KolStore(kol_root),
+        market_store_override=market_store,
+    )
+    app.state.candidate_scorer = CandidateScorer(
+        app.state.discovery_store,
+        score_provider or OpenCodeGoCandidateScoreProvider(),
+    )
+
+    @app.middleware("http")
+    async def pin_foundation_release_for_request(request, call_next):
+        if not market_store.foundation.health()["ok"]:
+            return await call_next(request)
+        with market_store.foundation.pinned_release():
+            return await call_next(request)
+
+    return app

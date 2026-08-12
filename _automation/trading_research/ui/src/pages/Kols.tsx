@@ -4,6 +4,16 @@ import { BarChart3, Check, ExternalLink, History, Pencil, Pause, Play, Plus, Ref
 import { api, formatDate, percent } from '../api'
 import type { Kol } from '../types'
 
+const availabilityLabels: Record<Kol['availability_status'], string> = {
+  active: '可采集', rate_limited: '平台限流', provider_failed: '采集器故障',
+  protected: '受保护', suspected_unavailable: '待复核', suspended: '已封禁',
+  deleted: '已删除', renamed: '已改名', paused: '已暂停',
+}
+const availabilityClass: Record<Kol['availability_status'], string> = {
+  active: 'green', rate_limited: 'amber', provider_failed: 'red', protected: 'amber',
+  suspected_unavailable: 'amber', suspended: 'red', deleted: 'red', renamed: 'blue', paused: 'neutral',
+}
+
 export default function Kols() {
   const client = useQueryClient()
   const query = useQuery({ queryKey: ['kols'], queryFn: api.kols })
@@ -14,12 +24,12 @@ export default function Kols() {
   const [platformFilter, setPlatformFilter] = useState<'all' | 'X' | 'Zhihu'>('all')
   const [form, setForm] = useState<{ display_name: string; handle: string; domain: string; platform: 'X' | 'Zhihu' }>({ display_name: '', handle: '', domain: '', platform: 'X' })
   const [editingId, setEditingId] = useState<number | null>(null)
-  const [editForm, setEditForm] = useState({ display_name: '', domain: '' })
+  const [editForm, setEditForm] = useState({ display_name: '', domain: '', availability_status: 'active' as Kol['availability_status'], availability_reason: '' })
   const create = useMutation({ mutationFn: () => api.createKol(form), onSuccess: () => { client.invalidateQueries({ queryKey: ['kols'] }); setShowAdd(false); setForm({ display_name: '', handle: '', domain: '', platform: 'X' }) } })
   const patch = useMutation({ mutationFn: ({ id, value }: { id: number; value: Partial<Kol> }) => api.patchKol(id, value), onSuccess: () => { client.invalidateQueries({ queryKey: ['kols'] }); setEditingId(null) } })
   const backfill = useMutation({ mutationFn: (id: number) => api.queueKolBackfill(id), onSuccess: () => client.invalidateQueries({ queryKey: ['kols'] }) })
   const submit = (event: FormEvent) => { event.preventDefault(); create.mutate() }
-  const beginEdit = (kol: Kol) => { setEditingId(kol.id); setEditForm({ display_name: kol.display_name, domain: kol.domain }) }
+  const beginEdit = (kol: Kol) => { setEditingId(kol.id); setEditForm({ display_name: kol.display_name, domain: kol.domain, availability_status: kol.availability_status, availability_reason: kol.availability_reason }) }
   const resolvedAuthors = digestAuthors.data?.filter((author) => author.profile_url).length || 0
   const accountRows = query.data?.filter((kol) => platformFilter === 'all' || kol.platform === platformFilter) || []
 
@@ -41,11 +51,11 @@ export default function Kols() {
     {view === 'performance' && <div className="panel kol-leaderboard">
       <div className="panel-heading"><div><h2>KOL阶段表现</h2><span>只统计已冻结、已验证且可执行的看多推荐事件</span></div><span className="badge neutral">按超额收益审计</span></div>
       <div className="scope-note"><BarChart3 size={15} />看空事件保留审计记录，但不计入收益、胜率或排名；阶段表现已升级为独立工作台，支持平台分组、批次等权、近期窗口和趋势查看。<button className="text-button" onClick={() => { window.location.hash = '/performance' }}>打开 KOL 表现</button></div>
-      <div className="table-scroll"><table><thead><tr><th>排名</th><th>KOL</th><th>阶段</th><th>可执行事件</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
+      <div className="table-scroll"><table><thead><tr><th>排名</th><th>KOL</th><th>阶段</th><th>可执行/看多</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
       <tbody>{leaderboard.data?.rows.map((row) => <tr key={row.kol_name}>
         <td className="mono">{row.rank || '-'}</td><td><strong>{row.kol_name}</strong>{row.score !== null && <span className="secondary-line">观察分 {row.score.toFixed(2)}</span>}</td>
         <td><span className={`badge ${row.tier === 'reliable' || row.tier === 'long_term' ? 'green' : row.tier === 'provisional' || row.tier === 'watch' ? 'amber' : 'neutral'}`}>{({ collecting: '样本中', watch: '观察中', provisional: '初步排名', reliable: '较可信', long_term: '长期验证' } as const)[row.tier]}</span></td>
-        <td>{row.executable_event_count} / {row.event_count}</td>
+        <td>{row.executable_long_event_count} / {row.long_event_count}<span className="secondary-line">看空 {row.short_event_count} 条仅审计</span></td>
         {(['1W', '1M', '3M', '6M'] as const).map((horizon) => { const value = row.horizons[horizon]; return <td key={horizon}><strong>{percent(value.median_excess)}</strong><span className="secondary-line">{value.samples} 条 · 胜率 {percent(value.win_rate)}</span></td> })}
       </tr>)}</tbody></table></div>
       {!leaderboard.isLoading && !leaderboard.data?.rows.length && <div className="empty-state compact">尚无可统计KOL</div>}
@@ -59,8 +69,8 @@ export default function Kols() {
         <td>{formatDate(kol.last_success_at || kol.last_fetched_at)}</td><td className="mono">{kol.last_post_id || '-'}</td>
         <td><span className={`badge ${kol.fetch_status === 'success' ? 'green' : kol.fetch_status === 'failed' || kol.fetch_status === 'gap_detected' ? 'red' : 'neutral'}`}>{kol.fetch_status}</span>{kol.last_gap_at && <span className="secondary-line">最近缺口 {formatDate(kol.last_gap_at)}</span>}{kol.consecutive_failures > 0 && <span className="secondary-line">连续失败 {kol.consecutive_failures} 次</span>}</td>
         <td><span className={`badge ${kol.backfill_status === 'queued' || kol.backfill_status === 'needs_review' ? 'amber' : 'neutral'}`}>{kol.backfill_status === 'queued' ? `已补 ${kol.backfill_completed_depth}/${kol.backfill_requested}` : kol.backfill_status === 'needs_review' ? `需复核 ${kol.backfill_result_count}/${kol.backfill_requested}` : kol.backfill_status}</span>{kol.backfill_warning && <span className="secondary-line" title={kol.backfill_warning}>返回数量不足，点击可重试</span>}</td>
-        <td><span className={`badge ${kol.status === 'active' ? 'green' : 'neutral'}`}>{kol.status === 'active' ? '启用' : '暂停'}</span></td>
-        <td className="actions">{editingId === kol.id ? <><button className="icon-button" title="保存修改" onClick={() => patch.mutate({ id: kol.id, value: editForm })}><Check size={16} /></button><button className="icon-button" title="取消修改" onClick={() => setEditingId(null)}><X size={16} /></button></> : <><button className="icon-button" title="补抓最近200条" disabled={backfill.isPending || kol.backfill_status === 'queued'} onClick={() => backfill.mutate(kol.id)}><History size={16} /></button><button className="icon-button" title="编辑KOL" onClick={() => beginEdit(kol)}><Pencil size={16} /></button><button className="icon-button" title={kol.status === 'active' ? '暂停采集' : '恢复采集'} onClick={() => patch.mutate({ id: kol.id, value: { status: kol.status === 'active' ? 'paused' : 'active' } })}>{kol.status === 'active' ? <Pause size={16} /> : <Play size={16} />}</button></>}</td>
+        <td>{editingId === kol.id ? <><select className="table-input" aria-label="账号可用状态" value={editForm.availability_status} onChange={(event) => setEditForm({ ...editForm, availability_status: event.target.value as Kol['availability_status'] })}>{Object.keys(availabilityLabels).map((value) => <option key={value} value={value}>{availabilityLabels[value as Kol['availability_status']]}</option>)}</select><input className="table-input" aria-label="状态原因" value={editForm.availability_reason} onChange={(event) => setEditForm({ ...editForm, availability_reason: event.target.value })} placeholder="状态原因" /></> : <><span className={`badge ${kol.status === 'active' ? 'green' : 'neutral'}`}>{kol.status === 'active' ? '启用' : '暂停'}</span> <span className={`badge ${availabilityClass[kol.availability_status]}`}>{availabilityLabels[kol.availability_status]}</span>{kol.availability_reason && <span className="secondary-line" title={kol.availability_reason}>{kol.availability_reason.slice(0, 80)}</span>}</>}</td>
+        <td className="actions">{editingId === kol.id ? <><button className="icon-button" title="保存修改" onClick={() => patch.mutate({ id: kol.id, value: editForm })}><Check size={16} /></button><button className="icon-button" title="取消修改" onClick={() => setEditingId(null)}><X size={16} /></button></> : <><button className="icon-button" title="补抓最近200条" disabled={backfill.isPending || kol.backfill_status === 'queued'} onClick={() => backfill.mutate(kol.id)}><History size={16} /></button><button className="icon-button" title="编辑KOL及可用状态" onClick={() => beginEdit(kol)}><Pencil size={16} /></button><button className="icon-button" title={kol.status === 'active' ? '暂停采集' : '恢复采集'} onClick={() => patch.mutate({ id: kol.id, value: { status: kol.status === 'active' ? 'paused' : 'active' } })}>{kol.status === 'active' ? <Pause size={16} /> : <Play size={16} />}</button></>}</td>
       </tr>)}</tbody></table></div>
       {query.isLoading && <div className="loading"><RefreshCw className="spin" size={18} />加载账号</div>}
     </div>}

@@ -37,63 +37,6 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(_read_process_pid(invalid), "")
             self.assertEqual(_read_process_pid(root / "missing.pid"), "")
 
-    def test_board_mainline_endpoints_expose_health_list_detail_and_series(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            app = create_app(ApiSettings(
-                runtime_root=root / "runtime",
-                frontend_dist=root / "dist",
-                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
-            ))
-            market = app.state.market_store
-            timestamp = "2026-07-24T09:00:00+08:00"
-            with market.connect() as db:
-                db.execute(
-                    "INSERT INTO board_catalog VALUES (?,?,?,?,?,?,?,?,?)",
-                    ["industry:BK0001", "BK0001", "fixture board", "industry", "active", "fixture", timestamp, timestamp, timestamp],
-                )
-                db.execute(
-                    "INSERT INTO board_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 100, 105, 99, 104, 1000, 104000,
-                        1.2, 8, 2, "leader", 0.05, "fixture", "history", True, timestamp, "hash",
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 0.2, 0.4, 0.6, 95, 90, 88,
-                        0.8, 1.2, "mainline_candidate", "board-rps-v1", 100, 100, 100,
-                        1.0, "[]", "hash", timestamp,
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rank VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 1, 2, 3,
-                        100, 100, 100, "board-rank-v1", "hash", timestamp,
-                    ],
-                )
-            client = TestClient(app)
-
-            health = client.get("/api/board-mainline/health")
-            listing = client.get("/api/board-mainline?board_type=industry")
-            detail = client.get("/api/board-mainline/BK0001?board_type=industry")
-            series = client.get("/api/board-mainline/BK0001/series?board_type=industry")
-            rank_series = client.get(
-                "/api/board-mainline/BK0001/rank-series?board_type=industry&window=50&range=all"
-            )
-
-            self.assertEqual(200, health.status_code, health.text)
-            self.assertEqual("ready", health.json()["status"])
-            self.assertEqual(1, listing.json()["total"])
-            self.assertEqual("fixture board", detail.json()["board_name"])
-            self.assertEqual([], detail.json()["related_events"])
-            self.assertEqual(104, series.json()[0]["close"])
-            self.assertEqual(1, rank_series.json()["point_count"])
-            self.assertEqual(1, rank_series.json()["points"][0]["rank"])
-            self.assertFalse(rank_series.json()["truncated"])
-
     def test_pipeline_status_is_lightweight_and_scopes_pending_ai(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -769,6 +712,108 @@ class ApiTests(unittest.TestCase):
             self.assertEqual("approved", post_store.get_post(post.post_id)["review_status"])
             self.assertEqual("tracking", market_store.get_instrument(first["symbol"])["lifecycle"])
             self.assertEqual("rejected", rejected.json()["status"])
+
+    def test_bulk_approval_is_scoped_and_queues_one_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            post_store = app.state.post_store
+            market_store = app.state.market_store
+            market_store.upsert_instruments([
+                Instrument("002414", "High", "stock", "SZ", source="fixture"),
+                Instrument("600900", "Power", "stock", "SH", source="fixture"),
+            ])
+            kol = post_store.get_kol_by_handle("public_kol_2")
+            drafts = []
+            for index, symbol in enumerate(("002414", "600900")):
+                post = normalise_twitter_post(
+                    {
+                        "id": str(2078000000000000200 + index),
+                        "text": f"Morning recommendation {symbol} with evidence.",
+                        "url": f"https://x.com/public_kol_2/status/{2078000000000000200 + index}",
+                        "author": {"screenName": "public_kol_2", "name": "fixture"},
+                        "createdAtISO": "2026-07-17T00:30:00+00:00",
+                        "media": [],
+                        "isRetweet": False,
+                    },
+                    kol,
+                )
+                post_store.upsert_post(post)
+                post_store.save_rule_classification(
+                    post.post_id,
+                    RuleResult(90, True, [symbol], "long", ["fixture"], "original_pre_event", "recommendation"),
+                )
+                post_store.save_model_classification(
+                    post.post_id,
+                    {
+                        "content_type": "recommendation",
+                        "evidence_type": "original_pre_event",
+                        "confidence": 0.99,
+                        "summary": "fixture",
+                        "drafts": [{
+                            "symbol": symbol,
+                            "security_name": symbol,
+                            "direction": "long",
+                            "thesis": "Evidence-backed recommendation.",
+                            "evidence_type": "original_pre_event",
+                            "confidence": 0.99,
+                            "evidence_spans": [f"Morning recommendation {symbol} with evidence."],
+                            "evidence_source": "text",
+                            "conditions": [],
+                            "depends_on_ocr": False,
+                            "mention_kind": "recommendation",
+                        }],
+                    },
+                    model_name="fixture",
+                    prompt_version="bulk-fixture",
+                )
+                RecommendationDraftRepository(post_store).sync_post(
+                    post.post_id,
+                    market_store.instrument_map(),
+                    queue_scope="morning",
+                    review_date="2026-07-17",
+                )
+                drafts.extend(RecommendationDraftRepository(post_store).list_drafts(post_id=post.post_id))
+
+            preview = client.post("/api/recommendation-drafts/bulk-preview", json={
+                "review_date": "2026-07-17",
+                "queue_scope": "morning",
+            })
+            self.assertEqual(200, preview.status_code, preview.text)
+            self.assertEqual(2, preview.json()["count"])
+            with patch("kol_api.run_post_approval_refresh") as refresh:
+                result = client.post("/api/recommendation-drafts/bulk-approve", json={
+                    "snapshot_token": preview.json()["snapshot_token"],
+                    "note": "batch review",
+                })
+            self.assertEqual(200, result.status_code, result.text)
+            self.assertEqual(2, len(result.json()["approved"]))
+            self.assertEqual([], result.json()["failed"])
+            self.assertEqual(1, refresh.call_count)
+            self.assertEqual(2, len(app.state.event_store.load_events()))
+
+            repeated = client.post("/api/recommendation-drafts/bulk-approve", json={
+                "snapshot_token": preview.json()["snapshot_token"],
+            })
+            self.assertEqual(409, repeated.status_code)
+
+    def test_discovery_run_rejects_unconfigured_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            response = client.post("/api/discovery/runs", json={"platform": "douyin", "query": "fixture"})
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertIn("blocked", response.json()["detail"])
 
     def test_review_agent_api_defaults_to_shadow_and_records_human_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

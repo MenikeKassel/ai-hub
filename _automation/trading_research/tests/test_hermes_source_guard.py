@@ -1,8 +1,5 @@
 ﻿from __future__ import annotations
 
-import json
-import subprocess
-import sys
 import unittest
 from pathlib import Path
 
@@ -12,31 +9,27 @@ GUARD = ROOT / "scripts" / "hermes_ai_hub_source_guard.py"
 
 
 class HermesSourceGuardTests(unittest.TestCase):
-    def run_guard(self, tool_name: str, tool_input: dict | None = None) -> dict:
-        completed = subprocess.run(
-            [sys.executable, str(GUARD)],
-            input=json.dumps({"tool_name": tool_name, "tool_input": tool_input or {}}),
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=True,
-        )
-        return json.loads(completed.stdout)
+    """The ai-hub source guard was removed on 2026-08-06.
 
-    def test_all_general_purpose_writers_are_blocked(self) -> None:
-        for tool_name in ("write_file", "patch", "terminal", "execute_code"):
-            with self.subTest(tool_name=tool_name):
-                result = self.run_guard(tool_name, {"command": "anything"})
-                self.assertEqual(result["action"], "block")
+    The user granted Hermes direct write access to ai-hub, so the guard script,
+    its agent hook, and its installer references must not come back.
+    """
 
-    def test_generic_subagents_cannot_bypass_codex(self) -> None:
-        result = self.run_guard("delegate_task", {"task": "edit source"})
+    def test_guard_script_is_removed(self) -> None:
+        self.assertFalse(GUARD.exists(), "guard script must stay removed")
 
-        self.assertEqual(result["action"], "block")
-        self.assertIn("codex_delegate", result["message"])
+    def test_guard_installer_references_are_removed(self) -> None:
+        installer = ROOT / "scripts" / "install-hermes-kol-research.ps1"
+        if installer.exists():
+            content = installer.read_text(encoding="utf-8")
+            self.assertNotIn("ai-hub-source-guard", content)
+            self.assertNotIn("source_guard", content)
 
-    def test_non_mutating_native_tool_is_untouched(self) -> None:
-        self.assertEqual(self.run_guard("kol_operator", {"action": "status"}), {})
+    def test_guard_hook_config_is_removed(self) -> None:
+        config = Path.home() / "AppData" / "Local" / "hermes" / "config.yaml"
+        if config.exists():
+            content = config.read_text(encoding="utf-8")
+            self.assertNotIn("ai-hub-source-guard", content)
 
 
 if __name__ == "__main__":

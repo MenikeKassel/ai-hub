@@ -484,10 +484,18 @@ class PublicDatasetExporter:
         import duckdb
         con = duckdb.connect(str(self.market_db), read_only=True)
         try:
+            available = {
+                str(row[0])
+                for row in con.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_name='event_technical_context'"
+                ).fetchall()
+            }
+            release_column = ",foundation_release_id" if "foundation_release_id" in available else ""
             cursor = con.execute(
                 "select event_id,symbol,posted_at,as_of_trade_date,adjustment,rsi14,macd_dif,macd_dea,macd_hist,macd_hist_pct,"
                 "atr14,atr14_pct,volume_ratio_5,return_20d,distance_60d_high,history_bars,status,warnings_json,feature_version,"
-                "source_hash,computed_at from event_technical_context"
+                f"source_hash,computed_at{release_column} from event_technical_context"
             )
             fields = [item[0] for item in cursor.description]
             rows = [dict(zip(fields, row)) for row in cursor.fetchall()]

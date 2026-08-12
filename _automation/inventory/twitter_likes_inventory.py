@@ -19,8 +19,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-DEFAULT_INPUT_GLOB = r"<AI_HUB_HOME>\twitter-*-1781096618442.json"
-DEFAULT_OUT_DIR = r"<AI_HUB_HOME>\ai-hub\_runtime\staging"
+DEFAULT_INPUT_GLOB = str(Path(__file__).resolve().parents[2] / "twitter-*-1781096618442.json")
+DEFAULT_OUT_DIR = str(Path(__file__).resolve().parents[2] / "_runtime" / "staging")
 DEFAULT_OBSIDIAN_REPORT = (
     r"<OBSIDIAN_VAULT>\06_Logs\2026-07-02-twitter-likes-inventory.md"
 )

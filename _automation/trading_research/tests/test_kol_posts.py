@@ -238,6 +238,32 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(x_id, store.get_kol_by_handle("same", "X")["id"])
             self.assertEqual(z_id, store.get_kol_by_handle("same", "Zhihu")["id"])
 
+    def test_account_availability_is_independent_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Fixture KOL", "fixture")
+            before = store.get_kol(kol_id)
+            assert before is not None
+            changed = store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            self.assertEqual("rate_limited", changed["availability_status"])
+            self.assertEqual(before["fetch_status"], changed["fetch_status"])
+            store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            history = store.account_availability_history(kol_id)
+            self.assertEqual(1, len(history))
+            restored = store.set_account_availability(kol_id, "active", source="fixture")
+            self.assertEqual("active", restored["availability_status"])
+            self.assertEqual(2, len(store.account_availability_history(kol_id)))
+
     def test_x_auth_failure_does_not_block_zhihu_provider(self) -> None:
         class BrokenX:
             name = "twitter-cli"
@@ -276,6 +302,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(2, result.failed_kols)
         self.assertEqual(1, result.new_posts)
         self.assertEqual("failed", result.auth_status)
+        self.assertEqual(2, result.platform_breakdown["x"]["target"])
+        self.assertEqual(2, result.platform_breakdown["x"]["failed"])
+        self.assertEqual(1, result.platform_breakdown["zhihu"]["success"])
 
     def test_stale_fetch_run_is_closed_without_touching_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -495,6 +524,32 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("002414", result.symbols[0])
         self.assertEqual("long", result.direction)
         self.assertIn("stock_code", result.reasons)
+
+    def test_rule_classifier_neutral_risk_text_has_no_direction(self) -> None:
+        # "风险" is a neutral word; it must not flip a post to short, and a
+        # bare "关注" without bullish context must not force long.
+        for text in ("注意风险", "关注该股风险", "该股值得关注"):
+            result = RuleClassifier().classify(
+                {"text": text, "post_type": "original", "media": []}
+            )
+            self.assertEqual("", result.direction, f"neutral text misclassified: {text}")
+
+    def test_rule_classifier_tie_between_directional_words_yields_no_direction(self) -> None:
+        # One bullish and one bearish token is a tie -> no direction.
+        result = RuleClassifier().classify(
+            {"text": "有机会但建议卖出", "post_type": "original", "media": []}
+        )
+        self.assertEqual("", result.direction)
+
+    def test_rule_classifier_clear_long_and_short_directions(self) -> None:
+        long_result = RuleClassifier().classify(
+            {"text": "推荐买入，布局机会很大", "post_type": "original", "media": []}
+        )
+        self.assertEqual("long", long_result.direction)
+        short_result = RuleClassifier().classify(
+            {"text": "该股风险很大，建议回避离场", "post_type": "original", "media": []}
+        )
+        self.assertEqual("short", short_result.direction)
 
     def test_retweet_cannot_become_direct_candidate(self) -> None:
         kol = {"id": 1, "handle": "example", "display_name": "示例KOL"}
