@@ -251,6 +251,7 @@ class KolStore:
         self.checkpoints_path = self.root / "checkpoints.csv"
         self.runs_path = self.root / "runs.jsonl"
         self.event_revisions_path = self.root / "event_revisions.jsonl"
+        self.checkpoint_revisions_path = self.root / "checkpoint_revisions.jsonl"
         self.backups_dir = self.root / "backups"
         self.logs_dir = self.root / "logs"
         self.returns_lock_path = self.root / "returns.lock"
@@ -620,7 +621,27 @@ class KolStore:
             added: list[dict[str, str]] = []
             for row in rows:
                 key = (row.get("event_id", ""), row.get("horizon", ""))
-                if key in existing or row.get("verification_status", "") not in {"verified", "verified_suspended"}:
+                if row.get("verification_status", "") not in {"verified", "verified_suspended"}:
+                    continue
+                if key in existing:
+                    previous = existing[key]
+                    comparable_fields = {
+                        field: row.get(field, "")
+                        for field in CHECKPOINT_FIELDS
+                        if field not in {"finalized_at", "foundation_release_id"}
+                    }
+                    previous_comparable = {
+                        field: previous.get(field, "")
+                        for field in comparable_fields
+                    }
+                    if comparable_fields != previous_comparable or row.get("foundation_release_id", "") != previous.get("foundation_release_id", ""):
+                        self._append_checkpoint_revision(
+                            event_id=key[0],
+                            horizon=key[1],
+                            previous=previous,
+                            proposed=row,
+                            reason="foundation_release_refresh",
+                        )
                     continue
                 existing[key] = row
                 added.append(row)
@@ -630,6 +651,48 @@ class KolStore:
                 CHECKPOINT_FIELDS,
             )
         return added
+
+    def _append_checkpoint_revision(
+        self,
+        *,
+        event_id: str,
+        horizon: str,
+        previous: dict[str, str],
+        proposed: dict[str, str],
+        reason: str,
+    ) -> None:
+        self.checkpoint_revisions_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "revision_id": f"{event_id}:{horizon}:{datetime.now(SHANGHAI).strftime('%Y%m%dT%H%M%S%z')}",
+            "event_id": event_id,
+            "horizon": horizon,
+            "reason": reason,
+            "created_at": now_iso(),
+            "previous": previous,
+            "proposed": proposed,
+        }
+        def comparable(value: dict[str, str]) -> dict[str, str]:
+            return {key: item for key, item in value.items() if key != "finalized_at"}
+
+        previous_key = comparable(previous)
+        proposed_key = comparable(proposed)
+        if self.checkpoint_revisions_path.exists():
+            with self.checkpoint_revisions_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        prior = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        prior.get("event_id") == event_id
+                        and prior.get("horizon") == horizon
+                        and prior.get("reason") == reason
+                        and comparable(prior.get("previous") or {}) == previous_key
+                        and comparable(prior.get("proposed") or {}) == proposed_key
+                    ):
+                        return
+        with self.checkpoint_revisions_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     def log_run(self, event: str, payload: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -1419,6 +1482,10 @@ def update_kol_tracking(
         (row.get("event_id", ""), row.get("horizon", ""))
         for row in store.load_checkpoints()
     }
+    existing_checkpoint_rows = {
+        (row.get("event_id", ""), row.get("horizon", "")): row
+        for row in store.load_checkpoints()
+    }
     updated: list[EventRecord] = []
     notifications: list[dict[str, str]] = []
     errors: list[str] = []
@@ -1531,7 +1598,13 @@ def update_kol_tracking(
         event_checkpoints = [
             row
             for row in result.checkpoints
-            if (row["event_id"], row["horizon"]) not in existing_checkpoints
+            if (
+                (row["event_id"], row["horizon"]) not in existing_checkpoints
+                or existing_checkpoint_rows.get((row["event_id"], row["horizon"]), {}).get(
+                    "foundation_release_id", ""
+                )
+                != row.get("foundation_release_id", "")
+            )
         ]
         if event_checkpoints and verifier is not None and not checkpoint_verifier_open:
             try:

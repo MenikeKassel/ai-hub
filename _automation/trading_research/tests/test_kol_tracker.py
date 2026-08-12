@@ -353,6 +353,31 @@ class StoreAndDashboardTests(unittest.TestCase):
 
             self.assertEqual("0.10000000", store.load_checkpoints()[0]["raw_return"])
 
+    def test_checkpoint_release_change_is_logged_without_overwriting_frozen_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            first = {
+                "event_id": "KOL-T001",
+                "horizon": "1W",
+                "trade_date": "2026-07-08",
+                "raw_return": "0.10000000",
+                "verification_status": "verified_suspended",
+                "foundation_release_id": "release-old",
+                "finalized_at": "2026-07-08T20:00:00+08:00",
+            }
+            refreshed = dict(first, foundation_release_id="release-new", finalized_at="2026-07-09T20:00:00+08:00")
+            store.freeze_checkpoints([first])
+            store.freeze_checkpoints([refreshed])
+
+            self.assertEqual("release-old", store.load_checkpoints()[0]["foundation_release_id"])
+            revisions = [
+                line
+                for line in store.checkpoint_revisions_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            self.assertEqual(1, len(revisions))
+            self.assertIn("release-new", revisions[0])
+
     def test_dashboard_is_generated_separately_from_manual_event_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

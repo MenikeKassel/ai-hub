@@ -280,7 +280,7 @@ class EventTechnicalContextTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='event_intraday_context'"
                 ).fetchone()[0]
 
-                self.assertEqual(8, version)
+                self.assertEqual(9, version)
             self.assertIn("snapshot_id", columns)
             self.assertEqual(1, intraday_tables)
             self.assertEqual("KOL-OLD", store.list_event_technical_contexts()[0]["event_id"])
