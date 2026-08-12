@@ -11,6 +11,15 @@ type Platform = {
   health: Record<string, unknown>
 }
 
+const platformStatusLabel: Record<string, string> = {
+  ready: '可用',
+  degraded: '降级',
+  needs_login: '需要登录',
+  blocked: '已阻断',
+  manual_only: '仅手工导入',
+  untested: '未验收',
+}
+
 type Candidate = {
   candidate_id: string
   platform: string
@@ -70,6 +79,9 @@ export default function Discovery() {
     onSuccess: () => { setNotice('候选状态已更新'); refresh() },
     onError: (error) => setNotice(error.message),
   })
+  const selectedPlatform = (platforms.data || []).find((item) => item.platform === platform)
+  const selectedStatus = String(selectedPlatform?.health.status || (selectedPlatform?.available ? 'ready' : 'untested'))
+  const canDiscover = Boolean(selectedPlatform?.available && ['ready', 'degraded'].includes(selectedStatus))
 
   return <>
     <header className="page-header">
@@ -81,11 +93,12 @@ export default function Discovery() {
       <section className="panel">
         <div className="panel-heading"><div><h2>启动发现</h2><span>使用已配置的平台适配器</span></div><Compass size={18} /></div>
         <div className="form-grid">
-          <label>平台<select value={platform} onChange={(event) => setPlatform(event.target.value)}>{(platforms.data || []).map((item) => <option key={item.platform} value={item.platform}>{item.display_name} · {item.health.mode === 'manual_only' ? '人工导入' : item.available ? '可用' : '未配置'}</option>)}</select></label>
+          <label>平台<select value={platform} onChange={(event) => setPlatform(event.target.value)}>{(platforms.data || []).map((item) => { const status = String(item.health.status || (item.available ? 'ready' : 'untested')); return <option key={item.platform} value={item.platform}>{item.display_name} · {platformStatusLabel[status] || status}</option> })}</select></label>
           <label className="wide">关键词或主页<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="账号、主页或关键词" /></label>
         </div>
-        <button className="primary-button" disabled={!query.trim() || run.isPending} onClick={() => run.mutate()}><Search size={16} />开始发现</button>
-        <div className="discovery-platform-list">{(platforms.data || []).map((item) => <div className="discovery-platform" key={item.platform}><strong>{item.display_name}</strong><span className={`badge ${item.available ? 'positive' : 'neutral'}`}>{item.health.mode === 'manual_only' ? 'manual_only' : item.available ? '已配置' : '未配置'}</span><small>{item.provider || '无适配器'}</small></div>)}</div>
+        <button className="primary-button" disabled={!query.trim() || run.isPending || !canDiscover} onClick={() => run.mutate()}><Search size={16} />开始发现</button>
+        {!canDiscover && selectedPlatform && <div className="notice-banner">当前平台不可启动：{String(selectedPlatform.health.reason || platformStatusLabel[selectedStatus] || selectedStatus)}</div>}
+        <div className="discovery-platform-list">{(platforms.data || []).map((item) => { const status = String(item.health.status || (item.available ? 'ready' : 'untested')); return <div className="discovery-platform" key={item.platform}><strong>{item.display_name}</strong><span className={`badge ${item.available ? 'positive' : 'neutral'}`}>{platformStatusLabel[status] || status}</span><small>{String(item.health.reason || item.provider || '无适配器')}</small></div> })}</div>
       </section>
       <section className="panel discovery-queue">
         <div className="panel-heading"><div><h2>候选账号</h2><span>接受后才会创建正式KOL身份</span></div><UserPlus size={18} /></div>

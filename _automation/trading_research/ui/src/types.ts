@@ -20,6 +20,10 @@ export interface Kol {
   backfill_result_count: number
   backfill_warning: string
   fetch_status: string
+  external_account_id: string
+  availability_status: 'active' | 'rate_limited' | 'provider_failed' | 'protected' | 'suspected_unavailable' | 'suspended' | 'deleted' | 'renamed' | 'paused'
+  availability_reason: string
+  availability_checked_at: string
 }
 
 export interface DigestAuthor {
@@ -263,6 +267,29 @@ export interface MorningReview {
   history_page_size: number
   history_has_more: boolean
   approved_drafts: RecommendationDraft[]
+}
+
+export interface BulkApprovalPreview {
+  ok: boolean
+  snapshot_token: string
+  review_date: string
+  queue_scope: 'morning' | 'backlog'
+  status_filter: 'ready'
+  expires_at: string
+  count: number
+  drafts: RecommendationDraft[]
+  skipped: Record<string, number>
+}
+
+export interface BulkApprovalResult {
+  ok: boolean
+  snapshot_consumed: boolean
+  processed: number
+  approved: Array<{ draft_id: number; event_id: string; status: string; symbol: string }>
+  skipped: Array<{ draft_id: number; reason: string; status?: string; attention_reasons?: string[] }>
+  failed: Array<{ draft_id: number; error: string }>
+  queued_symbols: string[]
+  refresh_status: string
 }
 
 export type ReviewAgentDecisionKind = 'auto_approve' | 'auto_exclude' | 'auto_ignore' | 'needs_human' | 'failed'

@@ -807,12 +807,19 @@ def _fallback_mode() -> str:
 
 
 def _post_provider(mode: str):
+    fallback_mode = _fallback_mode()
+    if fallback_mode in {"shadow", "enabled"}:
+        try:
+            if not timeline_health(NITTER_URL).get("ready"):
+                fallback_mode = "disabled"
+        except Exception:
+            fallback_mode = "disabled"
     return build_x_post_provider(
         mode,
         twitter_credentials=KeyringCredentialStore(),
         xtf_command=str(XTF_COMMAND),
         nitter_url=NITTER_URL,
-        fallback_mode=_fallback_mode(),
+        fallback_mode=fallback_mode,
     )
 
 
@@ -1582,6 +1589,7 @@ def kol_morning_pipeline(args: argparse.Namespace) -> None:
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
             batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
@@ -1594,6 +1602,10 @@ def kol_morning_pipeline(args: argparse.Namespace) -> None:
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     repository.interrupt_stale_runs()
@@ -1623,6 +1635,7 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
             batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
@@ -1635,6 +1648,10 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     interrupted = repository.interrupt_stale_runs()
@@ -3899,7 +3916,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
-    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=50)
+    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)
 
     p_morning_migrate = sub.add_parser(

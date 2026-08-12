@@ -1499,8 +1499,9 @@ class KolPostStore:
             cursor = db.execute(
                 """
                 INSERT INTO kols(
-                    display_name,platform,handle,profile_url,domain,status,tracking_mode,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    display_name,platform,handle,profile_url,domain,status,tracking_mode,
+                    external_account_id,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     display_name.strip() or clean_handle,
@@ -1510,6 +1511,7 @@ class KolPostStore:
                     domain.strip(),
                     status,
                     tracking_mode,
+                    clean_handle,
                     timestamp,
                     timestamp,
                 ),
@@ -1552,6 +1554,10 @@ class KolPostStore:
             raise ValueError(f"invalid account availability status: {status}")
         timestamp = now_iso()
         with self.connect() as db:
+            previous = db.execute(
+                "SELECT availability_status,availability_reason FROM kols WHERE id=?",
+                (kol_id,),
+            ).fetchone()
             cursor = db.execute(
                 """
                 UPDATE kols SET availability_status=?,availability_reason=?,
@@ -1561,13 +1567,14 @@ class KolPostStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"KOL not found: {kol_id}")
-            db.execute(
-                """
-                INSERT INTO kol_account_status_history(kol_id,status,reason,source,observed_at)
-                VALUES(?,?,?,?,?)
-                """,
-                (kol_id, status, reason[:2000], source[:100], timestamp),
-            )
+            if previous is None or str(previous["availability_status"] or "active") != status or str(previous["availability_reason"] or "") != reason[:2000]:
+                db.execute(
+                    """
+                    INSERT INTO kol_account_status_history(kol_id,status,reason,source,observed_at)
+                    VALUES(?,?,?,?,?)
+                    """,
+                    (kol_id, status, reason[:2000], source[:100], timestamp),
+                )
         result = self.get_kol(kol_id)
         assert result is not None
         return result
@@ -1704,6 +1711,12 @@ class KolPostStore:
                 """
                 UPDATE kols
                 SET last_post_id=?,last_fetched_at=?,last_success_at=?,fetch_status=?,
+                    availability_status=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN 'active' ELSE availability_status END,
+                    availability_reason=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN '' ELSE availability_reason END,
                     last_gap_at=CASE WHEN ?='gap_detected' THEN ? ELSE last_gap_at END,
                     consecutive_failures=?,backfill_requested=?,backfill_status=?,
                     backfill_completed_depth=?,backfill_result_count=?,backfill_warning=?,
@@ -1714,6 +1727,8 @@ class KolPostStore:
                     stored_post_id,
                     timestamp,
                     last_success_at,
+                    status,
+                    status,
                     status,
                     status,
                     timestamp,
@@ -3872,7 +3887,7 @@ class FallbackXPostProvider:
     name = "auto"
 
     def __init__(self, primary: XPostProvider, fallback: XPostProvider, mode: str = "enabled"):
-        if mode not in {"enabled", "shadow"}:
+        if mode not in {"enabled", "shadow", "disabled"}:
             raise ValueError(f"unsupported fallback mode: {mode}")
         self.primary = primary
         self.fallback = fallback
@@ -3896,6 +3911,11 @@ class FallbackXPostProvider:
         )
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
+        if self.mode == "disabled":
+            return _provider_result(
+                self.primary.fetch_user_posts(handle, max_count),
+                self.primary.name,
+            )
         attempts: list[ProviderAttempt] = []
         warnings: list[str] = []
         primary_error: Exception | None = None
@@ -4043,7 +4063,7 @@ def build_x_post_provider(
         return primary
     if mode == "nitter":
         return fallback
-    return FallbackXPostProvider(primary, fallback, mode=fallback_mode)
+    return FallbackXPostProvider(primary, fallback, mode=fallback_mode if fallback_mode in {"enabled", "shadow", "disabled"} else "shadow")
 
 
 def download_images(
@@ -4994,11 +5014,17 @@ def run_post_fetch(
     rate_limit_cooldown_seconds: int = 1800,
     max_gap_pages: int = 3,
     dry_run: bool = False,
+    fresh_first_page: bool = False,
 ) -> FetchSummary:
     rule_classifier = classifier or RuleClassifier()
     if not dry_run:
         store.interrupt_stale_fetch_runs()
     active_kols = store.list_kols("active")
+    active_kols = [
+        kol for kol in active_kols
+        if str(kol.get("availability_status") or "active")
+        not in {"suspended", "deleted", "protected", "paused"}
+    ]
     if platforms:
         allowed_platforms = {value.casefold() for value in platforms}
         active_kols = [
@@ -5105,7 +5131,14 @@ def run_post_fetch(
             store.mark_fetch_queue_running(batch_key, int(kol["id"]))
         previous_last_id = str(kol.get("last_post_id") or "")
         last_fetched = str(kol.get("last_fetched_at") or "")
-        requested = max_count if platform == "zhihu" or last_fetched else 100
+        # Morning freshness pass intentionally uses a small first page.  Gap
+        # recovery is resumed by the persistent queue after every account had
+        # a chance to contribute its newest post.
+        requested = (
+            max_count
+            if platform == "zhihu" or last_fetched or fresh_first_page
+            else 100
+        )
         backfill_queued = str(kol.get("backfill_status") or "") == "queued"
         archive_only_backfill = (
             platform == "zhihu"
@@ -5272,6 +5305,14 @@ def run_post_fetch(
             if isinstance(exc, TwitterAuthenticationError):
                 authentication_failed = True
                 platform_auth_failures.add(platform)
+            if not dry_run:
+                availability = "rate_limited" if rate_limited_this_account else "provider_failed"
+                store.set_account_availability(
+                    int(kol["id"]),
+                    availability,
+                    reason=str(exc),
+                    source="fetch",
+                )
             if batch_key and not dry_run:
                 error_code = (
                     "rate_limited"

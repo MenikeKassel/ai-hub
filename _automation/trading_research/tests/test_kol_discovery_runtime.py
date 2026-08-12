@@ -61,12 +61,13 @@ class KolDiscoveryRuntimeTests(unittest.TestCase):
             platforms = registry.platforms()
 
         self.assertEqual(9, len(platforms))
-        self.assertTrue(all(item["available"] for item in platforms))
+        self.assertTrue(all(item["available"] is False for item in platforms))
         self.assertTrue(
             all(item["health"]["configured"] is False for item in platforms)
         )
         douyin = next(item for item in platforms if item["platform"] == "douyin")
         self.assertEqual("manual_only", douyin["health"]["mode"])
+        self.assertEqual("blocked", douyin["health"]["status"])
         self.assertFalse(douyin["capabilities"]["transcript"])
 
     def test_local_capture_has_stable_identity_and_platform_content_ids(self) -> None:

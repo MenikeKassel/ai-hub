@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +37,27 @@ DEFAULT_CAPTURE_ROOT = ROOT / "_runtime" / "trading" / "kol-discovery" / "captur
 DEFAULT_FOUNDATION_ROOT = Path(
     os.environ.get("ASHARE_FOUNDATION_ROOT", r"F:\ai-data\ashare")
 )
+
+
+class TruthfulProviderRegistry(ProviderRegistry):
+    """Private runtime registry that never equates an import provider with live access."""
+
+    def platforms(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for platform, display_name in PLATFORMS:
+            provider = self._providers.get(platform)
+            health = getattr(provider, "health", None)
+            provider_health = health() if callable(health) else {}
+            status = str(provider_health.get("status") or "untested")
+            result.append({
+                "platform": platform,
+                "display_name": display_name,
+                "available": bool(provider is not None and status in {"ready", "degraded"}),
+                "provider": provider.name if provider else "",
+                "capabilities": asdict(provider.capabilities()) if provider else {},
+                "health": provider_health,
+            })
+        return result
 
 PLATFORM_CAPABILITIES = {
     "x": PlatformCapabilities(
@@ -130,12 +152,25 @@ class LocalCaptureAccountProvider:
         return PLATFORM_CAPABILITIES[self.platform]
 
     def health(self) -> dict[str, Any]:
+        accounts_capture = self.accounts_path.is_file()
+        content_capture = self.content_path.is_file()
+        if not accounts_capture:
+            status = "blocked"
+            reason = f"missing capture: {self.accounts_path}"
+        elif not content_capture:
+            status = "degraded"
+            reason = f"missing content capture: {self.content_path}"
+        else:
+            status = "manual_only"
+            reason = "JSON capture adapter is not a live platform provider"
         return {
-            "configured": self.accounts_path.is_file(),
-            "accounts_capture": self.accounts_path.is_file(),
-            "content_capture": self.content_path.is_file(),
+            "configured": accounts_capture and content_capture,
+            "accounts_capture": accounts_capture,
+            "content_capture": content_capture,
             "mode": "manual_only" if self.platform not in {"x", "zhihu"} else "local_capture",
             "live_adapter": False,
+            "status": status,
+            "reason": reason,
         }
 
     def _accounts(self) -> list[dict[str, Any]]:
@@ -338,7 +373,7 @@ class OpenCodeGoCandidateScoreProvider:
 def build_provider_registry(
     capture_root: Path = DEFAULT_CAPTURE_ROOT,
 ) -> ProviderRegistry:
-    return ProviderRegistry(
+    return TruthfulProviderRegistry(
         LocalCaptureAccountProvider(platform, capture_root)
         for platform, _name in PLATFORMS
     )

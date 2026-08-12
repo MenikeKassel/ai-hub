@@ -30,6 +30,7 @@ class MorningPipeline:
         ocr_classifier: Any | None = None,
         fetcher: Callable[[], Any] | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        active_kol_count: int | None = None,
     ):
         self.post_store = post_store
         self.market_store = market_store
@@ -38,6 +39,7 @@ class MorningPipeline:
         self.ocr_classifier = ocr_classifier
         self.fetcher = fetcher
         self.now_provider = now_provider or (lambda: datetime.now(SHANGHAI))
+        self.active_kol_count = active_kol_count
         self.drafts = RecommendationDraftRepository(post_store)
 
     def run(
@@ -73,7 +75,11 @@ class MorningPipeline:
             "failed_posts": 0,
             "ocr_completed": 0,
             "ocr_failed": 0,
-            "active_kols": len(self.post_store.list_kols("active")),
+            "active_kols": (
+                self.active_kol_count
+                if self.active_kol_count is not None
+                else len(self.post_store.list_kols("active"))
+            ),
             "successful_kols": 0,
             "failed_kols": 0,
         }

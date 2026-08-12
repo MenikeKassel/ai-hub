@@ -679,12 +679,14 @@ class RecommendationDraftRepository:
         drafts = self.list_drafts(
             review_date=review_date,
             queue_scope=queue_scope,
-            status="ready",
+            status=None,
             limit=max(1, min(limit, 200)),
         )
         approvable: list[dict[str, Any]] = []
         skipped: dict[str, int] = {}
         for draft in drafts:
+            if draft.get("status") not in ACTIVE_DRAFT_STATUSES:
+                continue
             reasons = list(draft.get("attention_reasons") or [])
             if reasons:
                 for reason in reasons:

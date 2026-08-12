@@ -115,6 +115,8 @@ class KolPatch(BaseModel):
     domain: str | None = Field(default=None, max_length=300)
     status: str | None = None
     tracking_mode: str | None = Field(default=None, max_length=30)
+    availability_status: str | None = Field(default=None, max_length=30)
+    availability_reason: str | None = Field(default=None, max_length=2000)
 
 
 class KolBackfillRequest(BaseModel):
@@ -209,6 +211,18 @@ class RecommendationDraftPatch(BaseModel):
 
 
 class RecommendationDraftAction(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+class RecommendationDraftBulkPreviewRequest(BaseModel):
+    review_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    queue_scope: str = Field(default="morning", pattern="^(morning|backlog)$")
+    status: str = Field(default="ready", pattern="^ready$")
+    limit: int = Field(default=200, ge=1, le=200)
+
+
+class RecommendationDraftBulkApproveRequest(BaseModel):
+    snapshot_token: str = Field(min_length=20, max_length=200)
     note: str = Field(default="", max_length=2000)
 
 
@@ -756,6 +770,60 @@ def create_app(
             market_store.enqueue_sync(draft.symbol, reason=f"kol_review:{post_id}")
         return symbols
 
+    def approve_draft_record(draft_id: int, note: str = "") -> tuple[dict[str, Any], Any]:
+        """Apply the same guarded approval path used by the single-item endpoint."""
+        current = recommendation_drafts.get_draft(draft_id)
+        if current["status"] == "approved":
+            return current, None
+        if current["status"] not in {"ready", "needs_attention"}:
+            raise ValueError("recommendation draft is not pending review")
+        hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
+        if hard_blockers:
+            raise ValueError(
+                "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
+            )
+        instrument = market_store.get_instrument(current["symbol"])
+        if instrument is None:
+            raise ValueError("instrument is not available in the market master")
+        event_draft = {
+            "symbol": current["symbol"],
+            "security_name": current["security_name"] or instrument["name"],
+            "direction": current["direction"],
+            "thesis": current["thesis"],
+            "evidence_type": current["evidence_type"],
+            "conditions": current["conditions"],
+        }
+        result = approve_recommendation_draft(
+            post_store,
+            event_store,
+            current["post_id"],
+            event_draft,
+            note=note,
+            audit_detail={"recommendation_draft_id": draft_id},
+        )
+        approved = recommendation_drafts.mark_approved(
+            draft_id,
+            result.event_ids[0],
+            note,
+        )
+        review_agent.mark_overridden_for_post(
+            current["post_id"],
+            "approved",
+            [event_draft],
+        )
+        try:
+            mentioned_at = datetime.fromisoformat(
+                str(current["posted_at"]).replace("Z", "+00:00")
+            ).date()
+        except ValueError:
+            mentioned_at = date.today()
+        market_store.touch_mention(current["symbol"], mentioned_at)
+        market_store.enqueue_sync(
+            current["symbol"],
+            reason=f"recommendation_draft:{draft_id}",
+        )
+        return approved, result
+
     @app.get("/api/summary")
     def summary() -> dict[str, Any]:
         value = post_store.summary()
@@ -807,11 +875,24 @@ def create_app(
 
     @app.post("/api/discovery/runs", status_code=201)
     def start_discovery(body: DiscoveryRunRequest) -> dict[str, Any]:
-        _store, service, _registry, _scorer = require_discovery()
+        _store, service, registry, _scorer = require_discovery()
         try:
+            platform_info = next(
+                item for item in registry.platforms() if item["platform"] == body.platform
+            )
+            health = platform_info.get("health") or {}
+            if not platform_info.get("available"):
+                status = str(health.get("status") or "untested")
+                reason = str(health.get("reason") or health.get("mode") or "provider is not ready")
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{body.platform} discovery is {status}: {reason}",
+                )
             return service.run(body.platform, body.query, limit=body.limit)
         except KeyError as exc:
             raise HTTPException(503, str(exc)) from exc
+        except HTTPException:
+            raise
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -1067,7 +1148,20 @@ def create_app(
     @app.patch("/api/kols/{kol_id}")
     def patch_kol(kol_id: int, body: KolPatch) -> dict[str, Any]:
         try:
-            return post_store.update_kol(kol_id, body.model_dump(exclude_none=True))
+            values = body.model_dump(exclude_none=True)
+            availability = values.pop("availability_status", None)
+            reason = values.pop("availability_reason", "")
+            result = post_store.update_kol(kol_id, values) if values else post_store.get_kol(kol_id)
+            if result is None:
+                raise KeyError(f"KOL not found: {kol_id}")
+            if availability is not None:
+                result = post_store.set_account_availability(
+                    kol_id,
+                    availability,
+                    reason=reason,
+                    source="manual_ui",
+                )
+            return result
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -1195,6 +1289,86 @@ def create_app(
             "approved_drafts": [sanitize_recommendation_draft(item) for item in approved_drafts],
         }
 
+    @app.post("/api/recommendation-drafts/bulk-preview")
+    def bulk_preview_recommendation_drafts(
+        body: RecommendationDraftBulkPreviewRequest,
+    ) -> dict[str, Any]:
+        try:
+            return {
+                **recommendation_drafts.create_bulk_snapshot(
+                    review_date=body.review_date,
+                    queue_scope=body.queue_scope,
+                    status_filter=body.status,
+                    limit=body.limit,
+                ),
+                "ok": True,
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/recommendation-drafts/bulk-approve")
+    def bulk_approve_recommendation_drafts(
+        body: RecommendationDraftBulkApproveRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        try:
+            snapshot = recommendation_drafts.consume_bulk_snapshot(body.snapshot_token)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        approved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        symbols: set[str] = set()
+        event_ids: list[str] = []
+        for raw_id in snapshot["draft_ids"]:
+            draft_id = int(raw_id)
+            try:
+                current = recommendation_drafts.get_draft(draft_id)
+                if current["status"] != "ready" or current.get("attention_reasons"):
+                    skipped.append({
+                        "draft_id": draft_id,
+                        "reason": "changed_since_preview",
+                        "status": current["status"],
+                        "attention_reasons": current.get("attention_reasons", []),
+                    })
+                    continue
+                result, approval = approve_draft_record(draft_id, body.note)
+                symbols.add(str(result["symbol"]))
+                if approval is not None:
+                    event_ids.extend(approval.event_ids)
+                approved.append({
+                    "draft_id": draft_id,
+                    "event_id": result.get("event_id") or (approval.event_ids[0] if approval else ""),
+                    "status": result["status"],
+                    "symbol": result["symbol"],
+                })
+            except KeyError as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)})
+            except Exception as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)[:1000]})
+        if symbols:
+            background_tasks.add_task(
+                run_post_approval_refresh,
+                config.runtime_root,
+                ROOT,
+                sorted(symbols),
+                as_of=date.today(),
+            )
+        if event_ids:
+            background_tasks.add_task(
+                lambda ids=sorted(set(event_ids)): [event_dossier.refresh(event_id) for event_id in ids]
+            )
+        return {
+            "ok": not failed,
+            "snapshot_consumed": True,
+            "processed": len(approved) + len(skipped) + len(failed),
+            "approved": approved,
+            "skipped": skipped,
+            "failed": failed,
+            "queued_symbols": sorted(symbols),
+            "refresh_status": "queued" if symbols else "not_needed",
+        }
+
     @app.get("/api/recommendation-drafts/{draft_id}")
     def get_recommendation_draft(draft_id: int) -> dict[str, Any]:
         try:
@@ -1261,60 +1435,14 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             current = recommendation_drafts.get_draft(draft_id)
-            if current["status"] == "approved":
-                return sanitize_recommendation_draft(current)
-            if current["status"] not in {"ready", "needs_attention"}:
-                raise ValueError("recommendation draft is not pending review")
-            hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
-            if hard_blockers:
-                raise ValueError(
-                    "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
-                )
-            instrument = market_store.get_instrument(current["symbol"])
-            if instrument is None:
-                raise ValueError("instrument is not available in the market master")
-            event_draft = {
-                "symbol": current["symbol"],
-                "security_name": current["security_name"] or instrument["name"],
-                "direction": current["direction"],
-                "thesis": current["thesis"],
-                "evidence_type": current["evidence_type"],
-                "conditions": current["conditions"],
-            }
-            result = approve_recommendation_draft(
-                post_store,
-                event_store,
-                current["post_id"],
-                event_draft,
-                note=body.note,
-                audit_detail={"recommendation_draft_id": draft_id},
-            )
-            approved = recommendation_drafts.mark_approved(
-                draft_id,
-                result.event_ids[0],
-                body.note,
-            )
-            review_agent.mark_overridden_for_post(
-                current["post_id"],
-                "approved",
-                [event_draft],
-            )
-            try:
-                mentioned_at = datetime.fromisoformat(
-                    str(current["posted_at"]).replace("Z", "+00:00")
-                ).date()
-            except ValueError:
-                mentioned_at = date.today()
-            market_store.touch_mention(current["symbol"], mentioned_at)
-            market_store.enqueue_sync(
-                current["symbol"],
-                reason=f"recommendation_draft:{draft_id}",
-            )
+            approved, result = approve_draft_record(draft_id, body.note)
+            if result is None:
+                return sanitize_recommendation_draft(approved)
             background_tasks.add_task(
                 run_post_approval_refresh,
                 config.runtime_root,
                 ROOT,
-                [current["symbol"]],
+                [approved["symbol"]],
                 as_of=date.today(),
             )
             background_tasks.add_task(event_dossier.refresh, result.event_ids[0])
@@ -1494,6 +1622,8 @@ def create_app(
     @app.post("/api/fetch")
     def fetch_posts(body: FetchRequest) -> dict[str, Any]:
         fallback_mode = _fallback_mode(config.runtime_root)
+        if body.provider in {"auto", "nitter"} and not timeline_health(config.nitter_url).get("ready"):
+            fallback_mode = "disabled"
         if body.provider == "nitter" and fallback_mode != "enabled":
             raise HTTPException(409, "Nitter is shadow-only until the rollout gate passes")
         provider = build_x_post_provider(

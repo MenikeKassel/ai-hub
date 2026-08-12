@@ -1,5 +1,5 @@
 import type {
-  Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
+  BulkApprovalPreview, BulkApprovalResult, Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -74,6 +74,16 @@ export const api = {
   retryRecommendationDraft: (id: number) =>
     request<{ ok: boolean; drafts: RecommendationDraft[] }>(`/api/recommendation-drafts/${id}/retry`, { method: 'POST' }),
   recommendationDraftRevisions: (id: number) => request<DraftRevision[]>(`/api/recommendation-drafts/${id}/revisions`),
+  bulkPreviewRecommendationDrafts: (reviewDate: string, queueScope: 'morning' | 'backlog' = 'morning') =>
+    request<BulkApprovalPreview>('/api/recommendation-drafts/bulk-preview', {
+      method: 'POST',
+      body: JSON.stringify({ review_date: reviewDate, queue_scope: queueScope, status: 'ready', limit: 200 }),
+    }),
+  bulkApproveRecommendationDrafts: (snapshotToken: string, note = '') =>
+    request<BulkApprovalResult>('/api/recommendation-drafts/bulk-approve', {
+      method: 'POST',
+      body: JSON.stringify({ snapshot_token: snapshotToken, note }),
+    }),
   createManualRecommendationDraft: (postId: string, value: ManualRecommendationDraft) =>
     request<RecommendationDraft>(`/api/posts/${postId}/recommendation-drafts`, {
       method: 'POST', body: JSON.stringify(value),

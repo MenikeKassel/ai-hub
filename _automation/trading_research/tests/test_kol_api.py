@@ -713,6 +713,108 @@ class ApiTests(unittest.TestCase):
             self.assertEqual("tracking", market_store.get_instrument(first["symbol"])["lifecycle"])
             self.assertEqual("rejected", rejected.json()["status"])
 
+    def test_bulk_approval_is_scoped_and_queues_one_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            post_store = app.state.post_store
+            market_store = app.state.market_store
+            market_store.upsert_instruments([
+                Instrument("002414", "High", "stock", "SZ", source="fixture"),
+                Instrument("600900", "Power", "stock", "SH", source="fixture"),
+            ])
+            kol = post_store.get_kol_by_handle("public_kol_2")
+            drafts = []
+            for index, symbol in enumerate(("002414", "600900")):
+                post = normalise_twitter_post(
+                    {
+                        "id": str(2078000000000000200 + index),
+                        "text": f"Morning recommendation {symbol} with evidence.",
+                        "url": f"https://x.com/public_kol_2/status/{2078000000000000200 + index}",
+                        "author": {"screenName": "public_kol_2", "name": "fixture"},
+                        "createdAtISO": "2026-07-17T00:30:00+00:00",
+                        "media": [],
+                        "isRetweet": False,
+                    },
+                    kol,
+                )
+                post_store.upsert_post(post)
+                post_store.save_rule_classification(
+                    post.post_id,
+                    RuleResult(90, True, [symbol], "long", ["fixture"], "original_pre_event", "recommendation"),
+                )
+                post_store.save_model_classification(
+                    post.post_id,
+                    {
+                        "content_type": "recommendation",
+                        "evidence_type": "original_pre_event",
+                        "confidence": 0.99,
+                        "summary": "fixture",
+                        "drafts": [{
+                            "symbol": symbol,
+                            "security_name": symbol,
+                            "direction": "long",
+                            "thesis": "Evidence-backed recommendation.",
+                            "evidence_type": "original_pre_event",
+                            "confidence": 0.99,
+                            "evidence_spans": [f"Morning recommendation {symbol} with evidence."],
+                            "evidence_source": "text",
+                            "conditions": [],
+                            "depends_on_ocr": False,
+                            "mention_kind": "recommendation",
+                        }],
+                    },
+                    model_name="fixture",
+                    prompt_version="bulk-fixture",
+                )
+                RecommendationDraftRepository(post_store).sync_post(
+                    post.post_id,
+                    market_store.instrument_map(),
+                    queue_scope="morning",
+                    review_date="2026-07-17",
+                )
+                drafts.extend(RecommendationDraftRepository(post_store).list_drafts(post_id=post.post_id))
+
+            preview = client.post("/api/recommendation-drafts/bulk-preview", json={
+                "review_date": "2026-07-17",
+                "queue_scope": "morning",
+            })
+            self.assertEqual(200, preview.status_code, preview.text)
+            self.assertEqual(2, preview.json()["count"])
+            with patch("kol_api.run_post_approval_refresh") as refresh:
+                result = client.post("/api/recommendation-drafts/bulk-approve", json={
+                    "snapshot_token": preview.json()["snapshot_token"],
+                    "note": "batch review",
+                })
+            self.assertEqual(200, result.status_code, result.text)
+            self.assertEqual(2, len(result.json()["approved"]))
+            self.assertEqual([], result.json()["failed"])
+            self.assertEqual(1, refresh.call_count)
+            self.assertEqual(2, len(app.state.event_store.load_events()))
+
+            repeated = client.post("/api/recommendation-drafts/bulk-approve", json={
+                "snapshot_token": preview.json()["snapshot_token"],
+            })
+            self.assertEqual(409, repeated.status_code)
+
+    def test_discovery_run_rejects_unconfigured_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            response = client.post("/api/discovery/runs", json={"platform": "douyin", "query": "fixture"})
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertIn("blocked", response.json()["detail"])
+
     def test_review_agent_api_defaults_to_shadow_and_records_human_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
