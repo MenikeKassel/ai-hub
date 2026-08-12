@@ -21,6 +21,8 @@ def _foundation_symbol(symbol: str) -> str:
         return value
     if not value.isdigit() or len(value) != 6:
         raise ValueError(f"invalid A-share symbol: {symbol}")
+    if value == "000300":
+        return "000300.SH"
     if value.startswith(("4", "8", "9")):
         exchange = "BJ"
     elif value.startswith(("5", "6")):
@@ -119,6 +121,11 @@ class FoundationMarketReader:
         output["foundation_symbol"] = output["symbol"].astype(str)
         output["symbol"] = output["foundation_symbol"].str.split(".").str[0]
         output["trade_date"] = pd.to_datetime(output["trade_date"]).dt.date
+        if "suspended" not in output.columns:
+            output["suspended"] = False
+        output["suspended"] = output["suspended"].fillna(False).astype(bool)
+        output["market_open"] = ~output["suspended"]
+        output["last_trade_date"] = output["trade_date"].where(output["market_open"])
         output["provider"] = "ashare-data-foundation"
         output["foundation_release_id"] = str(release["release_id"])
         return (
@@ -278,7 +285,77 @@ class FoundationBackedMarketStore:
         return [value for value in self._calendar() if start <= value <= end]
 
     def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
-        return self.foundation.read_daily(symbol, adjustment=adjustment)
+        frame = self.foundation.read_daily(symbol, adjustment=adjustment)
+        release_id = str(self.foundation.release().get("release_id", ""))
+        # Early foundation releases omit rows for suspended securities. The
+        # validated local warehouse retains those rows with trade_status=0;
+        # import only that suspension observation so all consumers share the
+        # foundation release while keeping the missing-market-state visible.
+        local = self.local_store.read_daily(symbol, adjustment=adjustment)
+        if not local.empty and not frame.empty:
+            if "date" not in local.columns and "trade_date" in local.columns:
+                local = local.rename(columns={"trade_date": "date"})
+            local["date"] = pd.to_datetime(local["date"])
+            local_status = (
+                pd.to_numeric(local["trade_status"], errors="coerce")
+                if "trade_status" in local.columns
+                else pd.Series(pd.NA, index=local.index)
+            )
+            local_suspended = local.get("suspended", pd.Series(False, index=local.index)).astype(bool)
+            suspension_rows = local[local_status.eq(0) | local_suspended].copy()
+            if not suspension_rows.empty:
+                known_dates = set(pd.to_datetime(frame["trade_date"]))
+                suspension_rows = suspension_rows[~suspension_rows["date"].isin(known_dates)]
+                if not suspension_rows.empty:
+                    suspension_rows["trade_date"] = suspension_rows["date"].dt.date
+                    suspension_rows["suspended"] = True
+                    suspension_rows["market_open"] = False
+                    suspension_rows["last_trade_date"] = pd.NaT
+                    suspension_rows["provider"] = "ashare-data-foundation:suspension-observation"
+                    suspension_rows["foundation_release_id"] = release_id
+                    frame = pd.concat([frame, suspension_rows], ignore_index=True, sort=False)
+                    frame = frame.sort_values("trade_date").drop_duplicates("trade_date", keep="first").reset_index(drop=True)
+        if not frame.empty:
+            return frame
+        # The first foundation releases did not contain benchmark indices. Keep
+        # the gap explicit and allow the existing local benchmark cache to be
+        # used until the next foundation release publishes index facts.
+        legacy = self.local_store.read_daily(symbol, adjustment=adjustment)
+        if legacy.empty:
+            return legacy
+        legacy = legacy.copy()
+        legacy["provider"] = "market-warehouse-legacy"
+        legacy["foundation_release_id"] = "foundation_partial"
+        legacy["market_open"] = True
+        legacy["suspended"] = False
+        legacy["last_trade_date"] = legacy.get("date", legacy.get("trade_date"))
+        return legacy
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        frame = self.read_daily(symbol, adjustment="qfq" if adjusted else "raw")
+        if frame.empty:
+            raise RuntimeError(f"foundation has no {symbol} data")
+        if "trade_date" in frame.columns:
+            if "date" not in frame.columns:
+                frame = frame.rename(columns={"trade_date": "date"})
+            else:
+                frame["date"] = frame["date"].fillna(pd.to_datetime(frame["trade_date"]))
+        frame["date"] = pd.to_datetime(frame["date"])
+        return frame[(frame["date"] >= pd.Timestamp(start)) & (frame["date"] <= pd.Timestamp(end))].reset_index(drop=True)
+
+    def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
+        return self.fetch_stock("000300", start, end, adjusted=False)
+
+    @property
+    def name(self) -> str:
+        return "ashare-data-foundation"
 
     def get_coverage(self, symbol: str | None = None) -> list[dict[str, Any]]:
         release = self.foundation.release()

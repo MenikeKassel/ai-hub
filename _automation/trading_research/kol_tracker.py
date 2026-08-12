@@ -83,6 +83,11 @@ MARK_FIELDS = [
     "data_status",
     "run_id",
     "updated_at",
+    "market_open",
+    "suspended",
+    "valuation_close",
+    "last_trade_date",
+    "foundation_release_id",
 ]
 
 CHECKPOINT_FIELDS = [
@@ -103,6 +108,12 @@ CHECKPOINT_FIELDS = [
     "secondary_close",
     "verification_status",
     "finalized_at",
+    "market_open",
+    "suspended_at_checkpoint",
+    "executable",
+    "valuation_close",
+    "last_trade_date",
+    "foundation_release_id",
 ]
 
 
@@ -255,8 +266,16 @@ class KolStore:
             return list(csv.DictReader(handle).fieldnames or [])
 
     def _migrate_derived_return_fields(self) -> None:
-        marks_need_migration = bool(self._csv_fields(self.marks_path)) and "max_favorable_return" not in self._csv_fields(self.marks_path)
-        checkpoints_need_migration = bool(self._csv_fields(self.checkpoints_path)) and "max_favorable_return" not in self._csv_fields(self.checkpoints_path)
+        mark_fields = self._csv_fields(self.marks_path)
+        checkpoint_fields = self._csv_fields(self.checkpoints_path)
+        marks_need_migration = bool(mark_fields) and (
+            "max_favorable_return" not in mark_fields
+            or any(field not in mark_fields for field in MARK_FIELDS)
+        )
+        checkpoints_need_migration = bool(checkpoint_fields) and (
+            "max_favorable_return" not in checkpoint_fields
+            or any(field not in checkpoint_fields for field in CHECKPOINT_FIELDS)
+        )
         if not marks_need_migration and not checkpoints_need_migration:
             return
         with FileLock(str(self.returns_lock_path), timeout=60):
@@ -601,7 +620,7 @@ class KolStore:
             added: list[dict[str, str]] = []
             for row in rows:
                 key = (row.get("event_id", ""), row.get("horizon", ""))
-                if key in existing or row.get("verification_status", "") != "verified":
+                if key in existing or row.get("verification_status", "") not in {"verified", "verified_suspended"}:
                     continue
                 existing[key] = row
                 added.append(row)
@@ -678,9 +697,25 @@ def _normalise_prices(frame: pd.DataFrame) -> pd.DataFrame:
     for field in ["open", "high", "low", "close", "volume"]:
         if field in data.columns:
             data[field] = pd.to_numeric(data[field], errors="coerce")
+    if "trade_status" in data.columns:
+        data["trade_status"] = pd.to_numeric(data["trade_status"], errors="coerce")
+    if "suspended" not in data.columns:
+        data["suspended"] = False
+    data["suspended"] = data["suspended"].fillna(False).astype(bool)
+    if "trade_status" in data.columns:
+        data["suspended"] = data["suspended"] | data["trade_status"].eq(0)
+    data["market_open"] = ~data["suspended"]
     data = data.dropna(subset=["date", "open", "close"])
     data = data[(data["open"] > 0) & (data["close"] > 0)]
     return data.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+
+
+def _row_is_open(row: pd.Series) -> bool:
+    if "market_open" in row.index:
+        return bool(row["market_open"])
+    if "suspended" in row.index:
+        return not bool(row["suspended"])
+    return True
 
 
 def _format_number(value: float | int | str) -> str:
@@ -702,10 +737,16 @@ def _select_baseline(event: EventRecord, raw: pd.DataFrame) -> tuple[int, str, s
     post_date = pd.Timestamp(local.date())
     date_matches = raw.index[raw["date"] == post_date].tolist()
 
+    if date_matches and not _row_is_open(raw.iloc[date_matches[0]]):
+        future = [index for index in raw.index if raw.loc[index, "date"] > post_date and _row_is_open(raw.loc[index])]
+        if not future:
+            raise ValueError("no tradable price after posted_at")
+        return future[0], "open", "next_open", "delayed_baseline;suspended_baseline"
+
     if date_matches and local.time() <= time(15, 0):
         return date_matches[0], "close", "same_day_close", ""
 
-    future = raw.index[raw["date"] > post_date].tolist()
+    future = [index for index in raw.index if raw.loc[index, "date"] > post_date and _row_is_open(raw.loc[index])]
     if not future:
         raise ValueError("no tradable price after posted_at")
     delayed = "" if date_matches else "delayed_baseline"
@@ -776,12 +817,20 @@ def calculate_event_history(
     max_favorable = 0.0
     corporate_action_seen = False
     tracking = raw.iloc[baseline_index:].reset_index(drop=True)
+    last_valid_close = baseline_price
+    last_trade_date = baseline_date
     for elapsed, (_, row) in enumerate(tracking.iterrows()):
         trade_date = row["date"]
         benchmark_row = _row_for_date(benchmark, trade_date)
         adjusted_row = _row_for_date(adjusted, trade_date)
+        market_open = _row_is_open(row)
+        suspended = not market_open
         close_raw = float(row["close"])
-        raw_return = close_raw / baseline_price - 1.0
+        if market_open:
+            last_valid_close = close_raw
+            last_trade_date = trade_date
+        valuation_close = last_valid_close
+        raw_return = valuation_close / baseline_price - 1.0
         directional_return = sign * raw_return
         max_adverse = min(max_adverse, directional_return)
         max_favorable = max(max_favorable, directional_return)
@@ -802,12 +851,17 @@ def calculate_event_history(
             if abs(float(adjusted_return) - raw_return) > 0.005:
                 corporate_action_seen = True
 
-        status = "corporate_action_warning" if corporate_action_seen else "ok"
+        status_parts = []
+        if suspended:
+            status_parts.append("suspended")
+        if corporate_action_seen:
+            status_parts.append("corporate_action_warning")
+        status = ";".join(status_parts) or "ok"
         marks.append(
             {
                 "event_id": event.event_id,
                 "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "close_raw": _format_number(close_raw),
+                "close_raw": _format_number(valuation_close),
                 "close_adjusted": _format_number(adjusted_close),
                 "raw_return": _format_number(raw_return),
                 "adjusted_return": _format_number(adjusted_return),
@@ -822,6 +876,11 @@ def calculate_event_history(
                 "data_status": status,
                 "run_id": run_id,
                 "updated_at": now_iso(),
+                "market_open": "1" if market_open else "0",
+                "suspended": "1" if suspended else "0",
+                "valuation_close": _format_number(valuation_close),
+                "last_trade_date": last_trade_date.strftime("%Y-%m-%d"),
+                "foundation_release_id": str(row.get("foundation_release_id", "")),
             }
         )
 
@@ -853,6 +912,12 @@ def calculate_event_history(
                 "secondary_close": "",
                 "verification_status": "verified",
                 "finalized_at": now_iso(),
+                "market_open": mark.get("market_open", "1"),
+                "suspended_at_checkpoint": mark.get("suspended", "0"),
+                "executable": "0" if mark.get("suspended") == "1" else "1",
+                "valuation_close": mark.get("valuation_close", mark.get("close_raw", "")),
+                "last_trade_date": mark.get("last_trade_date", mark.get("trade_date", "")),
+                "foundation_release_id": mark.get("foundation_release_id", ""),
             }
         )
 
@@ -1270,6 +1335,14 @@ def _secondary_checkpoint(
     secondary_benchmark_baseline_row = _row_for_date(benchmark, baseline_date)
     verified = dict(checkpoint)
     verified["secondary_source"] = secondary_name
+    checkpoint_is_suspended = checkpoint.get("suspended_at_checkpoint") == "1"
+    verification_mode = "verified"
+    if secondary_row is None and checkpoint_is_suspended:
+        prior = raw[raw["date"] < trade_date]
+        if not prior.empty:
+            secondary_row = prior.iloc[-1]
+            verification_mode = "verified_suspended"
+
     if any(
         row is None
         for row in [
@@ -1326,7 +1399,7 @@ def _secondary_checkpoint(
             ),
             checkpoint["event_id"],
         )
-    verified["verification_status"] = "verified"
+    verified["verification_status"] = verification_mode
     return verified, None
 
 
@@ -1338,6 +1411,7 @@ def update_kol_tracking(
     as_of: date,
     dashboard_path: Path,
     dry_run: bool = False,
+    event_ids: set[str] | None = None,
 ) -> UpdateResult:
     run_id = datetime.now(SHANGHAI).strftime("%Y%m%dT%H%M%S%z")
     events = store.load_events()
@@ -1355,9 +1429,14 @@ def update_kol_tracking(
     checkpoint_verifier_open = False
 
     tracked_event_count = sum(
-        event.status in {"active", "completed"} for event in events
+        event.status in {"active", "completed"}
+        and (event_ids is None or event.event_id in event_ids)
+        for event in events
     )
     for event in events:
+        if event_ids is not None and event.event_id not in event_ids:
+            updated.append(event)
+            continue
         if event.status not in {"active", "completed"}:
             updated.append(event)
             continue
@@ -1487,7 +1566,9 @@ def update_kol_tracking(
         updated.append(result.event)
 
     verified_candidates = [
-        row for row in checkpoints_to_freeze if row.get("verification_status") == "verified"
+        row
+        for row in checkpoints_to_freeze
+        if row.get("verification_status") in {"verified", "verified_suspended"}
     ]
     if dry_run:
         new_checkpoints = verified_candidates
@@ -1497,6 +1578,11 @@ def update_kol_tracking(
         new_checkpoints = store.freeze_checkpoints(verified_candidates)
 
     for checkpoint in new_checkpoints:
+        suspension_note = (
+            " suspension valuation; excluded from executable-event statistics."
+            if checkpoint.get("verification_status") == "verified_suspended"
+            else ""
+        )
         notifications.append(
             _notification(
                 "checkpoint",
@@ -1504,7 +1590,7 @@ def update_kol_tracking(
                 (
                     f"{checkpoint['event_id']} 到达 {checkpoint['horizon']} 节点："
                     f"方向收益 {_percent(checkpoint['directional_return'])}，"
-                    f"超额 {_percent(checkpoint['directional_excess_return'])}。"
+                    f"超额 {_percent(checkpoint['directional_excess_return'])}。{suspension_note}"
                 ),
                 checkpoint["event_id"],
             )

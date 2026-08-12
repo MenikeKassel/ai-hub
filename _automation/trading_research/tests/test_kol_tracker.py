@@ -163,6 +163,33 @@ class WarehousePriceProviderTests(unittest.TestCase):
 
 
 class BaselineAndReturnTests(unittest.TestCase):
+    def test_suspension_counts_market_time_but_uses_last_trade_valuation(self) -> None:
+        dates = [
+            "2026-07-22",
+            "2026-07-23",
+            "2026-07-24",
+            "2026-07-27",
+            "2026-07-28",
+            "2026-07-29",
+            "2026-07-30",
+        ]
+        raw = price_frame(dates, [7.2, 7.23, 7.23, 7.23, 7.23, 7.23, 6.9], [7.23, 7.23, 7.23, 7.23, 7.23, 7.23, 7.1])
+        raw["trade_status"] = [1, 0, 0, 0, 0, 0, 1]
+        benchmark = price_frame(dates, [100] * len(dates), [100, 101, 102, 103, 104, 105, 106])
+        event = active_event(posted_at="2026-07-22T09:00:11+08:00")
+
+        result = calculate_event_history(event, raw, raw, benchmark)
+        suspended = result.marks[1]
+        checkpoint = next(item for item in result.checkpoints if item["horizon"] == "1W")
+
+        self.assertEqual("0", suspended["market_open"])
+        self.assertEqual("1", suspended["suspended"])
+        self.assertEqual("2026-07-22", suspended["last_trade_date"])
+        self.assertEqual("7.23000000", suspended["valuation_close"])
+        self.assertEqual("1", checkpoint["suspended_at_checkpoint"])
+        self.assertEqual("0", checkpoint["executable"])
+        self.assertEqual("2026-07-29", checkpoint["trade_date"])
+
     def test_after_close_uses_next_trading_day_open(self) -> None:
         event = active_event(
             posted_at="2026-07-08T19:35:49+08:00",
