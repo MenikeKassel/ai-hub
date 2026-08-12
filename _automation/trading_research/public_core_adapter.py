@@ -11,24 +11,11 @@ DEFAULT_DATA_DIR = ROOT / "_runtime" / "trading" / "public-core"
 
 
 def main() -> int:
-    if sys.argv[1:2] == ["serve-private"]:
-        try:
-            import uvicorn
-            from kol_discovery_runtime import create_private_app
-        except ImportError as exc:
-            raise SystemExit(
-                "private KOL runtime dependencies are not installed; install "
-                "requirements-public-core.txt and requirements.txt first"
-            ) from exc
-        host = os.environ.get("KAW_HOST", "127.0.0.1")
-        if host not in {"127.0.0.1", "localhost", "::1"}:
-            raise SystemExit("private KOL runtime must bind to loopback")
-        uvicorn.run(
-            create_private_app(),
-            host=host,
-            port=int(os.environ.get("KAW_PORT", "8125")),
+    if sys.argv[1:2] and sys.argv[1].startswith("serve"):
+        raise SystemExit(
+            "The private KOL console is served only by ai-hub on "
+            "http://127.0.0.1:8123; use scripts/start-kol-ui.ps1."
         )
-        return 0
     try:
         from kol_audit.cli import run
     except ImportError as exc:

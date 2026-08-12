@@ -4,6 +4,16 @@ import { BarChart3, Check, ExternalLink, History, Pencil, Pause, Play, Plus, Ref
 import { api, formatDate, percent } from '../api'
 import type { Kol } from '../types'
 
+const availabilityLabels: Record<Kol['availability_status'], string> = {
+  active: '可采集', rate_limited: '平台限流', provider_failed: '采集器故障',
+  protected: '受保护', suspected_unavailable: '待复核', suspended: '已封禁',
+  deleted: '已删除', renamed: '已改名', paused: '已暂停',
+}
+const availabilityClass: Record<Kol['availability_status'], string> = {
+  active: 'green', rate_limited: 'amber', provider_failed: 'red', protected: 'amber',
+  suspected_unavailable: 'amber', suspended: 'red', deleted: 'red', renamed: 'blue', paused: 'neutral',
+}
+
 export default function Kols() {
   const client = useQueryClient()
   const query = useQuery({ queryKey: ['kols'], queryFn: api.kols })
@@ -59,7 +69,7 @@ export default function Kols() {
         <td>{formatDate(kol.last_success_at || kol.last_fetched_at)}</td><td className="mono">{kol.last_post_id || '-'}</td>
         <td><span className={`badge ${kol.fetch_status === 'success' ? 'green' : kol.fetch_status === 'failed' || kol.fetch_status === 'gap_detected' ? 'red' : 'neutral'}`}>{kol.fetch_status}</span>{kol.last_gap_at && <span className="secondary-line">最近缺口 {formatDate(kol.last_gap_at)}</span>}{kol.consecutive_failures > 0 && <span className="secondary-line">连续失败 {kol.consecutive_failures} 次</span>}</td>
         <td><span className={`badge ${kol.backfill_status === 'queued' || kol.backfill_status === 'needs_review' ? 'amber' : 'neutral'}`}>{kol.backfill_status === 'queued' ? `已补 ${kol.backfill_completed_depth}/${kol.backfill_requested}` : kol.backfill_status === 'needs_review' ? `需复核 ${kol.backfill_result_count}/${kol.backfill_requested}` : kol.backfill_status}</span>{kol.backfill_warning && <span className="secondary-line" title={kol.backfill_warning}>返回数量不足，点击可重试</span>}</td>
-        <td><span className={`badge ${kol.status === 'active' ? 'green' : 'neutral'}`}>{kol.status === 'active' ? '启用' : '暂停'}</span></td>
+        <td><span className={`badge ${kol.status === 'active' ? 'green' : 'neutral'}`}>{kol.status === 'active' ? '启用' : '暂停'}</span> <span className={`badge ${availabilityClass[kol.availability_status]}`}>{availabilityLabels[kol.availability_status]}</span>{kol.availability_reason && <span className="secondary-line" title={kol.availability_reason}>{kol.availability_reason.slice(0, 80)}</span>}</td>
         <td className="actions">{editingId === kol.id ? <><button className="icon-button" title="保存修改" onClick={() => patch.mutate({ id: kol.id, value: editForm })}><Check size={16} /></button><button className="icon-button" title="取消修改" onClick={() => setEditingId(null)}><X size={16} /></button></> : <><button className="icon-button" title="补抓最近200条" disabled={backfill.isPending || kol.backfill_status === 'queued'} onClick={() => backfill.mutate(kol.id)}><History size={16} /></button><button className="icon-button" title="编辑KOL" onClick={() => beginEdit(kol)}><Pencil size={16} /></button><button className="icon-button" title={kol.status === 'active' ? '暂停采集' : '恢复采集'} onClick={() => patch.mutate({ id: kol.id, value: { status: kol.status === 'active' ? 'paused' : 'active' } })}>{kol.status === 'active' ? <Pause size={16} /> : <Play size={16} />}</button></>}</td>
       </tr>)}</tbody></table></div>
       {query.isLoading && <div className="loading"><RefreshCw className="spin" size={18} />加载账号</div>}

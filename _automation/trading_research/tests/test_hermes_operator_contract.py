@@ -98,6 +98,9 @@ class HermesOperatorContractTests(unittest.TestCase):
             self.assertIn(variable, starter)
         self.assertIn("System.Threading.Mutex", starter)
         self.assertIn("server.process.json", starter)
+        self.assertIn("listener_pid", starter)
+        self.assertIn("supervisor_pid", starter)
+        self.assertIn("Test-ExpectedListener", starter)
         self.assertIn("Get-NetTCPConnection", starter)
         for action in ("already_running", "port_conflict", "startup_failed", "unhealthy"):
             self.assertIn(action, operator)
@@ -141,6 +144,11 @@ class HermesOperatorContractTests(unittest.TestCase):
         self.assertNotIn("ai-hub-source-guard.py", installer)
         self.assertNotIn("shell-hooks-allowlist.json", installer)
         self.assertNotIn("hermes_ai_hub_source_guard.py", installer)
+
+    def test_private_adapter_does_not_offer_a_second_console(self) -> None:
+        adapter = (ROOT / "_automation" / "trading_research" / "public_core_adapter.py").read_text(encoding="utf-8")
+        self.assertNotIn('"serve-private"', adapter)
+        self.assertNotIn('8125', adapter)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ sys.path.insert(0, str(PUBLIC_SRC))
 
 from kol_audit.discovery.models import ResolvedAccount  # noqa: E402
 from kol_discovery_runtime import (  # noqa: E402
+    DirectProfileProvider,
     LocalCaptureAccountProvider,
     OpenCodeGoCandidateScoreProvider,
     build_provider_registry,
@@ -113,6 +114,33 @@ class KolDiscoveryRuntimeTests(unittest.TestCase):
         self.assertEqual("uid-42", discovered.accounts[0].external_account_id)
         self.assertEqual("bilibili:BV1TEST", content.items[0]["post_id"])
         self.assertIsInstance(account, ResolvedAccount)
+
+    def test_direct_profile_provider_is_explicit_and_single_shot(self) -> None:
+        class FakeCollector:
+            name = "fixture-collector"
+
+            class Credentials:
+                @staticmethod
+                def configured():
+                    return True
+
+            credentials = Credentials()
+
+            def fetch_user_posts(self, handle, max_count):
+                from kol_posts import ProviderAttempt, ProviderFetchResult
+                return ProviderFetchResult(
+                    self.name,
+                    [{"id": "post-1", "text": "fixture", "author": {"screenName": handle, "name": "Fixture"}}],
+                    [ProviderAttempt(self.name, "success", 1)],
+                    [],
+                )
+
+        provider = DirectProfileProvider("x", FakeCollector(), "https://x.com")
+        result = provider.discover("https://x.com/fixture", None, 10)
+        self.assertEqual("fixture", result.accounts[0].handle)
+        self.assertEqual("https://x.com/fixture", result.accounts[0].profile_url)
+        with self.assertRaises(ValueError):
+            provider.discover("search words", None, 10)
 
     def test_opencode_go_scoring_uses_fixed_model_and_has_no_admission_field(
         self,

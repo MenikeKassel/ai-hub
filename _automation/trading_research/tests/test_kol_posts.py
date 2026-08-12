@@ -238,6 +238,32 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(x_id, store.get_kol_by_handle("same", "X")["id"])
             self.assertEqual(z_id, store.get_kol_by_handle("same", "Zhihu")["id"])
 
+    def test_account_availability_is_independent_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Fixture KOL", "fixture")
+            before = store.get_kol(kol_id)
+            assert before is not None
+            changed = store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            self.assertEqual("rate_limited", changed["availability_status"])
+            self.assertEqual(before["fetch_status"], changed["fetch_status"])
+            store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            history = store.account_availability_history(kol_id)
+            self.assertEqual(1, len(history))
+            restored = store.set_account_availability(kol_id, "active", source="fixture")
+            self.assertEqual("active", restored["availability_status"])
+            self.assertEqual(2, len(store.account_availability_history(kol_id)))
+
     def test_x_auth_failure_does_not_block_zhihu_provider(self) -> None:
         class BrokenX:
             name = "twitter-cli"

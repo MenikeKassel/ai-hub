@@ -114,6 +114,29 @@ function Get-ListenerProcess {
     }
 }
 
+function Get-ProcessRecord {
+    param([int]$ProcessId)
+    try { return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" } catch { return $null }
+}
+
+function Test-ManagedListener {
+    param(
+        [int[]]$Listeners,
+        [string]$Python
+    )
+    foreach ($listenerId in $Listeners) {
+        $listener = Get-ProcessRecord $listenerId
+        if (-not $listener -or $listener.CommandLine -notmatch "kol_api:app" -or
+            $listener.CommandLine -notmatch "--port\s+$Port") { continue }
+        if ($Python -and $listener.CommandLine -match [regex]::Escape($Python)) { return $true }
+        if ($listener.ParentProcessId) {
+            $parent = Get-ProcessRecord $listener.ParentProcessId
+            if ($parent -and $Python -and $parent.CommandLine -match [regex]::Escape($Python)) { return $true }
+        }
+    }
+    return $false
+}
+
 function Get-ServerProcessInfo {
     $serverPid = 0
     if (Test-Path -LiteralPath $uiPidPath) {
@@ -134,6 +157,8 @@ function Get-ServerProcessInfo {
         python = if ($metadata) { [string]$metadata.python } else { "" }
         python_version = if ($metadata) { [string]$metadata.python_version } else { "" }
         started_at = if ($metadata) { [string]$metadata.started_at } else { "" }
+        supervisor_pid = if ($metadata -and $metadata.supervisor_pid) { [int]$metadata.supervisor_pid } else { 0 }
+        listener_pid = if ($metadata -and $metadata.listener_pid) { [int]$metadata.listener_pid } elseif ($metadata -and $metadata.pid) { [int]$metadata.pid } else { $serverPid }
     }
 }
 
@@ -141,11 +166,12 @@ function Get-ServerProbe {
     $status = Get-PipelineStatus
     $listeners = @(Get-ListenerProcess)
     $process = Get-ServerProcessInfo
-    if ($status) {
+    $managed = Test-ManagedListener -Listeners $listeners -Python ([string]$process.python)
+    if ($status -and $managed) {
         return @{ state = "ready"; listeners = $listeners; process = $process; status = $status }
     }
-    if ($listeners.Count -gt 0) {
-        return @{ state = "unhealthy"; listeners = $listeners; process = $process; status = $null }
+    if ($listeners.Count -gt 0 -or $status) {
+        return @{ state = "unhealthy"; listeners = $listeners; process = $process; status = $status; managed = $managed }
     }
     return @{ state = "stopped"; listeners = @(); process = $process; status = $null }
 }
@@ -229,15 +255,16 @@ function Test-CodexBlocked {
 
 function Select-PipelineStatus {
     param($PipelineStatus)
-    if (-not $PipelineStatus) {
+    $probe = Get-ServerProbe
+    if (-not $PipelineStatus -or $probe.state -ne "ready") {
         $listeners = @(Get-ListenerProcess)
         $process = Get-ServerProcessInfo
         return @{
             ok = $false
             running = $false
             url = $url
-            state = if ($listeners.Count -gt 0) { "unhealthy" } else { "stopped" }
-            error = if ($listeners.Count -gt 0) {
+            state = if ($listeners.Count -gt 0 -or $PipelineStatus) { "unhealthy" } else { "stopped" }
+            error = if ($listeners.Count -gt 0 -or $PipelineStatus) {
                 "KOL research console has a listener but its health endpoint is not ready"
             } else { "KOL research console is not reachable" }
             listener_processes = $listeners

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 from foundation_market_client import FoundationBackedMarketStore
@@ -58,6 +61,136 @@ class TruthfulProviderRegistry(ProviderRegistry):
                 "health": provider_health,
             })
         return result
+
+
+def _direct_profile_handle(platform: str, reference: str) -> str:
+    value = str(reference or "").strip()
+    if not value:
+        raise ValueError(f"{platform} discovery requires a profile URL or handle")
+    if value.startswith("@"):
+        value = value[1:]
+    if "://" in value:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").casefold()
+        path = [part for part in parsed.path.split("/") if part]
+        if platform == "x" and host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            if not path or path[0] in {"i", "search", "explore", "home"}:
+                raise ValueError("X discovery requires an account profile URL, not a search or post URL")
+            value = path[0]
+        elif platform == "zhihu" and host in {"zhihu.com", "www.zhihu.com"}:
+            if len(path) < 2 or path[0] != "people":
+                raise ValueError("Zhihu discovery requires a /people/<url_token> profile URL")
+            value = path[1]
+        else:
+            raise ValueError(f"unsupported {platform} profile URL")
+    if any(char.isspace() for char in value) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", value):
+        raise ValueError(f"invalid {platform} profile handle")
+    return value
+
+
+class DirectProfileProvider:
+    """Use the existing authenticated collector for one explicit profile.
+
+    This deliberately supports profile resolution only. It is not a platform
+    search API and therefore cannot turn arbitrary keywords into candidates.
+    """
+
+    def __init__(self, platform: str, collector: Any, profile_base: str):
+        self.platform = platform
+        self.collector = collector
+        self.profile_base = profile_base.rstrip("/")
+        self.name = f"{collector.name}-direct-profile"
+
+    def capabilities(self) -> PlatformCapabilities:
+        return PLATFORM_CAPABILITIES[self.platform]
+
+    def health(self) -> dict[str, Any]:
+        if self.platform == "x":
+            configured = bool(getattr(self.collector.credentials, "configured", lambda: False)())
+            return {
+                "configured": configured,
+                "mode": "direct_profile",
+                "live_adapter": True,
+                "status": "ready" if configured else "needs_login",
+                "reason": "explicit profile lookup via twitter-cli" if configured else "X credentials are not configured",
+            }
+        script = Path(getattr(self.collector, "script_path", ""))
+        user_data = Path(getattr(self.collector, "user_data_dir", ""))
+        configured = script.is_file() and user_data.is_dir()
+        return {
+            "configured": configured,
+            "mode": "direct_profile",
+            "live_adapter": True,
+            "status": "degraded" if configured else "needs_login",
+            "reason": (
+                "explicit profile lookup; one shared CDP preflight runs on discovery"
+                if configured else "Zhihu capture script or browser profile is missing"
+            ),
+        }
+
+    def resolve(self, reference: str) -> ResolvedAccount:
+        handle = _direct_profile_handle(self.platform, reference)
+        return ResolvedAccount(
+            platform=self.platform,
+            external_account_id=handle,
+            handle=handle,
+            display_name=handle,
+            profile_url=f"{self.profile_base}/{handle}",
+        )
+
+    @staticmethod
+    def _author(post: dict[str, Any], fallback: str) -> tuple[str, str]:
+        author = post.get("author") if isinstance(post.get("author"), dict) else {}
+        handle = str(author.get("screenName") or author.get("urlToken") or author.get("handle") or fallback).strip().lstrip("@")
+        name = str(author.get("name") or author.get("display_name") or handle).strip()
+        return handle, name
+
+    def discover(self, query: str, cursor: str | None, limit: int) -> DiscoveryResult:
+        if cursor:
+            return DiscoveryResult([], warnings=["direct profile discovery is single-shot"])
+        account = self.resolve(query)
+        if hasattr(self.collector, "prepare_session"):
+            self.collector.prepare_session(account.handle)
+        fetched = self.collector.fetch_user_posts(account.handle, 1)
+        posts = fetched.posts
+        handle, display_name = self._author(posts[0], account.handle) if posts else (account.handle, account.display_name)
+        external_id = account.external_account_id
+        if posts and isinstance(posts[0].get("author"), dict):
+            author = posts[0]["author"]
+            external_id = str(author.get("id") or author.get("id_str") or external_id)
+        warnings = list(fetched.warnings)
+        if not posts:
+            warnings.append("profile probe returned no posts; identity remains provisional")
+        profile_url = f"{self.profile_base}/{handle}"
+        evidence = [{
+            "evidence_type": "direct_profile_probe",
+            "url": profile_url,
+            "excerpt": str(posts[0].get("text") or "")[:300] if posts else "",
+        }]
+        return DiscoveryResult([
+            DiscoveredAccount(
+                platform=self.platform,
+                external_account_id=external_id,
+                handle=handle,
+                display_name=display_name,
+                profile_url=profile_url,
+                bio=str((posts[0].get("author") or {}).get("description") or "") if posts else "",
+                evidence=evidence,
+                raw={"probe_provider": fetched.provider, "probe_post_count": len(posts)},
+            )
+        ], warnings=warnings)
+
+    def fetch(self, account: ResolvedAccount, cursor: str | None, limit: int) -> AccountContentResult:
+        if hasattr(self.collector, "prepare_session"):
+            self.collector.prepare_session(account.handle)
+        fetched = self.collector.fetch_user_posts(account.handle, max(1, min(int(limit), 100)))
+        items: list[dict[str, Any]] = []
+        for item in fetched.posts:
+            external_id = str(item.get("id") or item.get("answer_id") or item.get("post_id") or "").strip()
+            if not external_id:
+                continue
+            items.append({**item, "external_item_id": external_id, "platform": self.platform, "post_id": content_id(self.platform, external_id)})
+        return AccountContentResult(items, warnings=list(fetched.warnings))
 
 PLATFORM_CAPABILITIES = {
     "x": PlatformCapabilities(
@@ -372,11 +505,19 @@ class OpenCodeGoCandidateScoreProvider:
 
 def build_provider_registry(
     capture_root: Path = DEFAULT_CAPTURE_ROOT,
+    *,
+    x_provider: Any | None = None,
+    zhihu_provider: Any | None = None,
 ) -> ProviderRegistry:
-    return TruthfulProviderRegistry(
-        LocalCaptureAccountProvider(platform, capture_root)
-        for platform, _name in PLATFORMS
-    )
+    providers: list[Any] = []
+    for platform, _name in PLATFORMS:
+        if platform == "x" and x_provider is not None:
+            providers.append(DirectProfileProvider("x", x_provider, "https://x.com"))
+        elif platform == "zhihu" and zhihu_provider is not None:
+            providers.append(DirectProfileProvider("zhihu", zhihu_provider, "https://www.zhihu.com/people"))
+        else:
+            providers.append(LocalCaptureAccountProvider(platform, capture_root))
+    return TruthfulProviderRegistry(providers)
 
 
 def create_private_app(

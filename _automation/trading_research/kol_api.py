@@ -466,7 +466,16 @@ def create_app(
             )
         )
         discovery_store = DiscoveryStore(kol_root / "posts.db", post_store)
-        discovery_registry = build_provider_registry(capture_root)
+        discovery_registry = build_provider_registry(
+            capture_root,
+            x_provider=build_x_post_provider(
+                "twitter",
+                twitter_credentials=credentials,
+                xtf_command=xtf_command,
+                fallback_mode="disabled",
+            ),
+            zhihu_provider=zhihu_provider,
+        )
         discovery_service = DiscoveryService(discovery_store, discovery_registry)
     except Exception as exc:
         discovery_error = str(exc)

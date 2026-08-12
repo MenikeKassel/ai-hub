@@ -255,6 +255,7 @@ export default function ReviewQueue() {
     mutationFn: (token: string) => api.bulkApproveRecommendationDrafts(token, '批量批准当前晨报可批准草稿'),
     onSuccess: (value) => { setBulkResult(value); setBulkPreview(null); refresh() },
   })
+  const canBulkApprove = reviewDate === today() && view === 'pending' && pendingFilter === 'all'
   const allDrafts = useMemo(() => {
     const unique = new Map<number, RecommendationDraft>()
     ;[...(query.data?.drafts || []), ...(query.data?.history_drafts || []), ...(query.data?.approved_drafts || [])].forEach((draft) => unique.set(draft.id, draft))
@@ -322,7 +323,7 @@ export default function ReviewQueue() {
         </button>
       })}
     </div>
-    {view === 'pending' && <div className="bulk-approval-toolbar"><button className="primary-button" disabled={bulkPreviewMutation.isPending || pendingFilter === 'attention'} onClick={() => bulkPreviewMutation.mutate()}>批准当前可批准项</button></div>}
+    {view === 'pending' && <div className="bulk-approval-toolbar"><button className="primary-button" disabled={!canBulkApprove || bulkPreviewMutation.isPending} title={!canBulkApprove ? '仅允许对今日晨报的全部可批准草稿执行批量操作' : '先预览，再确认批量批准'} onClick={() => bulkPreviewMutation.mutate()}>批准当前可批准项</button>{reviewDate !== today() && <span className="secondary-line">批量批准仅开放给今日晨报</span>}{pendingFilter === 'attention' && <span className="secondary-line">异常筛选不会进入批量批准</span>}</div>}
     {bulkPreviewMutation.isError && <div className="error-banner">批量预览失败：{String(bulkPreviewMutation.error)}</div>}
     {bulkApproveMutation.isError && <div className="error-banner">批量批准失败：{String(bulkApproveMutation.error)}</div>}
     {bulkPreview && <div className="bulk-approval-panel panel">
