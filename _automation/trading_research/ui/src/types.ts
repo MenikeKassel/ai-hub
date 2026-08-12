@@ -498,6 +498,21 @@ export interface MarketHealth {
   runs?: MarketRun[]
   queue?: Array<{ queue_key: string; symbol: string; status: string; reason: string; last_error: string }>
   freestockdb?: FreeStockDBHealth
+  foundation?: {
+    ok?: boolean
+    release_id?: string
+    as_of?: string
+    root?: string
+    coverage?: {
+      trade_date?: string
+      active_catalog?: number
+      observed?: number
+      coverage_ratio?: number
+      threshold?: number
+      complete?: boolean
+    }
+    coverage_complete?: boolean
+  }
 }
 
 export interface FoundationRefreshState {

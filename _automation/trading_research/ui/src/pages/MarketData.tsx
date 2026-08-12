@@ -69,6 +69,15 @@ export default function MarketData() {
       <Metric label="数据覆盖" value={value?.coverage_count ?? '-'} />
       <Metric label="质量警告" value={value?.warning_count ?? '-'} warning={!!value?.warning_count} />
     </div>
+    <div className="panel provider-panel">
+      <div className="panel-heading"><div><h2>统一行情基座</h2><span>所有收益、指标和板块消费者只读同一份原子 release</span></div><Database size={17} /></div>
+      <div className="provider-status-grid">
+        <span>Release <strong className="mono">{value?.foundation?.release_id || '-'}</strong></span>
+        <span>有效日期 <strong>{value?.foundation?.as_of || '-'}</strong></span>
+        <span>覆盖率 <strong>{value?.foundation?.coverage?.coverage_ratio != null ? `${(value.foundation.coverage.coverage_ratio * 100).toFixed(1)}%` : '-'}</strong></span>
+        <span>状态 <strong>{value?.foundation?.coverage_complete ? 'valid' : 'partial'}</strong></span>
+      </div>
+    </div>
     <div className="content-grid market-grid">
       <div className="panel">
         <div className="panel-heading"><div><h2>标的数据覆盖</h2><span>不复权与前复权分开保存</span></div><RefreshCw size={16} /></div>

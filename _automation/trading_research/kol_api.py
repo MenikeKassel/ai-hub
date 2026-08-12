@@ -65,7 +65,7 @@ from review_agent import ReviewAgentRepository, rollback_decision
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
-from foundation_market_client import FoundationBackedMarketStore
+from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -513,7 +513,14 @@ def create_app(
                     "error": "market database is busy; retry after the current task completes",
                 }
         try:
-            return market_store.health()
+            value = market_store.health()
+            foundation_reader = FoundationMarketReader(FOUNDATION_ROOT)
+            foundation = foundation_reader.health()
+            if foundation.get("ok"):
+                foundation["coverage"] = foundation_reader.coverage(str(foundation.get("as_of") or ""))
+                foundation["coverage_complete"] = bool(foundation["coverage"].get("complete"))
+            value["foundation"] = foundation
+            return value
         except Exception as exc:
             message = str(exc)
             lowered = message.lower()
@@ -1700,7 +1707,7 @@ def create_app(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=900,
+                timeout=1800,
                 check=False,
             )
             output = (completed.stdout or completed.stderr or "").strip()
@@ -1714,7 +1721,7 @@ def create_app(
             state = {
                 "status": "degraded",
                 "returncode": -1,
-                "output_tail": "shared foundation refresh timed out after 900 seconds",
+                "output_tail": "shared foundation refresh timed out after 1800 seconds",
                 "finished_at": now_iso(),
             }
         temporary = state_path.with_suffix(".json.tmp")

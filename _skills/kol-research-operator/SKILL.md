@@ -58,10 +58,11 @@ operator error and use `delegate-to-codex` for maintenance.
   safe and manual review is available.
 - `market`: synchronize market data.
 - `data-refresh`: update the shared A-share foundation and then refresh KOL
-  returns from the single published release. Use `as_of=auto` unless the user
-  explicitly supplies a completed trading date. This operation may take up to
-  15 minutes and returns `degraded` if an upstream provider times out; never
-  interpret an old release as current.
+  returns, event technical context (MACD/RSI/ATR and related fields), and KOL
+  performance from the single published release. Use `as_of=auto` unless the
+  user explicitly supplies a completed trading date. This operation may take
+  up to 30 minutes and returns structured step results; never interpret an old
+  release as current.
 - `returns`: update KOL returns.
 - `doctor`: inspect the console, task and provider state.
 - `list-kols`, `add-kol`, `set-kol-status`: manage explicit KOL identities.

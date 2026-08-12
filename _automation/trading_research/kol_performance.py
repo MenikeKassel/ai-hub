@@ -33,7 +33,7 @@ from kol_tracker import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-PERFORMANCE_VERSION = "kol-performance-v3"
+PERFORMANCE_VERSION = "kol-performance-v4"
 HORIZONS = ("1W", "1M", "3M", "6M")
 RECENT_WINDOWS = (7, 30, 90)
 
@@ -309,7 +309,8 @@ class PerformanceStore:
                     status TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     completed_at TEXT NOT NULL DEFAULT '',
-                    error TEXT NOT NULL DEFAULT ''
+                    error TEXT NOT NULL DEFAULT '',
+                    foundation_release_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS performance_snapshots(
                     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,6 +325,7 @@ class PerformanceStore:
                     input_hash TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    foundation_release_id TEXT NOT NULL DEFAULT '',
                     UNIQUE(input_hash, platform, kol_key, horizon, window_name)
                 );
                 CREATE TABLE IF NOT EXISTS performance_narratives(
@@ -339,17 +341,34 @@ class PerformanceStore:
                     status TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    foundation_release_id TEXT NOT NULL DEFAULT '',
                     UNIQUE(input_hash, platform, kol_key, horizon, window_name)
                 );
                 CREATE INDEX IF NOT EXISTS idx_performance_series
                     ON performance_snapshots(platform,kol_key,horizon,window_name,as_of);
                 """
             )
+            for table, column in (
+                ("performance_runs", "foundation_release_id"),
+                ("performance_snapshots", "foundation_release_id"),
+                ("performance_narratives", "foundation_release_id"),
+            ):
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                if column not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             db.commit()
         finally:
             db.close()
 
-    def save_run(self, run_id: str, as_of: str, input_hash: str, status: str = "completed", error: str = "") -> None:
+    def save_run(
+        self,
+        run_id: str,
+        as_of: str,
+        input_hash: str,
+        status: str = "completed",
+        error: str = "",
+        foundation_release_id: str = "",
+    ) -> None:
         now = datetime.now(SHANGHAI).isoformat(timespec="seconds")
         db = self.connect()
         try:
@@ -357,10 +376,10 @@ class PerformanceStore:
                 db.execute(
                     """
                     INSERT OR REPLACE INTO performance_runs(
-                        run_id,as_of,mode,algorithm_version,input_hash,status,started_at,completed_at,error
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                        run_id,as_of,mode,algorithm_version,input_hash,status,started_at,completed_at,error,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (run_id, as_of, "deterministic", PERFORMANCE_VERSION, input_hash, status, now, now, error),
+                    (run_id, as_of, "deterministic", PERFORMANCE_VERSION, input_hash, status, now, now, error, foundation_release_id),
                 )
                 db.commit()
         finally:
@@ -377,13 +396,14 @@ class PerformanceStore:
                     """
                     INSERT OR IGNORE INTO performance_snapshots(
                         run_id,as_of,platform,kol_key,horizon,window_name,tier,rank,
-                        input_hash,payload_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        input_hash,payload_json,created_at,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         row["run_id"], row["as_of"], row["platform"], row["kol_key"],
                         row["horizon"], row["window_name"], row["tier"], row.get("rank"),
                         row["input_hash"], json.dumps(row["payload"], ensure_ascii=False, sort_keys=True), now,
+                        row.get("foundation_release_id", ""),
                     ),
                     )
                     inserted += int(cursor.rowcount > 0)
@@ -392,7 +412,7 @@ class PerformanceStore:
             db.close()
         return inserted
 
-    def save_narrative(self, *, as_of: str, platform: str, kol_key: str, horizon: str, window_name: str, input_hash: str, payload: dict[str, Any], provider: str = "rules", model: str = "none", status: str = "fallback") -> bool:
+    def save_narrative(self, *, as_of: str, platform: str, kol_key: str, horizon: str, window_name: str, input_hash: str, payload: dict[str, Any], provider: str = "rules", model: str = "none", status: str = "fallback", foundation_release_id: str = "") -> bool:
         now = datetime.now(SHANGHAI).isoformat(timespec="seconds")
         db = self.connect()
         try:
@@ -400,10 +420,10 @@ class PerformanceStore:
                 cursor = db.execute(
                     """
                     INSERT OR IGNORE INTO performance_narratives(
-                        as_of,platform,kol_key,horizon,window_name,input_hash,provider,model,status,payload_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        as_of,platform,kol_key,horizon,window_name,input_hash,provider,model,status,payload_json,created_at,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (as_of, platform, kol_key, horizon, window_name, input_hash, provider, model, status, json.dumps(payload, ensure_ascii=False, sort_keys=True), now),
+                    (as_of, platform, kol_key, horizon, window_name, input_hash, provider, model, status, json.dumps(payload, ensure_ascii=False, sort_keys=True), now, foundation_release_id),
                 )
                 db.commit()
                 return bool(cursor.rowcount > 0)
@@ -532,6 +552,13 @@ class KolPerformanceService:
         if post.get("evidence_type") in {"retrospective", "secondhand", "ambiguous"}:
             return False
         return True
+
+    def _foundation_release_id(self) -> str:
+        for row in reversed(self.event_store.load_marks()):
+            value = str(row.get("foundation_release_id") or "")
+            if value:
+                return value
+        return ""
 
     def _events_and_identities(self) -> tuple[list[EventRecord], dict[str, KolIdentity], dict[str, bool]]:
         events = self.event_store.load_events()
@@ -770,6 +797,7 @@ class KolPerformanceService:
     def refresh(self, *, as_of: date) -> dict[str, Any]:
         result = self.compute(as_of=as_of, window="all", horizon="1W", primary_only=True)
         run_id = f"perf-{uuid.uuid4().hex[:12]}"
+        foundation_release_id = self._foundation_release_id()
         input_hash = _hash(result)
         snapshots: list[dict[str, Any]] = []
         for row in result["rows"]:
@@ -781,6 +809,7 @@ class KolPerformanceService:
                     "horizon": horizon,
                     "metrics": metrics,
                     "narrative": narrative,
+                    "foundation_release_id": foundation_release_id,
                 }
                 snapshots.append({
                     "run_id": run_id,
@@ -793,6 +822,7 @@ class KolPerformanceService:
                     "rank": row["rank"],
                     "input_hash": _hash(payload),
                     "payload": payload,
+                    "foundation_release_id": foundation_release_id,
                 })
                 self.store.save_narrative(
                     as_of=as_of.isoformat(),
@@ -802,9 +832,10 @@ class KolPerformanceService:
                     window_name="all",
                     input_hash=_hash(payload),
                     payload=narrative,
+                    foundation_release_id=foundation_release_id,
                 )
         inserted = self.store.save_snapshots(snapshots)
-        self.store.save_run(run_id, as_of.isoformat(), input_hash)
+        self.store.save_run(run_id, as_of.isoformat(), input_hash, foundation_release_id=foundation_release_id)
         result["run_id"] = run_id
         result["snapshots_inserted"] = inserted
         return result
@@ -825,6 +856,7 @@ class KolPerformanceService:
                 provider=str(narrative.get("provider") or "rules"),
                 model=str(narrative.get("model") or "none"),
                 status=str(narrative.get("status") or "fallback"),
+                foundation_release_id=self._foundation_release_id(),
             )
         return result
 

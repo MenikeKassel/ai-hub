@@ -98,6 +98,10 @@ class FoundationMarketClientTests(unittest.TestCase):
             self.assertEqual(date(2026, 8, 7), store.latest_open_date(date(2026, 8, 9)))
             self.assertEqual(11.19, float(daily.iloc[-1]["close"]))
             self.assertEqual("fixture-release", daily.iloc[-1]["foundation_release_id"])
+            coverage = store.foundation.coverage()
+            self.assertTrue(coverage["complete"])
+            self.assertEqual(1, coverage["active_catalog"])
+            self.assertEqual(1, coverage["observed"])
             self.assertEqual([], store.pending_sync())
             self.assertFalse((root / "market" / "warehouse" / "daily").exists())
 
@@ -141,6 +145,30 @@ class FoundationMarketClientTests(unittest.TestCase):
                 "fixture-release", still_pinned.iloc[-1]["foundation_release_id"]
             )
             self.assertEqual("new-release", refreshed.iloc[-1]["foundation_release_id"])
+
+    def test_missing_foundation_symbol_does_not_fall_back_to_local_daily_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            foundation_root = root / "foundation"
+            _make_foundation(foundation_root)
+            local_store = MarketStore(root / "market")
+            local_store.write_daily(
+                pd.DataFrame(
+                    {
+                        "trade_date": [date(2026, 8, 7)],
+                        "open": [1.0],
+                        "high": [1.1],
+                        "low": [0.9],
+                        "close": [1.0],
+                        "volume": [10.0],
+                        "amount": [10.0],
+                    }
+                ),
+                symbol="600000",
+                adjustment="raw",
+            )
+            store = FoundationBackedMarketStore(local_store, foundation_root)
+            self.assertTrue(store.read_daily("600000", adjustment="raw").empty)
 
 
 if __name__ == "__main__":

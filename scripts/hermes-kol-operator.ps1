@@ -425,7 +425,9 @@ switch ($Action) {
         if ($DryRun) { $arguments += "--dry-run" }
         $output = & $python @arguments 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
-        Write-Output $output.Trim()
+        $jsonLine = $output -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1
+        if (-not $jsonLine) { throw "data-refresh returned no structured JSON: $($output.Trim())" }
+        Write-Output $jsonLine.Trim()
     }
     "returns" { Write-Result (Start-KolTask "KOL_Return_Tracker_Daily") }
     "import-zhihu" {

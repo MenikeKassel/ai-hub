@@ -198,7 +198,7 @@ def _parse_operator_output(stdout: str) -> dict[str, Any] | list[Any]:
 def run_operator(args: dict[str, Any], **_: Any) -> str:
     try:
         command = _build_command(args)
-        timeout = 900 if args.get("action") == "data-refresh" else 90
+        timeout = 1800 if args.get("action") == "data-refresh" else 90
         completed = subprocess.run(
             command,
             cwd=str(REPO_ROOT),
@@ -232,7 +232,7 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
                 "ok": False,
                 "error": (
                     "KOL operator timed out after "
-                    f"{900 if args.get('action') == 'data-refresh' else 90} seconds"
+                    f"{1800 if args.get('action') == 'data-refresh' else 90} seconds"
                 ),
             }
         )

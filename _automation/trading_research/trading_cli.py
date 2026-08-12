@@ -1784,7 +1784,9 @@ def _run_foundation_refresh(target: date) -> dict[str, Any]:
     python = FOUNDATION_REPO / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         return {"ok": False, "status": "environment_missing", "error": str(python)}
-    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "900"))
+    # A full BaoStock gap repair may cover the active universe sequentially.
+    # Keep the operator bounded, but allow the planned 30-minute window.
+    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "1800"))
     command = [
         str(python),
         "-m",
@@ -1901,16 +1903,43 @@ def kol_data_refresh(args: argparse.Namespace) -> None:
                     "status": "timed_out",
                     "effective_as_of": effective.isoformat(),
                 }
-        steps.extend([{"step": "foundation_after", **after}, {"step": "kol_update", **update}])
+        technical = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "returns update did not complete",
+        }
+        if update.get("ok") and not args.dry_run:
+            context_result = _backfill_event_contexts(
+                _market_store(),
+                KolStore(KOL_ROOT),
+                stale_only=True,
+            )
+            technical = {
+                "ok": bool(context_result.get("ok")),
+                "status": "updated" if context_result.get("ok") else "failed",
+                "created": len(context_result.get("created", [])),
+                "updated": len(context_result.get("updated", [])),
+                "skipped": len(context_result.get("skipped", [])),
+                "pending": len(context_result.get("pending", [])),
+                "errors": context_result.get("errors", []),
+            }
+        elif args.dry_run:
+            technical = {"ok": True, "status": "dry_run"}
+        steps.extend([
+            {"step": "foundation_after", **after},
+            {"step": "kol_update", **update},
+            {"step": "technical_context", **technical},
+        ])
         payload = {
             "ok": bool(
                 after.get("ok")
                 and update.get("ok")
+                and technical.get("ok")
                 and (not refresh_required or refresh.get("ok"))
             ),
             "status": (
                 "completed"
-                if update.get("ok") and (not refresh_required or refresh.get("ok"))
+                if update.get("ok") and technical.get("ok") and (not refresh_required or refresh.get("ok"))
                 else "degraded"
             ),
             "requested_as_of": target.isoformat(),
@@ -1932,6 +1961,7 @@ def _backfill_event_contexts(
     event_ids: set[str] | None = None,
     symbols: set[str] | None = None,
     force: bool = False,
+    stale_only: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "feature_version": FEATURE_VERSION,
@@ -1960,6 +1990,14 @@ def _backfill_event_contexts(
         try:
             input_hash = event_context_input_hash(event.symbol, event.posted_at)
             existing = market_store.get_event_technical_context(event.event_id, input_hash=input_hash)
+            if (
+                stale_only
+                and existing is not None
+                and str(existing.get("foundation_release_id") or "") == foundation_release_id
+                and str(existing.get("status") or "") not in {"pending", "failed"}
+            ):
+                result["skipped"].append(event.event_id)
+                continue
             expected_trade_date = market_store.latest_open_date(event_context_cutoff(event.posted_at))
             frame = market_store.read_daily(event.symbol, adjustment="qfq")
             context = compute_event_technical_context(

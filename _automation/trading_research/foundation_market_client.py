@@ -405,21 +405,11 @@ class FoundationBackedMarketStore:
                     suspension_rows["foundation_release_id"] = release_id
                     frame = pd.concat([frame, suspension_rows], ignore_index=True, sort=False)
                     frame = frame.sort_values("trade_date").drop_duplicates("trade_date", keep="first").reset_index(drop=True)
-        if not frame.empty:
-            return frame
-        # The first foundation releases did not contain benchmark indices. Keep
-        # the gap explicit and allow the existing local benchmark cache to be
-        # used until the next foundation release publishes index facts.
-        legacy = self.local_store.read_daily(symbol, adjustment=adjustment)
-        if legacy.empty:
-            return legacy
-        legacy = legacy.copy()
-        legacy["provider"] = "market-warehouse-legacy"
-        legacy["foundation_release_id"] = "foundation_partial"
-        legacy["market_open"] = True
-        legacy["suspended"] = False
-        legacy["last_trade_date"] = legacy.get("date", legacy.get("trade_date"))
-        return legacy
+        # A missing foundation frame is an explicit data-quality state.  Never
+        # fall back to the local warehouse: it is workflow state, not a second
+        # daily fact source.  Suspension overlays above are intentionally
+        # limited to status observations and never provide replacement prices.
+        return frame
 
     def fetch_stock(
         self,
