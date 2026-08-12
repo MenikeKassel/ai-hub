@@ -105,18 +105,33 @@ class FoundationMarketReader:
             }
 
     def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
+        values = self.read_daily_many([symbol], adjustment=adjustment)
+        return values.get(str(symbol).split(".", 1)[0], pd.DataFrame())
+
+    def read_daily_many(
+        self,
+        symbols: list[str] | set[str] | tuple[str, ...],
+        *,
+        adjustment: str = "raw",
+    ) -> dict[str, pd.DataFrame]:
         if adjustment == "hfq":
-            return pd.DataFrame()
+            return {str(symbol).split(".", 1)[0]: pd.DataFrame() for symbol in symbols}
         if adjustment not in {"raw", "qfq"}:
             raise ValueError(f"unsupported adjustment: {adjustment}")
         dataset = "daily_raw" if adjustment == "raw" else "daily_adjusted"
+        requested = {
+            str(symbol).strip().upper().split(".", 1)[0]: _foundation_symbol(str(symbol))
+            for symbol in symbols
+        }
+        if not requested:
+            return {}
         with self.pinned_release() as release:
             frame = pd.read_parquet(
                 self.dataset_path(dataset, release),
-                filters=[("symbol", "==", _foundation_symbol(symbol))],
+                filters=[("symbol", "in", list(requested.values()))],
             )
         if frame.empty:
-            return frame
+            return {symbol: pd.DataFrame() for symbol in requested}
         output = frame.copy()
         output["foundation_symbol"] = output["symbol"].astype(str)
         output["symbol"] = output["foundation_symbol"].str.split(".").str[0]
@@ -128,11 +143,15 @@ class FoundationMarketReader:
         output["last_trade_date"] = output["trade_date"].where(output["market_open"])
         output["provider"] = "ashare-data-foundation"
         output["foundation_release_id"] = str(release["release_id"])
-        return (
-            output.sort_values("trade_date")
-            .drop_duplicates("trade_date", keep="last")
-            .reset_index(drop=True)
-        )
+        return {
+            symbol: (
+                output[output["symbol"] == symbol]
+                .sort_values("trade_date")
+                .drop_duplicates("trade_date", keep="last")
+                .reset_index(drop=True)
+            )
+            for symbol in requested
+        }
 
     def instruments(self, release: dict[str, Any] | None = None) -> list[Instrument]:
         release = release or self.release()
@@ -178,6 +197,7 @@ class FoundationBackedMarketStore:
     def __init__(self, local_store: Any, foundation_root: Path):
         self.local_store = local_store
         self.foundation = FoundationMarketReader(foundation_root)
+        self._daily_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
         self._reference_instruments: dict[str, dict[str, Any]] | None = None
         self._reference_release_id = ""
         self._trading_dates: list[date] | None = None
@@ -285,8 +305,42 @@ class FoundationBackedMarketStore:
         return [value for value in self._calendar() if start <= value <= end]
 
     def read_daily(self, symbol: str, *, adjustment: str = "raw") -> pd.DataFrame:
-        frame = self.foundation.read_daily(symbol, adjustment=adjustment)
         release_id = str(self.foundation.release().get("release_id", ""))
+        cache_key = (release_id, str(symbol).split(".", 1)[0], adjustment)
+        if cache_key in self._daily_cache:
+            return self._daily_cache[cache_key].copy()
+        frame = self.foundation.read_daily(symbol, adjustment=adjustment)
+        frame = self._merge_local_suspension_rows(symbol, frame, release_id, adjustment)
+        self._daily_cache[cache_key] = frame.copy()
+        return frame
+
+    def prefetch_daily(
+        self,
+        symbols: set[str] | list[str] | tuple[str, ...],
+        *,
+        adjustments: tuple[str, ...] = ("raw", "qfq"),
+    ) -> dict[str, int]:
+        release_id = str(self.foundation.release().get("release_id", ""))
+        counts: dict[str, int] = {}
+        for adjustment in adjustments:
+            frames = self.foundation.read_daily_many(list(symbols), adjustment=adjustment)
+            rows = 0
+            for symbol in symbols:
+                normalized = str(symbol).split(".", 1)[0]
+                frame = frames.get(normalized, pd.DataFrame())
+                frame = self._merge_local_suspension_rows(symbol, frame, release_id, adjustment)
+                self._daily_cache[(release_id, normalized, adjustment)] = frame.copy()
+                rows += len(frame)
+            counts[adjustment] = rows
+        return counts
+
+    def _merge_local_suspension_rows(
+        self,
+        symbol: str,
+        frame: pd.DataFrame,
+        release_id: str,
+        adjustment: str,
+    ) -> pd.DataFrame:
         # Early foundation releases omit rows for suspended securities. The
         # validated local warehouse retains those rows with trade_status=0;
         # import only that suspension observation so all consumers share the

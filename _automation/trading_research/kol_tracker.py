@@ -1428,6 +1428,26 @@ def update_kol_tracking(
     checkpoint_source_failures: set[str] = set()
     checkpoint_verifier_open = False
 
+    # The shared foundation stores all instruments in a small number of large
+    # Parquet files. Prefetch once per release so a 500-event replay does not
+    # rescan the same file for every event.
+    prefetch = getattr(primary, "prefetch_daily", None)
+    if callable(prefetch):
+        symbols = {
+            event.symbol
+            for event in events
+            if event.status in {"active", "completed"}
+            and (event_ids is None or event.event_id in event_ids)
+            and event.symbol
+        }
+        symbols.add("000300")
+        try:
+            prefetch(symbols, adjustments=("raw", "qfq"))
+        except Exception:
+            # Keep per-event fallback and its existing error reporting. A
+            # failed optimization must not change the calculation contract.
+            pass
+
     tracked_event_count = sum(
         event.status in {"active", "completed"}
         and (event_ids is None or event.event_id in event_ids)
