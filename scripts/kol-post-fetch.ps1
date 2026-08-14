@@ -45,7 +45,9 @@ try {
     if (-not (Test-Path -LiteralPath $cli)) { throw "Trading CLI not found: $cli" }
 
     $batchKey = "manual:$AsOf`:$Platform`:$((Get-Date).ToString('yyyyMMddHH'))"
-    $arguments = @($cli, "kol-post-fetch", "--provider", "auto", "--platform", $Platform, "--backfill", $FetchCount, "--as-of", $AsOf, "--batch-key", $batchKey, "--skip-classify")
+    # ACCOUNT SAFETY (2026-08-14): nitter-only. twitter-cli credential path disabled
+    # (user's X account warned); trading_cli._post_provider refuses auto/twitter.
+    $arguments = @($cli, "kol-post-fetch", "--provider", "nitter", "--platform", $Platform, "--backfill", $FetchCount, "--as-of", $AsOf, "--batch-key", $batchKey, "--skip-classify")
     & $python $cli kol-post-db-backup *> $null
     if ($LASTEXITCODE -ne 0) { throw "Unable to back up posts.db before fetch." }
     if (-not $NoNotify) { $arguments += @("--notify", "--alerts-only") }

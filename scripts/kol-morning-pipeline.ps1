@@ -50,7 +50,7 @@ try {
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & $python $cli kol-morning-orchestrate --platform $Platform --fetch-count $FetchCount 1> $stdoutPath 2> $stderrPath
+        & $python $cli kol-morning-orchestrate --platform $Platform --fetch-count $FetchCount --provider nitter 1> $stdoutPath 2> $stderrPath
         $exitCode = $LASTEXITCODE
         $stdout = if (Test-Path $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" }
         $stderr = if (Test-Path $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" }

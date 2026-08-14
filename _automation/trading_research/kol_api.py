@@ -145,7 +145,8 @@ class DigestAuthorProfileBatch(BaseModel):
 class FetchRequest(BaseModel):
     max_count: int = Field(default=50, ge=1, le=100)
     classify: bool = True
-    provider: str = Field(default="auto", pattern="^(auto|twitter|nitter)$")
+    # ACCOUNT SAFETY (2026-08-14): default is nitter; twitter-cli is refused in the handler.
+    provider: str = Field(default="nitter", pattern="^(auto|twitter|nitter)$")
 
 
 class TwitterCredentialRequest(BaseModel):
@@ -469,7 +470,8 @@ def create_app(
         discovery_registry = build_provider_registry(
             capture_root,
             x_provider=build_x_post_provider(
-                "twitter",
+                # ACCOUNT SAFETY (2026-08-14): nitter only — twitter-cli credential path disabled.
+                "nitter",
                 twitter_credentials=credentials,
                 xtf_command=xtf_command,
                 fallback_mode="disabled",
@@ -1630,11 +1632,17 @@ def create_app(
 
     @app.post("/api/fetch")
     def fetch_posts(body: FetchRequest) -> dict[str, Any]:
+        # ACCOUNT SAFETY (2026-08-14): user's X account was warned; twitter-cli
+        # credential path is disabled. Only the credential-free Nitter provider may
+        # fetch X timelines. (trading_cli._post_provider has the same guard.)
+        if body.provider != "nitter":
+            raise HTTPException(
+                409,
+                "X credential provider (twitter-cli) disabled for account safety 2026-08-14; use provider=nitter",
+            )
         fallback_mode = _fallback_mode(config.runtime_root)
-        if body.provider in {"auto", "nitter"} and not timeline_health(config.nitter_url).get("ready"):
-            fallback_mode = "disabled"
-        if body.provider == "nitter" and fallback_mode != "enabled":
-            raise HTTPException(409, "Nitter is shadow-only until the rollout gate passes")
+        if not timeline_health(config.nitter_url).get("ready"):
+            raise HTTPException(503, "Nitter is not ready; X collection is temporarily unavailable")
         provider = build_x_post_provider(
             body.provider,
             twitter_credentials=credentials,

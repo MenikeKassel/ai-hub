@@ -807,6 +807,15 @@ def _fallback_mode() -> str:
 
 
 def _post_provider(mode: str):
+    # ACCOUNT SAFETY (2026-08-14): user's X account was warned; the twitter-cli
+    # credential path is DISABLED. Every X fetch must go through the credential-free
+    # Nitter provider. "auto"/"twitter" modes would construct TwitterCliProvider and
+    # touch the user's account — refuse them outright.
+    if mode != "nitter":
+        raise SystemExit(
+            "X credential provider (twitter-cli) disabled for account safety 2026-08-14; "
+            "use --provider nitter"
+        )
     fallback_mode = _fallback_mode()
     if fallback_mode in {"shadow", "enabled"}:
         try:
@@ -3821,8 +3830,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the durable stock-lead extraction pass for a targeted collection retry",
     )
     p_post_fetch.add_argument("--classify-limit", type=int, default=0)
-    p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
-    p_post_fetch.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
     p_post_fetch.add_argument(
         "--handles",
         help="comma-separated handles for a targeted retry; omit to fetch all active accounts",
@@ -3842,7 +3850,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch_resume.add_argument(
         "--provider",
         choices=["auto", "twitter", "nitter"],
-        default="auto",
+        default="nitter",
     )
     p_fetch_resume.add_argument(
         "--platform",
@@ -3902,7 +3910,7 @@ def build_parser() -> argparse.ArgumentParser:
         "kol-morning-run", help="fetch and prepare the evidence-first morning recommendation queue"
     )
     p_morning.add_argument("--as-of")
-    p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
+    p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
     p_morning.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_morning.add_argument("--fetch-count", type=int, default=50)
     p_morning.add_argument("--backlog-limit", type=int, default=20)
@@ -3914,7 +3922,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_morning_orchestrate = sub.add_parser(
         "kol-morning-orchestrate", help="run the due morning phase and chain missed phases safely"
     )
-    p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
+    p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
     p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)
