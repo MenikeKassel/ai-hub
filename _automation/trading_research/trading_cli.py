@@ -3831,6 +3831,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_post_fetch.add_argument("--classify-limit", type=int, default=0)
     p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
+    p_post_fetch.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_post_fetch.add_argument(
         "--handles",
         help="comma-separated handles for a targeted retry; omit to fetch all active accounts",
