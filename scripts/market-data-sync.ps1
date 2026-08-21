@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
-    [string]$AsOf = (Get-Date -Format "yyyy-MM-dd")
+    [string]$AsOf = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,7 +32,9 @@ try {
         Write-MarketLog "Skipped: unified foundation current.json is missing."
         exit 0
     }
-    $releaseId = ((Get-Content -LiteralPath $foundationPointer -Raw -Encoding UTF8) | ConvertFrom-Json).release_id
+    $foundation = (Get-Content -LiteralPath $foundationPointer -Raw -Encoding UTF8) | ConvertFrom-Json
+    $releaseId = $foundation.release_id
+    $releaseAsOf = $foundation.as_of
     $previousRelease = ""
     if (Test-Path -LiteralPath $consumerState) {
         try { $previousRelease = (Get-Content -LiteralPath $consumerState -Raw -Encoding UTF8 | ConvertFrom-Json).release_id } catch { $previousRelease = "" }
@@ -43,7 +45,8 @@ try {
     }
     # The unified foundation owns all daily fact writes. This legacy task is a
     # read-only consumer that rebuilds derived event context from current.json.
-    $output = & $python $cli market-sync --as-of $AsOf --alerts-only 2>&1 | Out-String
+    $effectiveAsOf = if ($AsOf) { $AsOf } else { $releaseAsOf }
+    $output = & $python $cli market-sync --as-of $effectiveAsOf --alerts-only 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
     if ($output.Trim()) { Write-MarketLog $output.Trim() }
     if ($exitCode -ne 0) { throw "read-only market consumer exited with code $exitCode" }

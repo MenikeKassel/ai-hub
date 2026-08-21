@@ -59,6 +59,7 @@ export default function MarketData() {
       {freeStock?.last_update?.status === 'running' && <div className="warning-banner">Mirror update is running: {freeStock.last_update.phase || 'working'}. A/B updates keep the verified dataset online until the final swap; the first bootstrap may pause briefly while taking its snapshot.</div>}
       {freeStock?.last_update?.status === 'failed' && <div className="error-banner">Last mirror update failed: {freeStock.last_update.error || 'unknown error'}</div>}
       {freeStock?.storage_migrated === false && <div className="error-banner">Storage layout is {freeStock.storage_layout?.status || 'invalid'}. Updates are blocked until the compatibility link points from the program directory to the D-drive live dataset.</div>}
+      {freeStock?.configuration_conflict && <div className="error-banner">FreeStockDB path configuration conflicts with the resolved data junction. Expected {freeStock.inferred_data_root || 'the linked canonical root'}.</div>}
       {freeStock?.update_ready === false && <div className="warning-banner">Safe mirror update is paused: {freeStock.disk?.required_for_safe_update_gb ?? '-'} GB free is required for the next staging generation.</div>}
       {freeStock?.transport_warning && <div className="warning-banner">Transport warning: this mirror is HTTP and remains an untrusted secondary source. It cannot freeze formal returns alone.</div>}
       {updateFreeStockDB.error && <div className="error-banner">{String(updateFreeStockDB.error)}</div>}

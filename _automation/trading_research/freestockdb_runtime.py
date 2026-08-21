@@ -34,7 +34,10 @@ def _infer_data_root(root: Path) -> Path:
     try:
         resolved = linked_data.resolve(strict=False)
         if linked_data.exists() and resolved != linked_data:
-            return resolved
+            # The compatibility junction may target the canonical ``live``
+            # directory itself; the runtime root is its parent so Paths.from_root
+            # can consistently derive live/staging/previous siblings.
+            return resolved.parent if resolved.name.casefold() == "live" else resolved
     except OSError:
         pass
     return root / "live"
@@ -156,6 +159,11 @@ class FreeStockDBRuntime:
             ).expanduser()
         else:
             resolved_data_root = resolved_root
+        inferred_data_root = _infer_data_root(resolved_root)
+        self.configuration_conflict = (
+            str(resolved_data_root.resolve()) != str(inferred_data_root.resolve())
+            and bool(data_root or os.environ.get("FREESTOCKDB_DATA_ROOT"))
+        )
         self.paths = FreeStockDBPaths.from_root(
             resolved_root,
             Path(runtime_root or DEFAULT_RUNTIME_ROOT).expanduser(),
@@ -824,6 +832,8 @@ class FreeStockDBRuntime:
             "source": source_url,
             "data": str(self.paths.data),
             "storage_root": str(self.paths.storage_root),
+            "configuration_conflict": self.configuration_conflict,
+            "inferred_data_root": str(_infer_data_root(self.paths.root)),
             "live": str(self.paths.live),
             "staging": str(self.paths.staging),
             "previous": str(self.paths.previous),

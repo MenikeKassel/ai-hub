@@ -571,6 +571,8 @@ export interface FreeStockDBHealth {
   data_fresh?: boolean
   update_ready?: boolean
   storage_migrated?: boolean
+  configuration_conflict?: boolean
+  inferred_data_root?: string
   storage_layout?: {
     status?: 'local' | 'canonical' | 'reversed' | 'not_migrated' | 'missing_compatibility_link' | 'conflict'
     canonical?: boolean

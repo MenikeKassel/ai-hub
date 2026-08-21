@@ -24,7 +24,8 @@ if ($LASTEXITCODE -ne 0) { throw "Unable to initialize market data storage." }
 
 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4) -Hidden
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
 
 function Register-ResearchTask([string]$Name, [string]$ScriptName, $Trigger, [string]$Description, $TaskSettings = $null, [string]$ExtraArguments = "") {
     $script = Join-Path $RepoRoot "scripts\$ScriptName"
