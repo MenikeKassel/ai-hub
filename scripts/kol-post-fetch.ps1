@@ -45,6 +45,8 @@ try {
     if (-not (Test-Path -LiteralPath $cli)) { throw "Trading CLI not found: $cli" }
 
     $batchKey = "manual:$AsOf`:$Platform`:$((Get-Date).ToString('yyyyMMddHH'))"
+    # Automated collection uses the isolated ai-hub/twitter-reader credential.
+    # Nitter remains an optional fallback and cannot block the primary reader.
     $arguments = @($cli, "kol-post-fetch", "--provider", "auto", "--platform", $Platform, "--backfill", $FetchCount, "--as-of", $AsOf, "--batch-key", $batchKey, "--skip-classify")
     & $python $cli kol-post-db-backup *> $null
     if ($LASTEXITCODE -ne 0) { throw "Unable to back up posts.db before fetch." }

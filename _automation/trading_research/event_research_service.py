@@ -62,6 +62,7 @@ class EventMethodResearchService:
             dict[str, Any],
         ] = {}
         self._cross_section_dates_cache: list[date] | None = None
+        self._cross_section_dates_cache_at: datetime | None = None
 
     @property
     def interpretation_provider(self) -> str:
@@ -139,7 +140,12 @@ class EventMethodResearchService:
         )
 
     def _available_cross_section_dates(self, as_of: str) -> list[date]:
-        if self._cross_section_dates_cache is None:
+        now = datetime.now(SHANGHAI)
+        if (
+            self._cross_section_dates_cache is None
+            or self._cross_section_dates_cache_at is None
+            or (now - self._cross_section_dates_cache_at).total_seconds() > 60
+        ):
             self._cross_section_dates_cache = sorted(
                 {
                     (
@@ -156,6 +162,7 @@ class EventMethodResearchService:
                     )
                 }
             )
+            self._cross_section_dates_cache_at = now
         cutoff = date.fromisoformat(as_of)
         return [
             current
@@ -716,7 +723,11 @@ class EventMethodResearchService:
             }
             items.append(item)
             metadata[event.event_id] = latest
-            if len(items) >= max(1, min(max_items, 5)):
+            if max_items <= 0:
+                # max_items=0 means "process none" (a pause switch), not one.
+                items.pop()
+                break
+            if len(items) >= min(max_items, 5):
                 break
         if not items:
             return {

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from kol_posts import (
     KolPostStore,
     ModelWorkerBusyError,
     NitterCredentialStore,
+    ReaderCredentialStore,
     RapidOcrBatchClassifier,
     RuleClassifier,
     STRUCTURED_REVIEW_VERSION,
@@ -57,7 +59,6 @@ from market_data import FreeStockDBMarketProvider, Instrument, MarketStore
 from market_indicators import INDICATOR_VERSION, compute_daily_indicators
 from freestockdb_runtime import FreeStockDBRuntime
 from kol_intraday import backfill_event_intraday
-from board_mainline import BoardMainlineStore, FallbackBoardProvider, sync_board_snapshot
 from event_dossier import EventDossierService
 from event_research_ai import build_event_research_interpreter
 from event_research_service import EventMethodResearchService
@@ -66,9 +67,11 @@ from review_agent import ReviewAgentRepository, rollback_decision
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
+from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 
 
 ROOT = Path(__file__).resolve().parents[2]
+FOUNDATION_ROOT = Path(os.environ.get("ASHARE_FOUNDATION_ROOT", r"F:\ai-data\ashare"))
 OPERATOR_TASKS = {
     "morning": "KOL_Morning_Pipeline",
     "fetch": "KOL_Post_Fetch_Daily",
@@ -83,7 +86,7 @@ class ApiSettings:
     codex_schema: Path
     xtf_command: Path | None = None
     nitter_url: str = "http://127.0.0.1:9377"
-    freestockdb_root: Path = Path("<AI_HUB_HOME>/stockdb")
+    freestockdb_root: Path = Path(os.environ.get("FREESTOCKDB_ROOT", Path(__file__).resolve().parents[3] / "stockdb"))
     freestockdb_url: str = "http://127.0.0.1:7899"
 
     @classmethod
@@ -95,7 +98,7 @@ class ApiSettings:
             codex_schema=Path(__file__).with_name("kol_classifier_schema.json"),
             xtf_command=ROOT / "_runtime" / "venv-x-fetcher" / "Scripts" / "xtf.exe",
             nitter_url=os.environ.get("KOL_NITTER_URL", "http://127.0.0.1:9377"),
-            freestockdb_root=Path(os.environ.get("FREESTOCKDB_ROOT", "<AI_HUB_HOME>/stockdb")),
+            freestockdb_root=Path(os.environ.get("FREESTOCKDB_ROOT", Path(__file__).resolve().parents[3] / "stockdb")),
             freestockdb_url=os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899"),
         )
 
@@ -114,10 +117,22 @@ class KolPatch(BaseModel):
     domain: str | None = Field(default=None, max_length=300)
     status: str | None = None
     tracking_mode: str | None = Field(default=None, max_length=30)
+    availability_status: str | None = Field(default=None, max_length=30)
+    availability_reason: str | None = Field(default=None, max_length=2000)
 
 
 class KolBackfillRequest(BaseModel):
     count: int = Field(default=200, ge=1)
+
+
+class DiscoveryRunRequest(BaseModel):
+    platform: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    query: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class DiscoveryDecisionRequest(BaseModel):
+    note: str = Field(default="", max_length=2000)
 
 
 class DigestAuthorProfileInput(BaseModel):
@@ -146,6 +161,11 @@ class DeepSeekCredentialRequest(BaseModel):
 
 class PerformanceRefreshRequest(BaseModel):
     as_of: str | None = None
+
+
+class FoundationRefreshRequest(BaseModel):
+    as_of: str = Field(default="auto", pattern=r"^(auto|\d{4}-\d{2}-\d{2})$")
+    notify: bool = True
 
 
 class Draft(BaseModel):
@@ -193,6 +213,18 @@ class RecommendationDraftPatch(BaseModel):
 
 
 class RecommendationDraftAction(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+class RecommendationDraftBulkPreviewRequest(BaseModel):
+    review_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    queue_scope: str = Field(default="morning", pattern="^(morning|backlog)$")
+    status: str = Field(default="ready", pattern="^ready$")
+    limit: int = Field(default=200, ge=1, le=200)
+
+
+class RecommendationDraftBulkApproveRequest(BaseModel):
+    snapshot_token: str = Field(min_length=20, max_length=200)
     note: str = Field(default="", max_length=2000)
 
 
@@ -270,10 +302,6 @@ class MarketSyncRequest(BaseModel):
     symbols: list[str] = Field(default_factory=list)
     start: date | None = None
     end: date | None = None
-
-
-class BoardSyncRequest(BaseModel):
-    as_of: date | None = None
 
 
 class FreeStockDBUpdateRequest(BaseModel):
@@ -362,16 +390,25 @@ def create_app(
     post_store.interrupt_stale_fetch_runs()
     event_store = KolStore(kol_root)
     performance = KolPerformanceService(event_store, post_store=post_store)
-    market_store = MarketStore(config.runtime_root / "market")
+    local_market_store = MarketStore(config.runtime_root / "market")
+    default_runtime = Path(
+        os.environ.get("TRADING_RUNTIME_ROOT", ROOT / "_runtime" / "trading")
+    ).resolve()
+    market_store = (
+        FoundationBackedMarketStore(local_market_store, FOUNDATION_ROOT)
+        if (FOUNDATION_ROOT / "current.json").is_file()
+        and config.runtime_root.resolve() == default_runtime
+        else local_market_store
+    )
     freestockdb_runtime = FreeStockDBRuntime(
         config.freestockdb_root,
         config.freestockdb_url,
         runtime_root=config.runtime_root,
     )
-    board_store = BoardMainlineStore(market_store)
     review_agent = ReviewAgentRepository(post_store)
     recommendation_drafts = RecommendationDraftRepository(post_store)
     credentials = credential_store or KeyringCredentialStore()
+    reader_credentials = ReaderCredentialStore()
     nitter_credentials = nitter_credential_store or NitterCredentialStore()
     deepseek_credentials = deepseek_credential_store or DeepSeekCredentialStore()
     event_research = EventMethodResearchService(
@@ -410,6 +447,55 @@ def create_app(
     rapid_ocr_runner = Path(__file__).with_name("rapid_ocr_batch.py")
     initialize_seed_kols(post_store)
 
+    # The discovery core is mounted into this application.  It shares the
+    # existing posts.db and KOL identity tables, so discovery cannot create a
+    # second universe of accounts or require a second console port.
+    discovery_store = None
+    discovery_service = None
+    discovery_registry = None
+    discovery_scorer = None
+    discovery_error = ""
+    discovery_scorer_error = ""
+    try:
+        from kol_audit.discovery.scoring import CandidateScorer
+        from kol_audit.discovery.service import DiscoveryService
+        from kol_audit.discovery.store import DiscoveryStore
+        from kol_discovery_runtime import build_provider_registry
+
+        capture_root = Path(
+            os.environ.get(
+                "KOL_DISCOVERY_CAPTURE_ROOT",
+                str(config.runtime_root / "kol-discovery" / "captures"),
+            )
+        )
+        discovery_store = DiscoveryStore(kol_root / "posts.db", post_store)
+        discovery_registry = build_provider_registry(
+            capture_root,
+            x_provider=build_x_post_provider(
+                "auto",
+                twitter_credentials=reader_credentials,
+                xtf_command=xtf_command,
+                fallback_mode="shadow",
+            ),
+            zhihu_provider=zhihu_provider,
+        )
+        discovery_service = DiscoveryService(discovery_store, discovery_registry)
+    except Exception as exc:
+        discovery_error = str(exc)
+        logger.warning("Full-platform discovery is unavailable: %s", exc)
+    if discovery_store is not None:
+        try:
+            from kol_audit.discovery.scoring import CandidateScorer
+            from kol_discovery_runtime import OpenCodeGoCandidateScoreProvider
+
+            discovery_scorer = CandidateScorer(
+                discovery_store,
+                OpenCodeGoCandidateScoreProvider(),
+            )
+        except Exception as exc:
+            discovery_scorer_error = str(exc)
+            logger.warning("Discovery AI scoring is unavailable: %s", exc)
+
     app = FastAPI(title="KOL Research Console", version="3.0.0")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
     app.state.settings = config
@@ -418,16 +504,51 @@ def create_app(
     app.state.kol_performance = performance
     app.state.market_store = market_store
     app.state.freestockdb_runtime = freestockdb_runtime
-    app.state.board_store = board_store
     app.state.event_dossier = event_dossier
     app.state.event_research = event_research
     app.state.review_agent = review_agent
     app.state.recommendation_drafts = recommendation_drafts
     app.state.deepseek_credentials = deepseek_credentials
+    app.state.twitter_reader_credentials = reader_credentials
+    collection_runs: dict[str, dict[str, Any]] = {}
+    app.state.discovery_store = discovery_store
+    app.state.discovery_service = discovery_service
+    app.state.discovery_registry = discovery_registry
+    app.state.discovery_scorer = discovery_scorer
+    app.state.discovery_error = discovery_error
+    app.state.discovery_scorer_error = discovery_scorer_error
 
     def safe_market_health() -> dict[str, Any]:
+        # Health must stay responsive while a sync/update process owns the
+        # DuckDB lock.  Do not queue a UI request behind a long market job.
         try:
-            return market_store.health()
+            with market_store.lock(timeout=0.05):
+                pass
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if any(token in lowered for token in ("lock", "timeout", "already open", "cannot open file")):
+                return {
+                    "ok": False,
+                    "status": "degraded",
+                    "market_status": "market_locked",
+                    "daily_data_status": "market_locked",
+                    "market_session_status": "unknown",
+                    "database": str(market_store.db_path),
+                    "lagging_symbols": [],
+                    "lagging_symbol_count": 0,
+                    "error_type": "database_lock",
+                    "error": "market database is busy; retry after the current task completes",
+                }
+        try:
+            value = market_store.health()
+            foundation_reader = FoundationMarketReader(FOUNDATION_ROOT)
+            foundation = foundation_reader.health()
+            if foundation.get("ok"):
+                foundation["coverage"] = foundation_reader.coverage(str(foundation.get("as_of") or ""))
+                foundation["coverage_complete"] = bool(foundation["coverage"].get("complete"))
+            value["foundation"] = foundation
+            return value
         except Exception as exc:
             message = str(exc)
             lowered = message.lower()
@@ -590,28 +711,6 @@ def create_app(
         extract_leads_for_post(post_id)
         return result
 
-    def board_with_related_events(board_code: str, board_type: str | None) -> dict[str, Any]:
-        board = board_store.get_board(board_code, board_type)
-        if board is None:
-            raise HTTPException(404, "board not found")
-        symbols = {str(item["symbol"]) for item in board.get("members", [])}
-        board["related_events"] = [
-            {
-                "event_id": event.event_id,
-                "kol_name": event.kol_name,
-                "platform": event.platform,
-                "posted_at": event.posted_at,
-                "symbol": event.symbol,
-                "security_name": event.security_name,
-                "direction": event.direction,
-                "status": event.status,
-                "source_url": event.source_url,
-            }
-            for event in event_store.load_events()
-            if event.status in {"active", "completed"} and event.symbol in symbols
-        ]
-        return board
-
     def technical_context_for(event: Any) -> dict[str, Any] | None:
         return market_store.get_event_technical_context(
             event.event_id,
@@ -685,6 +784,60 @@ def create_app(
             market_store.enqueue_sync(draft.symbol, reason=f"kol_review:{post_id}")
         return symbols
 
+    def approve_draft_record(draft_id: int, note: str = "") -> tuple[dict[str, Any], Any]:
+        """Apply the same guarded approval path used by the single-item endpoint."""
+        current = recommendation_drafts.get_draft(draft_id)
+        if current["status"] == "approved":
+            return current, None
+        if current["status"] not in {"ready", "needs_attention"}:
+            raise ValueError("recommendation draft is not pending review")
+        hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
+        if hard_blockers:
+            raise ValueError(
+                "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
+            )
+        instrument = market_store.get_instrument(current["symbol"])
+        if instrument is None:
+            raise ValueError("instrument is not available in the market master")
+        event_draft = {
+            "symbol": current["symbol"],
+            "security_name": current["security_name"] or instrument["name"],
+            "direction": current["direction"],
+            "thesis": current["thesis"],
+            "evidence_type": current["evidence_type"],
+            "conditions": current["conditions"],
+        }
+        result = approve_recommendation_draft(
+            post_store,
+            event_store,
+            current["post_id"],
+            event_draft,
+            note=note,
+            audit_detail={"recommendation_draft_id": draft_id},
+        )
+        approved = recommendation_drafts.mark_approved(
+            draft_id,
+            result.event_ids[0],
+            note,
+        )
+        review_agent.mark_overridden_for_post(
+            current["post_id"],
+            "approved",
+            [event_draft],
+        )
+        try:
+            mentioned_at = datetime.fromisoformat(
+                str(current["posted_at"]).replace("Z", "+00:00")
+            ).date()
+        except ValueError:
+            mentioned_at = date.today()
+        market_store.touch_mention(current["symbol"], mentioned_at)
+        market_store.enqueue_sync(
+            current["symbol"],
+            reason=f"recommendation_draft:{draft_id}",
+        )
+        return approved, result
+
     @app.get("/api/summary")
     def summary() -> dict[str, Any]:
         value = post_store.summary()
@@ -708,6 +861,151 @@ def create_app(
     @app.get("/api/kols")
     def list_kols(status: str | None = None) -> list[dict[str, Any]]:
         return post_store.list_kols(status)
+
+    def require_discovery(*, require_scorer: bool = False) -> tuple[Any, Any, Any, Any]:
+        if not all(
+            value is not None
+            for value in (
+                discovery_store,
+                discovery_service,
+                discovery_registry,
+            )
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=f"full-platform discovery unavailable: {discovery_error or 'not configured'}",
+            )
+        if require_scorer and discovery_scorer is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"discovery AI scoring unavailable: {discovery_scorer_error or 'not configured'}",
+            )
+        return discovery_store, discovery_service, discovery_registry, discovery_scorer
+
+    @app.get("/api/discovery/platforms")
+    def discovery_platforms() -> list[dict[str, Any]]:
+        _store, _service, registry, _scorer = require_discovery()
+        return registry.platforms()
+
+    @app.post("/api/discovery/runs", status_code=201)
+    def start_discovery(body: DiscoveryRunRequest) -> dict[str, Any]:
+        _store, service, registry, _scorer = require_discovery()
+        try:
+            platform_info = next(
+                item for item in registry.platforms() if item["platform"] == body.platform
+            )
+            health = platform_info.get("health") or {}
+            if not platform_info.get("available"):
+                status = str(health.get("status") or "untested")
+                reason = str(health.get("reason") or health.get("mode") or "provider is not ready")
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{body.platform} discovery is {status}: {reason}",
+                )
+            return service.run(body.platform, body.query, limit=body.limit)
+        except KeyError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/discovery/runs/{run_id}")
+    def discovery_run(run_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/discovery/candidates")
+    def discovery_candidates(
+        state: str | None = None,
+        platform: str | None = None,
+        query: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        store, _service, _registry, _scorer = require_discovery()
+        return store.list_candidates(
+            state=state,
+            platform=platform,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/discovery/candidates/{candidate_id}")
+    def discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_candidate(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/score")
+    def score_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        _store, _service, _registry, scorer = require_discovery(require_scorer=True)
+        try:
+            return scorer.score(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/accept")
+    def accept_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.accept(candidate_id, note=body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/reject")
+    def reject_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.reject(candidate_id, body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/retry")
+    def retry_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.retry(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/discovery/kols/{kol_id}/profile")
+    def discovery_kol_profile(kol_id: int) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        kol = post_store.get_kol(kol_id)
+        if kol is None:
+            raise HTTPException(404, "KOL not found")
+        return {"kol": kol, "history": store.profile_history(kol_id)}
+
+    @app.post("/api/discovery/kols/{kol_id}/fetch", status_code=202)
+    def discovery_kol_fetch(kol_id: int, body: KolBackfillRequest) -> dict[str, Any]:
+        require_discovery()
+        try:
+            return post_store.queue_backfill(kol_id, body.count)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/digest-authors")
     def digest_authors(limit: int = Query(default=200, ge=1, le=500)) -> list[dict[str, Any]]:
@@ -751,6 +1049,10 @@ def create_app(
                 "rank_horizon": item["rank_horizon"],
                 "score": None,
                 "event_count": item["horizons"]["1W"]["event_count"],
+                "long_event_count": item["horizons"]["1W"]["long_event_count"],
+                "short_event_count": item["horizons"]["1W"]["short_event_count"],
+                "executable_long_event_count": item["horizons"]["1W"]["executable_long_event_count"],
+                "audit_event_count": item["horizons"]["1W"]["audit_event_count"],
                 "executable_event_count": item["horizons"]["1W"]["event_count"],
                 "horizons": horizons,
             })
@@ -761,6 +1063,7 @@ def create_app(
                 "score": None,
                 "direction_policy": "short events are retained for audit but excluded from A-share return statistics",
                 "sample_policy": "small long-only samples are shown but never formally ranked",
+                "counting_policy": "long_event_count counts the long events in the return sample; short_event_count counts excluded short events (audit only, independent of window/horizon); executable_long_event_count counts long events free of primary execution warnings; audit_event_count = long_event_count + short_event_count",
             },
             "as_of": result["as_of"],
             "rows": rows,
@@ -859,7 +1162,20 @@ def create_app(
     @app.patch("/api/kols/{kol_id}")
     def patch_kol(kol_id: int, body: KolPatch) -> dict[str, Any]:
         try:
-            return post_store.update_kol(kol_id, body.model_dump(exclude_none=True))
+            values = body.model_dump(exclude_none=True)
+            availability = values.pop("availability_status", None)
+            reason = values.pop("availability_reason", "")
+            result = post_store.update_kol(kol_id, values) if values else post_store.get_kol(kol_id)
+            if result is None:
+                raise KeyError(f"KOL not found: {kol_id}")
+            if availability is not None:
+                result = post_store.set_account_availability(
+                    kol_id,
+                    availability,
+                    reason=reason,
+                    source="manual_ui",
+                )
+            return result
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -987,6 +1303,86 @@ def create_app(
             "approved_drafts": [sanitize_recommendation_draft(item) for item in approved_drafts],
         }
 
+    @app.post("/api/recommendation-drafts/bulk-preview")
+    def bulk_preview_recommendation_drafts(
+        body: RecommendationDraftBulkPreviewRequest,
+    ) -> dict[str, Any]:
+        try:
+            return {
+                **recommendation_drafts.create_bulk_snapshot(
+                    review_date=body.review_date,
+                    queue_scope=body.queue_scope,
+                    status_filter=body.status,
+                    limit=body.limit,
+                ),
+                "ok": True,
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/recommendation-drafts/bulk-approve")
+    def bulk_approve_recommendation_drafts(
+        body: RecommendationDraftBulkApproveRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        try:
+            snapshot = recommendation_drafts.consume_bulk_snapshot(body.snapshot_token)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        approved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        symbols: set[str] = set()
+        event_ids: list[str] = []
+        for raw_id in snapshot["draft_ids"]:
+            draft_id = int(raw_id)
+            try:
+                current = recommendation_drafts.get_draft(draft_id)
+                if current["status"] != "ready" or current.get("attention_reasons"):
+                    skipped.append({
+                        "draft_id": draft_id,
+                        "reason": "changed_since_preview",
+                        "status": current["status"],
+                        "attention_reasons": current.get("attention_reasons", []),
+                    })
+                    continue
+                result, approval = approve_draft_record(draft_id, body.note)
+                symbols.add(str(result["symbol"]))
+                if approval is not None:
+                    event_ids.extend(approval.event_ids)
+                approved.append({
+                    "draft_id": draft_id,
+                    "event_id": result.get("event_id") or (approval.event_ids[0] if approval else ""),
+                    "status": result["status"],
+                    "symbol": result["symbol"],
+                })
+            except KeyError as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)})
+            except Exception as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)[:1000]})
+        if symbols:
+            background_tasks.add_task(
+                run_post_approval_refresh,
+                config.runtime_root,
+                ROOT,
+                sorted(symbols),
+                as_of=date.today(),
+            )
+        if event_ids:
+            background_tasks.add_task(
+                lambda ids=sorted(set(event_ids)): [event_dossier.refresh(event_id) for event_id in ids]
+            )
+        return {
+            "ok": not failed,
+            "snapshot_consumed": True,
+            "processed": len(approved) + len(skipped) + len(failed),
+            "approved": approved,
+            "skipped": skipped,
+            "failed": failed,
+            "queued_symbols": sorted(symbols),
+            "refresh_status": "queued" if symbols else "not_needed",
+        }
+
     @app.get("/api/recommendation-drafts/{draft_id}")
     def get_recommendation_draft(draft_id: int) -> dict[str, Any]:
         try:
@@ -1053,60 +1449,14 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             current = recommendation_drafts.get_draft(draft_id)
-            if current["status"] == "approved":
-                return sanitize_recommendation_draft(current)
-            if current["status"] not in {"ready", "needs_attention"}:
-                raise ValueError("recommendation draft is not pending review")
-            hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
-            if hard_blockers:
-                raise ValueError(
-                    "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
-                )
-            instrument = market_store.get_instrument(current["symbol"])
-            if instrument is None:
-                raise ValueError("instrument is not available in the market master")
-            event_draft = {
-                "symbol": current["symbol"],
-                "security_name": current["security_name"] or instrument["name"],
-                "direction": current["direction"],
-                "thesis": current["thesis"],
-                "evidence_type": current["evidence_type"],
-                "conditions": current["conditions"],
-            }
-            result = approve_recommendation_draft(
-                post_store,
-                event_store,
-                current["post_id"],
-                event_draft,
-                note=body.note,
-                audit_detail={"recommendation_draft_id": draft_id},
-            )
-            approved = recommendation_drafts.mark_approved(
-                draft_id,
-                result.event_ids[0],
-                body.note,
-            )
-            review_agent.mark_overridden_for_post(
-                current["post_id"],
-                "approved",
-                [event_draft],
-            )
-            try:
-                mentioned_at = datetime.fromisoformat(
-                    str(current["posted_at"]).replace("Z", "+00:00")
-                ).date()
-            except ValueError:
-                mentioned_at = date.today()
-            market_store.touch_mention(current["symbol"], mentioned_at)
-            market_store.enqueue_sync(
-                current["symbol"],
-                reason=f"recommendation_draft:{draft_id}",
-            )
+            approved, result = approve_draft_record(draft_id, body.note)
+            if result is None:
+                return sanitize_recommendation_draft(approved)
             background_tasks.add_task(
                 run_post_approval_refresh,
                 config.runtime_root,
                 ROOT,
-                [current["symbol"]],
+                [approved["symbol"]],
                 as_of=date.today(),
             )
             background_tasks.add_task(event_dossier.refresh, result.event_ids[0])
@@ -1286,11 +1636,15 @@ def create_app(
     @app.post("/api/fetch")
     def fetch_posts(body: FetchRequest) -> dict[str, Any]:
         fallback_mode = _fallback_mode(config.runtime_root)
-        if body.provider == "nitter" and fallback_mode != "enabled":
-            raise HTTPException(409, "Nitter is shadow-only until the rollout gate passes")
+        if body.provider == "nitter":
+            if fallback_mode != "enabled":
+                raise HTTPException(409, "Nitter is shadow-only/optional and not enabled for direct collection")
+            fallback_mode = "disabled"
+        elif fallback_mode in {"shadow", "enabled"} and not timeline_health(config.nitter_url).get("ready"):
+            fallback_mode = "disabled"
         provider = build_x_post_provider(
             body.provider,
-            twitter_credentials=credentials,
+            twitter_credentials=reader_credentials,
             xtf_command=str(xtf_command),
             nitter_url=config.nitter_url,
             fallback_mode=fallback_mode,
@@ -1324,6 +1678,130 @@ def create_app(
             "codex_failed": failed,
             "stock_leads": lead_result,
         }
+
+    @app.get("/api/collection/coverage")
+    def collection_coverage(
+        platform: str = Query(default="", pattern="^(|X|Zhihu)$"),
+        window_start: str = "",
+        window_end: str = "",
+    ) -> dict[str, Any]:
+        if platform:
+            return post_store.collection_coverage(
+                platform=platform,
+                window_start=window_start,
+                window_end=window_end,
+            )
+        return {
+            "platform": "all",
+            "items": [
+                post_store.collection_coverage(
+                    platform=value,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                for value in ("X", "Zhihu")
+            ],
+        }
+
+    @app.post("/api/collection/recovery/preview")
+    def collection_recovery_preview() -> dict[str, Any]:
+        start = (date.today() - timedelta(days=7)).isoformat()
+        end = date.today().isoformat()
+        return {
+            "ok": True,
+            "scope": "recent",
+            "window_start": start,
+            "window_end": end,
+            "coverage": [
+                post_store.collection_coverage(platform=value, window_start=start, window_end=end)
+                for value in ("X", "Zhihu")
+            ],
+            "reader_configured": reader_credentials.configured(),
+            "ai_is_optional": True,
+        }
+
+    @app.post("/api/collection/recovery/start", status_code=202)
+    def collection_recovery_start() -> dict[str, Any]:
+        if not reader_credentials.configured():
+            raise HTTPException(409, "twitter-reader credentials are not configured")
+        for existing in collection_runs.values():
+            if existing.get("status") != "running":
+                continue
+            try:
+                process = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {existing['pid']}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if str(existing["pid"]) in (process.stdout or ""):
+                    raise HTTPException(409, "a collection recovery run is already active")
+            except HTTPException:
+                raise
+            except Exception:
+                existing["status"] = "completed"
+                existing["completed_at"] = now_iso()
+        run_id = uuid.uuid4().hex
+        cli = ROOT / "_automation" / "trading_research" / "trading_cli.py"
+        log_dir = config.runtime_root / "kol" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"collection-recovery-{run_id}.log"
+        handle = log_path.open("w", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(cli), "kol-gap-recover", "--scope", "recent", "--resume"],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            )
+        finally:
+            handle.close()
+        collection_runs[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "pid": process.pid,
+            "log": str(log_path),
+            "started_at": now_iso(),
+        }
+        return collection_runs[run_id]
+
+    @app.get("/api/collection/recovery/{run_id}")
+    def collection_recovery_status(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        try:
+            process = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {item['pid']}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            alive = str(item["pid"]) in (process.stdout or "")
+        except Exception:
+            alive = False
+        if not alive and item["status"] == "running":
+            item["status"] = "completed"
+            item["completed_at"] = now_iso()
+        item["coverage"] = {
+            "X": post_store.collection_coverage(platform="X"),
+            "Zhihu": post_store.collection_coverage(platform="Zhihu"),
+        }
+        return item
+
+    @app.post("/api/collection/recovery/{run_id}/cancel")
+    def collection_recovery_cancel(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        subprocess.run(["taskkill", "/PID", str(item["pid"]), "/T", "/F"], capture_output=True, check=False)
+        item["status"] = "cancelled"
+        item["completed_at"] = now_iso()
+        return item
 
     @app.post("/api/stock-leads/extract")
     def extract_stock_lead_queue() -> dict[str, Any]:
@@ -1481,6 +1959,76 @@ def create_app(
                 raise HTTPException(404, str(exc)) from exc
         return {"ok": True, "queued_symbols": queued}
 
+    def run_foundation_refresh_job(as_of: str, notify: bool, state_path: Path) -> None:
+        command = [
+            sys.executable,
+            str(ROOT / "_automation" / "trading_research" / "trading_cli.py"),
+            "kol-data-refresh",
+            "--as-of",
+            as_of,
+        ]
+        if notify:
+            command.append("--notify")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1800,
+                check=False,
+            )
+            output = (completed.stdout or completed.stderr or "").strip()
+            state = {
+                "status": "completed" if completed.returncode == 0 else "degraded",
+                "returncode": completed.returncode,
+                "output_tail": output[-4000:],
+                "finished_at": now_iso(),
+            }
+        except subprocess.TimeoutExpired:
+            state = {
+                "status": "degraded",
+                "returncode": -1,
+                "output_tail": "shared foundation refresh timed out after 1800 seconds",
+                "finished_at": now_iso(),
+            }
+        temporary = state_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, state_path)
+
+    @app.post("/api/market/foundation-refresh", status_code=202)
+    def refresh_foundation(
+        body: FoundationRefreshRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            current = {}
+        if current.get("status") == "running":
+            return {"ok": True, "status": "already_running", "state": current}
+        state_path.write_text(
+            json.dumps(
+                {"status": "running", "as_of": body.as_of, "started_at": now_iso()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        background_tasks.add_task(run_foundation_refresh_job, body.as_of, body.notify, state_path)
+        return {"ok": True, "status": "triggered", "as_of": body.as_of}
+
+    @app.get("/api/market/foundation-refresh")
+    def foundation_refresh_status() -> dict[str, Any]:
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {"status": "idle"}
+
     @app.get("/api/market/health")
     def market_health() -> dict[str, Any]:
         return {
@@ -1592,86 +2140,6 @@ def create_app(
             "row_count": len(rows),
             "rows": rows,
         }
-
-    @app.get("/api/board-mainline/health")
-    def board_mainline_health() -> dict[str, Any]:
-        return board_store.health()
-
-    @app.get("/api/board-mainline")
-    def list_board_mainline(
-        board_type: str = Query(default="industry", pattern="^(industry|concept)$"),
-        status: str = "",
-        q: str = "",
-        as_of: date | None = None,
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=100, ge=1, le=200),
-        sort_by: str = Query(
-            default="rps_50",
-            pattern="^(rps_50|rps_120|rps_250|breadth|turnover_ratio_20|board_name)$",
-        ),
-        descending: bool = True,
-    ) -> dict[str, Any]:
-        return board_store.list_mainline(
-            board_type=board_type,
-            status=status,
-            query=q,
-            as_of=as_of,
-            page=page,
-            page_size=page_size,
-            sort_by=sort_by,
-            descending=descending,
-        )
-
-    @app.get("/api/board-mainline/{board_code}/series")
-    def board_mainline_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        limit: int = Query(default=320, ge=1, le=1000),
-    ) -> list[dict[str, Any]]:
-        if board_store.get_board(board_code, board_type) is None:
-            raise HTTPException(404, "board not found")
-        return board_store.series(board_code, board_type=board_type, limit=limit)
-
-    @app.get("/api/board-mainline/{board_code}/rank-series")
-    def board_rank_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        window: int = Query(default=50, ge=1, le=250),
-        range_name: str = Query(default="120", alias="range", pattern="^(all|120|250)$"),
-    ) -> dict[str, Any]:
-        try:
-            return board_store.rank_series(
-                board_code,
-                board_type=board_type,
-                window=window,
-                range_name=range_name,
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.get("/api/board-mainline/{board_code}")
-    def board_mainline_detail(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-    ) -> dict[str, Any]:
-        return board_with_related_events(board_code, board_type)
-
-    def run_board_sync_job(as_of: date) -> None:
-        store = BoardMainlineStore(MarketStore(config.runtime_root / "market"))
-        result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-        if result.succeeded:
-            store.compute_rps(as_of=as_of, formula_version="board-rps-v2")
-
-    @app.post("/api/board-mainline/sync", status_code=202)
-    def sync_board_mainline(
-        body: BoardSyncRequest,
-        background_tasks: BackgroundTasks,
-    ) -> dict[str, Any]:
-        if board_store.health()["latest_run"] and board_store.health()["latest_run"]["status"] == "running":
-            return {"ok": True, "status": "already_running"}
-        as_of = body.as_of or date.today()
-        background_tasks.add_task(run_board_sync_job, as_of)
-        return {"ok": True, "status": "queued", "as_of": as_of.isoformat()}
 
     @app.get("/api/events")
     def list_events() -> list[dict[str, Any]]:
@@ -2246,11 +2714,22 @@ def create_app(
         review_summary = review_agent.summary()
         market_component = safe_market_health()
         freestock_component = safe_freestockdb_health()
+        discovery_platforms_value: list[dict[str, Any]] = []
+        discovery_runtime_error = ""
+        if discovery_registry is not None:
+            try:
+                discovery_platforms_value = discovery_registry.platforms()
+            except Exception as exc:
+                discovery_runtime_error = str(exc)
+                logger.warning("Discovery health degraded: %s", exc)
+        discovery_available = discovery_registry is not None
+        discovery_scoring_available = discovery_scorer is not None
         return {
             "ok": True,
             "date": date.today().isoformat(),
             "twitter_cli": shutil.which("twitter") or "",
             "twitter_credentials_configured": credentials.configured(),
+            "twitter_reader_credentials_configured": reader_credentials.configured(),
             "twitter_auth_status": recent_runs[0].get("auth_status", "unknown") if recent_runs else "never",
             "zhihu_capture_available": zhihu_provider.script_path.is_file(),
             "zhihu_active_kols": len(active_zhihu),
@@ -2299,6 +2778,14 @@ def create_app(
             "morning_runs": recommendation_drafts.recent_morning_runs(5),
             "digest_task": _task_status("Research_Data_Digest_Daily"),
             "review_agent": review_summary,
+            "discovery": {
+                "available": discovery_available,
+                "scoring_available": discovery_scoring_available,
+                "platforms": discovery_platforms_value,
+                "error": discovery_error,
+                "runtime_error": discovery_runtime_error,
+                "scoring_error": discovery_scorer_error,
+            },
             "market": market_component,
             "freestockdb": freestock_component,
             "component_status": {
@@ -2335,6 +2822,11 @@ def create_app(
                         "unknown",
                     ),
                     "ok": bool(freestock_component.get("ok")),
+                },
+                "discovery": {
+                    "status": "ready" if discovery_available else "unavailable",
+                    "platform_count": len(discovery_platforms_value),
+                    "scoring_status": "ready" if discovery_scoring_available else "degraded",
                 },
             },
             "pipeline_refresh": read_refresh_state(config.runtime_root),
@@ -2420,6 +2912,17 @@ def create_app(
         except CredentialStorageError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"ok": True, "configured": True}
+
+    @app.post("/api/system/twitter-reader/promote-nitter")
+    def promote_nitter_reader() -> dict[str, bool]:
+        try:
+            auth_token, ct0 = nitter_credentials.load_values()
+            reader_credentials.save(auth_token, ct0)
+        except CredentialStorageError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="Nitter reader credentials are not configured") from exc
+        return {"ok": True, "configured": reader_credentials.configured()}
 
     @app.post("/api/system/opencode-go-credentials")
     @app.post("/api/system/deepseek-credentials")

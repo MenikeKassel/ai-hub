@@ -1,5 +1,5 @@
 import type {
-  BoardMainlineDetail, BoardMainlineHealth, BoardMainlinePage, BoardRankSeries, BoardSeriesBar, BoardType, Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
+  BulkApprovalPreview, BulkApprovalResult, Checkpoint, CollectionCoverageResponse, CollectionRecoveryPreview, CollectionRecoveryRun, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -74,6 +74,16 @@ export const api = {
   retryRecommendationDraft: (id: number) =>
     request<{ ok: boolean; drafts: RecommendationDraft[] }>(`/api/recommendation-drafts/${id}/retry`, { method: 'POST' }),
   recommendationDraftRevisions: (id: number) => request<DraftRevision[]>(`/api/recommendation-drafts/${id}/revisions`),
+  bulkPreviewRecommendationDrafts: (reviewDate: string, queueScope: 'morning' | 'backlog' = 'morning') =>
+    request<BulkApprovalPreview>('/api/recommendation-drafts/bulk-preview', {
+      method: 'POST',
+      body: JSON.stringify({ review_date: reviewDate, queue_scope: queueScope, status: 'ready', limit: 200 }),
+    }),
+  bulkApproveRecommendationDrafts: (snapshotToken: string, note = '') =>
+    request<BulkApprovalResult>('/api/recommendation-drafts/bulk-approve', {
+      method: 'POST',
+      body: JSON.stringify({ snapshot_token: snapshotToken, note }),
+    }),
   createManualRecommendationDraft: (postId: string, value: ManualRecommendationDraft) =>
     request<RecommendationDraft>(`/api/posts/${postId}/recommendation-drafts`, {
       method: 'POST', body: JSON.stringify(value),
@@ -93,6 +103,10 @@ export const api = {
       method: 'POST', body: JSON.stringify({ symbols }),
     }),
   marketHealth: () => request<MarketHealth>('/api/market/health'),
+  foundationRefresh: (asOf = 'auto', notify = true) => request<{ ok: boolean; status: string; as_of?: string }>('/api/market/foundation-refresh', {
+    method: 'POST', body: JSON.stringify({ as_of: asOf, notify }),
+  }),
+  foundationRefreshStatus: () => request<FoundationRefreshState>('/api/market/foundation-refresh'),
   freestockdbHealth: () => request<FreeStockDBHealth>('/api/market/providers/freestockdb'),
   updateFreeStockDB: (dryRun = false) => request<{ ok: boolean; status: string; dry_run: boolean }>('/api/market/providers/freestockdb/update', {
     method: 'POST', body: JSON.stringify({ dry_run: dryRun }),
@@ -110,19 +124,6 @@ export const api = {
     const query = params.toString()
     return request<MarketIndicatorSeries>(`/api/market/daily/${symbol}/indicators${query ? `?${query}` : ''}`)
   },
-  boardHealth: () => request<BoardMainlineHealth>('/api/board-mainline/health'),
-  boardMainline: (params: URLSearchParams) =>
-    request<BoardMainlinePage>(`/api/board-mainline?${params}`),
-  boardDetail: (code: string, boardType: BoardType) =>
-    request<BoardMainlineDetail>(`/api/board-mainline/${code}?board_type=${boardType}`),
-  boardSeries: (code: string, boardType: BoardType) =>
-    request<BoardSeriesBar[]>(`/api/board-mainline/${code}/series?board_type=${boardType}&limit=320`),
-  boardRankSeries: (code: string, boardType: BoardType, window: 50 | 120 | 250, range = '120') =>
-    request<BoardRankSeries>(`/api/board-mainline/${code}/rank-series?board_type=${boardType}&window=${window}&range=${range}`),
-  syncBoards: () =>
-    request<{ ok: boolean; status: string; as_of?: string }>('/api/board-mainline/sync', {
-      method: 'POST', body: JSON.stringify({}),
-    }),
   events: () => request<Event[]>('/api/events'),
   patchEvent: (id: string, value: EventUpdate) =>
     request<Event>(`/api/events/${id}`, { method: 'PATCH', body: JSON.stringify(value) }),
@@ -153,6 +154,10 @@ export const api = {
   pipelineStatus: () => request<PipelineStatus>('/api/pipeline/status'),
   fetchRuns: () => request<FetchRun[]>('/api/fetch-runs'),
   tasks: () => request<OperatorTasks>('/api/tasks'),
+  collectionCoverage: () => request<CollectionCoverageResponse>('/api/collection/coverage'),
+  collectionRecoveryPreview: () => request<CollectionRecoveryPreview>('/api/collection/recovery/preview', { method: 'POST' }),
+  startCollectionRecovery: () => request<CollectionRecoveryRun>('/api/collection/recovery/start', { method: 'POST' }),
+  collectionRecoveryStatus: (runId: string) => request<CollectionRecoveryRun>(`/api/collection/recovery/${encodeURIComponent(runId)}`),
   startTask: (task: 'morning' | 'fetch' | 'zhihu') =>
     request<{ ok: boolean; task: string; started_at: string }>(`/api/tasks/${task}/start`, { method: 'POST' }),
   saveCredentials: (authToken: string, ct0: string) =>
