@@ -24,16 +24,37 @@ from market_data import (
 )
 
 
-DEFAULT_ROOT = Path(os.environ.get("FREESTOCKDB_ROOT", "<AI_HUB_HOME>/stockdb"))
-DEFAULT_DATA_ROOT = Path(os.environ.get("FREESTOCKDB_DATA_ROOT", "<MARKET_DATA_HOME>/free-stockdb"))
+_FILE = Path(__file__).resolve()
+_REPO_ROOT = _FILE.parents[2]
+_WORKSPACE_ROOT = _FILE.parents[3]
+
+def _infer_data_root(root: Path) -> Path:
+    """Prefer the resolved stockdb/data junction over a stale E: live folder."""
+    linked_data = root / "data"
+    try:
+        resolved = linked_data.resolve(strict=False)
+        if linked_data.exists() and resolved != linked_data:
+            # The compatibility junction may target the canonical ``live``
+            # directory itself; the runtime root is its parent so Paths.from_root
+            # can consistently derive live/staging/previous siblings.
+            return resolved.parent if resolved.name.casefold() == "live" else resolved
+    except OSError:
+        pass
+    return root / "live"
+
+
+DEFAULT_ROOT = Path(os.environ.get("FREESTOCKDB_ROOT", _WORKSPACE_ROOT / "stockdb"))
+DEFAULT_DATA_ROOT = Path(
+    os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(DEFAULT_ROOT))
+)
 DEFAULT_URL = os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899")
 DEFAULT_RUNTIME_ROOT = Path(
     os.environ.get("TRADING_RUNTIME_ROOT", Path(__file__).resolve().parents[2] / "_runtime" / "trading")
 )
 MIN_FREE_BYTES = 5 * 1024 * 1024 * 1024
 EXPECTED_RELEASE = "v0.2.1"
-EXPECTED_SERVER_SHA256 = "2593ec13db2d783a55288def24edfcf5fc4c5c21b58bc66d88a5629ea4d00d4a"
-EXPECTED_UPDATER_SHA256 = "138b897e664df3ff31de2fd9a1d39a29b80339bba1bc6ae8fdf751fe63d887e6"
+EXPECTED_SERVER_SHA256 = "ccd847e9221f57eafc4c1c995ed52b2e9e0d3172bfe5ee8ebce5251b9f4ea0bb"
+EXPECTED_UPDATER_SHA256 = "011ef6c6b620126db7e1cc8d5fc9214da13faf4cc66ef4da0484987d7ad48b1a"
 MAX_CLOSE_WAIT = 20
 MIN_CATALOG_SYMBOLS = 5_000
 
@@ -125,13 +146,24 @@ class FreeStockDBRuntime:
         server_sha256: str = EXPECTED_SERVER_SHA256,
         updater_sha256: str = EXPECTED_UPDATER_SHA256,
     ) -> None:
-        resolved_root = Path(root or DEFAULT_ROOT).expanduser()
+        resolved_root = Path(root or os.environ.get("FREESTOCKDB_ROOT", DEFAULT_ROOT)).expanduser()
         if data_root is not None:
             resolved_data_root = Path(data_root).expanduser()
-        elif root is None or resolved_root.resolve() == DEFAULT_ROOT.resolve():
-            resolved_data_root = DEFAULT_DATA_ROOT.expanduser()
+        elif root is None:
+            resolved_data_root = Path(
+                os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(resolved_root))
+            ).expanduser()
+        elif resolved_root.resolve() == DEFAULT_ROOT.resolve():
+            resolved_data_root = Path(
+                os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(resolved_root))
+            ).expanduser()
         else:
             resolved_data_root = resolved_root
+        inferred_data_root = _infer_data_root(resolved_root)
+        self.configuration_conflict = (
+            str(resolved_data_root.resolve()) != str(inferred_data_root.resolve())
+            and bool(data_root or os.environ.get("FREESTOCKDB_DATA_ROOT"))
+        )
         self.paths = FreeStockDBPaths.from_root(
             resolved_root,
             Path(runtime_root or DEFAULT_RUNTIME_ROOT).expanduser(),
@@ -472,6 +504,22 @@ class FreeStockDBRuntime:
 
         current = as_of or datetime.now().astimezone()
         cutoff = current.date() - timedelta(days=1) if current.hour < 15 else current.date()
+        foundation_root = Path(
+            os.environ.get("ASHARE_DATA_ROOT", r"F:\ai-data\ashare")
+        ).expanduser()
+        pointer = foundation_root / "current.json"
+        if pointer.is_file():
+            try:
+                release = json.loads(pointer.read_text(encoding="utf-8"))
+                value = date.fromisoformat(str(release.get("as_of")))
+                if value <= cutoff:
+                    return {
+                        "date": value,
+                        "source": "ashare_foundation_current",
+                        "release_id": str(release.get("release_id") or ""),
+                    }
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
         database = self.paths.state.parent / "market.duckdb"
         if database.is_file():
             try:
@@ -784,6 +832,8 @@ class FreeStockDBRuntime:
             "source": source_url,
             "data": str(self.paths.data),
             "storage_root": str(self.paths.storage_root),
+            "configuration_conflict": self.configuration_conflict,
+            "inferred_data_root": str(_infer_data_root(self.paths.root)),
             "live": str(self.paths.live),
             "staging": str(self.paths.staging),
             "previous": str(self.paths.previous),
@@ -1328,18 +1378,32 @@ class FreeStockDBRuntime:
                 self._start_service()
                 restarted = True
         result_health = self.doctor(include_samples=True) if restarted else health
+        provider_details = result_health.get("provider") or {}
+        service_ready = bool(
+            result_health.get("service_ok", result_health.get("ok"))
+            and not result_health.get("connection_leak")
+            and not provider_details.get("sample_errors")
+        )
+        data_fresh = bool(result_health.get("data_fresh", result_health.get("ok")))
         result = {
-            "ok": bool(result_health.get("ok")),
+            # Repair is a service operation.  A stale vendor dataset is an
+            # update concern and must not make a healthy HTTP service look
+            # unrepairable.
+            "ok": service_ready,
+            "service_ready": service_ready,
+            "data_fresh": data_fresh,
             "status": (
                 "repaired"
-                if restarted and result_health.get("ok")
+                if restarted and service_ready and data_fresh
+                else "repaired_stale"
+                if restarted and service_ready
                 else "restart_failed"
                 if restarted
                 else "waiting_for_second_failure"
                 if not should_restart
                 else "unhealthy"
             ),
-            "repair_failures": 0 if result_health.get("ok") else failures,
+            "repair_failures": 0 if service_ready else failures,
             "restarted": restarted,
             "migration": migration,
             "recovery": recovery,

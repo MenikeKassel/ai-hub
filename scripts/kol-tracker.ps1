@@ -15,6 +15,14 @@ if (-not $RepoRoot) {
 $runtime = Join-Path $RepoRoot "_runtime\trading"
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
+$workspaceRoot = Split-Path -Parent $RepoRoot
+$env:FREESTOCKDB_ROOT = Join-Path $workspaceRoot "stockdb"
+$env:FREESTOCKDB_DATA_ROOT = "<MARKET_DATA_HOME>\free-stockdb"
+$env:PYTHONPATH = ""
+Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue
+Remove-Item Env:PYTHONUSERBASE -ErrorAction SilentlyContinue
 $logDirectory = Join-Path $runtime "kol\logs"
 $logPath = Join-Path $logDirectory "kol-tracker.log"
 $mutex = New-Object System.Threading.Mutex($false, "Local\KOLReturnTrackerDaily")

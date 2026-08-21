@@ -1,0 +1,13 @@
+# Locked dependency versions (generated 2026-08-06 from local venv-trading).
+# Install with: pip install -r requirements.lock
+# Top-level declarations live in requirements.txt for readability.
+akshare==1.18.64
+baostock==0.9.3
+duckdb==1.5.4
+fastapi==0.139.0
+filelock==3.29.7
+httpx==0.28.1
+keyring==25.7.0
+pandas==3.0.3
+pyarrow==25.0.0
+uvicorn==0.51.0

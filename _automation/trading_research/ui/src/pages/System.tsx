@@ -30,6 +30,14 @@ export default function System() {
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
   const runs = useQuery({ queryKey: ['fetch-runs'], queryFn: api.fetchRuns, refetchInterval: 10_000 })
   const tasks = useQuery({ queryKey: ['operator-tasks'], queryFn: api.tasks, refetchInterval: 5_000 })
+  const recoveryPreview = useQuery({ queryKey: ['collection-recovery-preview'], queryFn: api.collectionRecoveryPreview, refetchInterval: 30_000 })
+  const [recoveryRunId, setRecoveryRunId] = useState('')
+  const recoveryStatus = useQuery({
+    queryKey: ['collection-recovery', recoveryRunId],
+    queryFn: () => api.collectionRecoveryStatus(recoveryRunId),
+    enabled: Boolean(recoveryRunId),
+    refetchInterval: 5_000,
+  })
   const [primary, setPrimary] = useState<CredentialValues>({ auth: '', ct0: '' })
   const [backup, setBackup] = useState<CredentialValues>({ auth: '', ct0: '' })
   const [deepseekKey, setDeepseekKey] = useState('')
@@ -63,11 +71,20 @@ export default function System() {
       client.invalidateQueries({ queryKey: ['pipeline-status'] })
     },
   })
+  const startRecovery = useMutation({
+    mutationFn: api.startCollectionRecovery,
+    onSuccess: (value) => {
+      setRecoveryRunId(value.run_id)
+      client.invalidateQueries({ queryKey: ['collection-recovery-preview'] })
+      client.invalidateQueries({ queryKey: ['fetch-runs'] })
+    },
+  })
   const h = health.data
   const fetchRunning = tasks.data?.fetch?.status === 'running'
   const morningRunning = tasks.data?.morning?.status === 'running'
   const pipelineBusy = startTask.isPending || fetchRunning || morningRunning
-  const error = health.error || savePrimary.error || saveBackup.error || saveDeepSeek.error || startTask.error
+  const error = health.error || savePrimary.error || saveBackup.error || saveDeepSeek.error || startTask.error || recoveryPreview.error || startRecovery.error
+  const recoveryBusy = startRecovery.isPending || recoveryStatus.data?.status === 'running'
 
   return <section>
     <header className="page-header">
@@ -103,10 +120,18 @@ export default function System() {
         running={fetchRunning}
       />
     </div>
+    <div className="panel task-console">
+      <div className="panel-heading"><div><h2>采集恢复</h2><span>先补最近 7 天；AI 503 不会阻塞帖子保存</span></div><button className="secondary-button" disabled={recoveryBusy || !recoveryPreview.data?.reader_configured} onClick={() => startRecovery.mutate()}><RefreshCw className={recoveryBusy ? 'spin' : ''} size={16} />{recoveryBusy ? '恢复运行中' : '补齐最近 7 天'}</button></div>
+      <div className="recovery-status-grid">
+        {(recoveryPreview.data?.coverage || []).map((item) => <div key={item.platform}><span>{item.platform}</span><strong>{item.successful}/{item.target} 个账号</strong><small>覆盖率 {(item.coverage * 100).toFixed(0)}% · {item.window_start} 至 {item.window_end}</small></div>)}
+      </div>
+      {recoveryStatus.data && <div className="scope-note"><RefreshCw size={15} />恢复批次 {recoveryStatus.data.status} · 启动于 {formatDate(recoveryStatus.data.started_at)}{recoveryStatus.data.completed_at ? ` · 完成于 ${formatDate(recoveryStatus.data.completed_at)}` : ''}</div>}
+      {!recoveryPreview.data?.reader_configured && <div className="scope-note"><AlertTriangle size={15} />Reader 凭据尚未配置；请先运行 `kol-reader-migrate`，不会读取主账号凭据。</div>}
+    </div>
     <div className="health-grid">
       <HealthItem icon={Terminal} label="Hermes gateway" ok={h?.component_status?.hermes_gateway.status === 'running'} value={`${h?.component_status?.hermes_gateway.status || 'unknown'}${h?.component_status?.hermes_gateway.pid ? ` / PID ${h.component_status.hermes_gateway.pid}` : ''}`} />
       <HealthItem icon={Terminal} label="KOL operator" ok={h?.component_status?.operator.status === 'available'} value={h?.component_status?.operator.status || 'unknown'} />
-      <HealthItem icon={Terminal} label="X primary source" ok={!!h?.twitter_cli && !['failed', 'authentication_failed'].includes(h?.twitter_auth_status || '') && h?.component_status?.x.status !== 'rate_limited'} value={`${h?.twitter_cli ? 'twitter-cli available' : 'missing'} / ${h?.component_status?.x.status || h?.twitter_auth_status || 'unknown'}`} />
+      <HealthItem icon={Terminal} label="X Reader source" ok={!!h?.twitter_reader_credentials_configured && h?.component_status?.x.status !== 'rate_limited'} value={`${h?.twitter_reader_credentials_configured ? 'reader configured' : 'reader missing'} / ${h?.component_status?.x.status || h?.twitter_auth_status || 'unknown'}`} />
       <HealthItem icon={Database} label="Zhihu collection" ok={!!h?.zhihu_capture_available && h?.zhihu_fetch_status !== 'degraded'} value={`${h?.zhihu_active_kols || 0} active / ${h?.zhihu_paused_kols || 0} paused / ${h?.zhihu_fetch_status || 'never'}`} />
       <HealthItem icon={RefreshCw} label="Morning pipeline" ok={h?.morning_pipeline_task === 'installed'} value={`Zhihu 06:30 / X 07:20 08:05 08:45 / ${h?.morning_pipeline_task || '-'}`} />
       <HealthItem icon={Terminal} label="Codex batch review" ok={!!h?.codex_cli} value={h?.codex_cli || 'Codex CLI not found'} />

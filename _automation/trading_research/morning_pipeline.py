@@ -30,6 +30,7 @@ class MorningPipeline:
         ocr_classifier: Any | None = None,
         fetcher: Callable[[], Any] | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        active_kol_count: int | None = None,
     ):
         self.post_store = post_store
         self.market_store = market_store
@@ -38,6 +39,7 @@ class MorningPipeline:
         self.ocr_classifier = ocr_classifier
         self.fetcher = fetcher
         self.now_provider = now_provider or (lambda: datetime.now(SHANGHAI))
+        self.active_kol_count = active_kol_count
         self.drafts = RecommendationDraftRepository(post_store)
 
     def run(
@@ -73,9 +75,14 @@ class MorningPipeline:
             "failed_posts": 0,
             "ocr_completed": 0,
             "ocr_failed": 0,
-            "active_kols": len(self.post_store.list_kols("active")),
+            "active_kols": (
+                self.active_kol_count
+                if self.active_kol_count is not None
+                else len(self.post_store.list_kols("active"))
+            ),
             "successful_kols": 0,
             "failed_kols": 0,
+            "platform_breakdown": {},
         }
         errors: list[str] = []
         try:
@@ -108,6 +115,27 @@ class MorningPipeline:
                         getattr(fetched, "failed_kols", 0)
                         if not isinstance(fetched, dict)
                             else fetched.get("failed_kols", 0)
+                    )
+                    stages["platform_breakdown"] = (
+                        getattr(fetched, "platform_breakdown", {})
+                        if not isinstance(fetched, dict)
+                        else fetched.get("platform_breakdown", {})
+                    ) or {}
+                    fetch_errors = (
+                        getattr(fetched, "errors", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("errors", [])
+                    ) or []
+                    errors.extend(f"fetch: {str(error)[:1000]}" for error in fetch_errors)
+                    blocked_platforms = (
+                        getattr(fetched, "blocked_platforms", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("blocked_platforms", [])
+                    ) or []
+                    errors.extend(
+                        f"fetch: {platform} provider circuit is blocked"
+                        for platform in blocked_platforms
+                        if not any(str(platform) in str(error) for error in errors)
                     )
                     queue_total = int(
                         getattr(fetched, "queue_total", 0)
