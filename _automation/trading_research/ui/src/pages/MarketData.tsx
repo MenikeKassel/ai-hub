@@ -8,7 +8,9 @@ export default function MarketData() {
   const client = useQueryClient()
   const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments })
   const health = useQuery({ queryKey: ['market'], queryFn: api.marketHealth, refetchInterval: 30_000 })
+  const foundationRefresh = useQuery({ queryKey: ['foundation-refresh'], queryFn: api.foundationRefreshStatus, refetchInterval: 5_000 })
   const sync = useMutation({ mutationFn: () => api.enqueueMarketSync(), onSuccess: () => client.invalidateQueries({ queryKey: ['market'] }) })
+  const refreshFoundation = useMutation({ mutationFn: () => api.foundationRefresh(), onSuccess: () => client.invalidateQueries({ queryKey: ['foundation-refresh'] }) })
   const updateFreeStockDB = useMutation({ mutationFn: () => api.updateFreeStockDB(), onSuccess: () => client.invalidateQueries({ queryKey: ['market'] }) })
   const patch = useMutation({ mutationFn: ({ symbol, lifecycle }: { symbol: string; lifecycle: 'pinned' | 'tracking' | 'archived' }) => api.patchInstrument(symbol, { lifecycle }), onSuccess: () => { client.invalidateQueries({ queryKey: ['instruments'] }); client.invalidateQueries({ queryKey: ['market'] }) } })
   const coverage = useMemo(() => {
@@ -26,9 +28,12 @@ export default function MarketData() {
 
   return <section>
     <header className="page-header">
+      <button className="primary-button" disabled={refreshFoundation.isPending || foundationRefresh.data?.status === 'running'} onClick={() => refreshFoundation.mutate()}><RefreshCw size={16} className={foundationRefresh.data?.status === 'running' ? 'spin' : ''} />更新最新数据</button>
       <div><span className="eyebrow">MARKET DATA</span><h1>数据中心</h1></div>
       <button className="primary-button" disabled={sync.isPending} onClick={() => sync.mutate()}><Play size={16} />加入同步队列</button>
     </header>
+    {foundationRefresh.data?.status === 'running' && <div className="warning-banner">统一行情基座正在更新。完成前继续使用上一版 release，收益和指标不会读取半成品。</div>}
+    {foundationRefresh.data?.status === 'degraded' && <div className="error-banner">统一行情基座更新未完成：{foundationRefresh.data.output_tail || '请检查数据源状态'}。当前 release 保持不变。</div>}
     {(health.error || instruments.error || sync.error || patch.error) && <div className="error-banner">{String(health.error || instruments.error || sync.error || patch.error)}</div>}
     <div className="panel provider-panel">
       <div className="panel-heading">
@@ -63,6 +68,15 @@ export default function MarketData() {
       <Metric label="活跃标的" value={value?.active_instruments ?? '-'} />
       <Metric label="数据覆盖" value={value?.coverage_count ?? '-'} />
       <Metric label="质量警告" value={value?.warning_count ?? '-'} warning={!!value?.warning_count} />
+    </div>
+    <div className="panel provider-panel">
+      <div className="panel-heading"><div><h2>统一行情基座</h2><span>所有收益、指标和板块消费者只读同一份原子 release</span></div><Database size={17} /></div>
+      <div className="provider-status-grid">
+        <span>Release <strong className="mono">{value?.foundation?.release_id || '-'}</strong></span>
+        <span>有效日期 <strong>{value?.foundation?.as_of || '-'}</strong></span>
+        <span>覆盖率 <strong>{value?.foundation?.coverage?.coverage_ratio != null ? `${(value.foundation.coverage.coverage_ratio * 100).toFixed(1)}%` : '-'}</strong></span>
+        <span>状态 <strong>{value?.foundation?.coverage_complete ? 'valid' : 'partial'}</strong></span>
+      </div>
     </div>
     <div className="content-grid market-grid">
       <div className="panel">

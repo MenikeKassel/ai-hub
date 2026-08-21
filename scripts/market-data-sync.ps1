@@ -10,7 +10,7 @@ if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
 $logDirectory = Join-Path $RepoRoot "_runtime\trading\market\logs"
-$logPath = Join-Path $logDirectory "market-data-sync.log"
+$logPath = Join-Path $logDirectory "market-data-consumer.log"
 $mutex = New-Object System.Threading.Mutex($false, "Local\MarketDataSyncDaily")
 $hasLock = $false
 
@@ -26,10 +26,12 @@ try {
     $hasLock = $mutex.WaitOne(0)
     if (-not $hasLock) { Write-MarketLog "Skipped: another market sync holds the mutex."; exit 0 }
     if (-not (Test-Path -LiteralPath $python)) { throw "Trading Python not found: $python" }
+    # The unified foundation owns all daily fact writes. This legacy task is a
+    # read-only consumer that rebuilds derived event context from current.json.
     $output = & $python $cli market-sync --as-of $AsOf --alerts-only 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
     if ($output.Trim()) { Write-MarketLog $output.Trim() }
-    if ($exitCode -ne 0) { throw "market-sync exited with code $exitCode" }
+    if ($exitCode -ne 0) { throw "read-only market consumer exited with code $exitCode" }
     exit 0
 } catch {
     Write-MarketLog "Market sync error: $($_.Exception.Message)"

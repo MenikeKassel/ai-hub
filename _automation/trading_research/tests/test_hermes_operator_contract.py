@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -60,8 +59,6 @@ class HermesOperatorContractTests(unittest.TestCase):
             '"review"',
             '"market"',
             '"returns"',
-            '"board-status"',
-            '"board-sync"',
             '"list-kols"',
             '"add-kol"',
             '"set-kol-status"',
@@ -71,6 +68,19 @@ class HermesOperatorContractTests(unittest.TestCase):
             '"list-events"',
         ):
             self.assertIn(action, operator)
+
+        for action in (
+            '"platform-status"',
+            '"discover-accounts"',
+            '"list-candidates"',
+            '"score-candidate"',
+            '"reject-candidate"',
+            '"retry-candidate"',
+            '"kol-profile"',
+            '"fetch-kol"',
+        ):
+            self.assertIn(action, operator)
+        self.assertNotIn('"accept-candidate"', operator)
 
     def test_operator_decodes_utf8_and_keeps_list_results_compact(self) -> None:
         operator = (ROOT / "scripts" / "hermes-kol-operator.ps1").read_text(encoding="utf-8")
@@ -88,6 +98,9 @@ class HermesOperatorContractTests(unittest.TestCase):
             self.assertIn(variable, starter)
         self.assertIn("System.Threading.Mutex", starter)
         self.assertIn("server.process.json", starter)
+        self.assertIn("listener_pid", starter)
+        self.assertIn("supervisor_pid", starter)
+        self.assertIn("Test-ExpectedListener", starter)
         self.assertIn("Get-NetTCPConnection", starter)
         for action in ("already_running", "port_conflict", "startup_failed", "unhealthy"):
             self.assertIn(action, operator)
@@ -112,31 +125,30 @@ class HermesOperatorContractTests(unittest.TestCase):
         self.assertIn("Codex-independent", skill)
         self.assertIn("explicit draft ID", skill)
 
-    def test_hermes_is_operator_only_and_source_changes_route_to_codex(self) -> None:
+    def test_hermes_is_operator_only_and_source_changes_use_worktree_pr(self) -> None:
         skill = (ROOT / "_skills" / "kol-research-operator" / "SKILL.md").read_text(
             encoding="utf-8"
         )
         installer = (ROOT / "scripts" / "install-hermes-kol-research.ps1").read_text(
             encoding="utf-8"
         )
-        guard = (ROOT / "scripts" / "hermes_ai_hub_source_guard.py").read_text(
-            encoding="utf-8"
-        )
 
-        self.assertIn("operator, never its source-code maintainer", skill)
-        self.assertIn("must use the `delegate-to-codex` skill", skill)
-        self.assertIn("Never attempt a Hermes fallback edit", skill)
+        self.assertIn("Hermes operates the workbench", skill)
+        self.assertIn("canonical skill source", skill)
+        self.assertIn("<AI_HUB_HOME>\\_worktrees\\ai-hub-hermes", skill)
+        self.assertIn("hermes/<task-id>", skill)
+        self.assertIn("opening a PR", skill)
         self.assertIn("Use only the native `kol_operator` tool", skill)
         self.assertIn("Never use the `terminal` or `read_file` tool", skill)
-        self.assertIn("pre_tool_call", installer)
-        self.assertIn("ai-hub-source-guard.py", installer)
-        self.assertIn("shell-hooks-allowlist.json", installer)
-        self.assertIn("hermes_operator_plugin.py", installer)
-        self.assertIn('if tool_name in {"write_file", "patch"}', guard)
-        self.assertIn('if tool_name in {"terminal", "execute_code"}', guard)
-        self.assertIn('if tool_name == "delegate_task"', guard)
-        self.assertIn("operation-only", guard)
-        self.assertNotIn("ALLOWED_OPERATION_PATHS", guard)
+        self.assertNotIn("pre_tool_call", installer)
+        self.assertNotIn("ai-hub-source-guard.py", installer)
+        self.assertNotIn("shell-hooks-allowlist.json", installer)
+        self.assertNotIn("hermes_ai_hub_source_guard.py", installer)
+
+    def test_private_adapter_does_not_offer_a_second_console(self) -> None:
+        adapter = (ROOT / "_automation" / "trading_research" / "public_core_adapter.py").read_text(encoding="utf-8")
+        self.assertNotIn('"serve-private"', adapter)
+        self.assertNotIn('8125', adapter)
 
 
 if __name__ == "__main__":

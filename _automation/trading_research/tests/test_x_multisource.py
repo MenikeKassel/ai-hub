@@ -15,6 +15,7 @@ from kol_posts import (  # noqa: E402
     FallbackXPostProvider,
     KolPostStore,
     ProviderFetchResult,
+    ReaderCredentialStore,
     TwitterAuthenticationError,
     TwitterProviderError,
     XtfNitterProvider,
@@ -38,6 +39,20 @@ def twitter_payload(*, text: str = "primary text", created_at: str = "2026-07-13
 
 
 class MultiSourceProviderTests(unittest.TestCase):
+    def test_reader_credentials_are_isolated_from_sealed_primary_store(self) -> None:
+        reader = ReaderCredentialStore()
+        self.assertEqual("ai-hub/twitter-reader", reader.service_name)
+
+        class Primary:
+            name = "twitter-cli"
+            credentials = reader
+
+            def fetch_user_posts(self, handle, max_count):
+                return ProviderFetchResult("twitter-cli", [], [], [])
+
+        fallback = FallbackXPostProvider(Primary(), XtfNitterProvider("xtf", "http://127.0.0.1:9377"))
+        self.assertIs(reader, fallback.credentials)
+
     @unittest.skipUnless(os.name == "nt", "Windows command shim behavior")
     def test_codex_classifier_resolves_an_executable_windows_shim(self) -> None:
         classifier = CodexPostClassifier(Path("schema.json"), Path.cwd())
@@ -291,6 +306,37 @@ class MultiSourceProviderTests(unittest.TestCase):
 
 
 class MultiSourceStoreTests(unittest.TestCase):
+    def test_fresh_first_page_does_not_expand_stale_cursor_to_history_depth(self) -> None:
+        calls: list[int] = []
+
+        class TrackingProvider:
+            name = "fixture"
+
+            def fetch_user_posts(self, handle, max_count):
+                calls.append(max_count)
+                return ProviderFetchResult("fixture", [], [], [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Example", "example")
+            with store.connect() as db:
+                db.execute(
+                    "UPDATE kols SET last_post_id=?,last_fetched_at=? WHERE id=?",
+                    ("2076000000000000000", "2026-08-01T10:00:00+08:00", kol_id),
+                )
+            run_post_fetch(
+                store,
+                TrackingProvider(),
+                max_count=20,
+                fresh_first_page=True,
+                batch_key="fresh-fixture",
+                sleep_seconds=0,
+                retry_delays=(),
+                download_media=False,
+            )
+
+        self.assertEqual([20], calls)
+
     def test_store_migration_removes_run_level_warnings_from_posts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
