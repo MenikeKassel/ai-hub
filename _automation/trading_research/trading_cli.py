@@ -53,6 +53,7 @@ from kol_posts import (
     ModelWorkerBusyError,
     ModelProviderUnavailableError,
     NitterCredentialStore,
+    ReaderCredentialStore,
     RapidOcrBatchClassifier,
     RuleClassifier,
     UnlimitedOcrBatchClassifier,
@@ -807,14 +808,17 @@ def _fallback_mode() -> str:
 
 
 def _post_provider(mode: str):
-    # ACCOUNT SAFETY (2026-08-14): user's X account was warned; the twitter-cli
-    # credential path is DISABLED. Every X fetch must go through the credential-free
-    # Nitter provider. "auto"/"twitter" modes would construct TwitterCliProvider and
-    # touch the user's account — refuse them outright.
-    if mode != "nitter":
-        raise SystemExit(
-            "X credential provider (twitter-cli) disabled for account safety 2026-08-14; "
-            "use --provider nitter"
+    # The main X session remains sealed. Automated collection uses a separate
+    # low-frequency reader identity stored under ai-hub/twitter-reader.
+    if mode not in {"auto", "twitter", "nitter"}:
+        raise SystemExit(f"unsupported X provider: {mode}")
+    if mode == "nitter":
+        return build_x_post_provider(
+            "nitter",
+            twitter_credentials=ReaderCredentialStore(),
+            xtf_command=str(XTF_COMMAND),
+            nitter_url=NITTER_URL,
+            fallback_mode="disabled",
         )
     fallback_mode = _fallback_mode()
     if fallback_mode in {"shadow", "enabled"}:
@@ -825,7 +829,7 @@ def _post_provider(mode: str):
             fallback_mode = "disabled"
     return build_x_post_provider(
         mode,
-        twitter_credentials=KeyringCredentialStore(),
+        twitter_credentials=ReaderCredentialStore(),
         xtf_command=str(XTF_COMMAND),
         nitter_url=NITTER_URL,
         fallback_mode=fallback_mode,
@@ -874,6 +878,7 @@ def kol_post_doctor(args: argparse.Namespace) -> None:
         "media_bytes": media_disk_usage(store.media_root),
         "twitter_cli": shutil.which("twitter") or "",
         "twitter_credentials_configured": KeyringCredentialStore().configured(),
+        "twitter_reader_credentials_configured": ReaderCredentialStore().configured(),
         "zhihu_capture_available": ZHIHU_PROFILE_CAPTURE.is_file(),
         "zhihu_active_kols": len(active_zhihu),
         "zhihu_paused_kols": len(paused_zhihu),
@@ -899,7 +904,7 @@ def kol_post_doctor(args: argparse.Namespace) -> None:
     }
     platform_ok = {
         "all": bool(checks["twitter_cli"] and checks["zhihu_capture_available"]),
-        "x": bool(checks["twitter_cli"] and checks["twitter_credentials_configured"]),
+        "x": bool(checks["twitter_cli"] and checks["twitter_reader_credentials_configured"]),
         "zhihu": bool(checks["zhihu_capture_available"]),
     }
     dependencies_ok = bool(
@@ -928,6 +933,177 @@ def kol_post_db_backup(_: argparse.Namespace) -> None:
     for expired in backups[14:]:
         expired.unlink(missing_ok=True)
     print(json.dumps({"ok": True, "backup": str(target)}, ensure_ascii=False))
+
+
+def kol_reader_migrate(_: argparse.Namespace) -> None:
+    """Copy the existing Nitter reader session into its isolated X reader slot."""
+    source = NitterCredentialStore()
+    target = ReaderCredentialStore()
+    auth_token, ct0 = source.load_values()
+    target.save(auth_token, ct0)
+    print(json.dumps({
+        "ok": True,
+        "source": source.service_name,
+        "target": target.service_name,
+        "credentials_configured": target.configured(),
+    }, ensure_ascii=False))
+
+
+def kol_collection_doctor(_: argparse.Namespace) -> None:
+    store = _post_store()
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=7)).isoformat()
+    checks = {
+        "ok": ReaderCredentialStore().configured(),
+        "database": str(store.path),
+        "reader_credentials_configured": ReaderCredentialStore().configured(),
+        "main_credentials_configured": KeyringCredentialStore().configured(),
+        "nitter_optional": True,
+        "nitter": timeline_health(NITTER_URL),
+        "x_recent": store.collection_coverage(platform="X", window_start=start, window_end=end),
+        "zhihu_recent": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
+        "open_gaps": store.list_collection_gaps(status="open", limit=100),
+        "latest_runs": store.recent_fetch_runs(limit=5),
+    }
+    print(json.dumps(checks, ensure_ascii=False, indent=2))
+    if not checks["ok"]:
+        raise SystemExit(2)
+
+
+def kol_gap_audit(args: argparse.Namespace) -> None:
+    store = _post_store()
+    end = date.today().isoformat() if args.to_date == "auto" else args.to_date
+    start = args.from_date
+    payload: dict[str, Any] = {
+        "ok": True,
+        "from": start,
+        "to": end,
+        "platforms": {},
+        "gaps": [],
+    }
+    for platform in ("X", "Zhihu"):
+        coverage = store.collection_coverage(
+            platform=platform,
+            window_start=start,
+            window_end=end,
+        )
+        payload["platforms"][platform] = coverage
+        for item in coverage["items"]:
+            if not item.get("last_success_at") or item.get("window_posts", 0) == 0:
+                kol = store.get_kol(int(item["id"]))
+                store.open_collection_gap(
+                    int(item["id"]),
+                    platform=platform,
+                    window_start=start,
+                    window_end=end,
+                    last_post_id=str((kol or {}).get("last_post_id") or ""),
+                    status="open",
+                    error="no posts observed in recovery window",
+                )
+                payload["gaps"].append({"platform": platform, **item})
+    payload["open_gaps"] = store.list_collection_gaps(status="open", limit=1000)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def kol_gap_recover(args: argparse.Namespace) -> None:
+    store = _post_store()
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=7)).isoformat() if args.scope == "recent" else "2026-01-01"
+    batch_id = f"gap-{args.scope}-{start}-{end}"
+    active = [
+        item for item in store.list_kols("active")
+        if str(item.get("availability_status") or "active") not in {"suspended", "deleted", "paused"}
+    ]
+    store.create_fetch_batch(
+        batch_id,
+        batch_kind="recent_recovery" if args.scope == "recent" else "historical_recovery",
+        platform="X+Zhihu",
+        window_start=start,
+        window_end=end,
+        strategy_version="kol-collection-v3",
+        total_kols=len(active),
+    )
+    provider = _post_provider("auto")
+    aggregate: list[Any] = []
+    reset_items = 0
+    for platform in ("x", "zhihu"):
+        platform_key = platform.casefold()
+        fresh_key = f"{batch_id}:{platform_key}:fresh"
+        history_key = f"{batch_id}:{platform_key}:history"
+        reset_items += store.reset_interrupted_fetch_queue(fresh_key)
+        reset_items += store.reset_interrupted_fetch_queue(history_key)
+        first = run_post_fetch(
+            store,
+            provider,
+            platform_providers={"zhihu": _zhihu_provider()},
+            platforms={platform_key},
+            max_count=20 if args.scope == "recent" else 500,
+            fresh_first_page=args.scope == "recent",
+            reconcile_zhihu=False,
+            sleep_seconds=1.0,
+            retry_delays=(1.0,),
+            batch_key=fresh_key,
+            classifier=RuleClassifier(_classification_aliases()),
+        )
+        aggregate.append(first)
+        if args.scope == "recent" and not first.rate_limit_paused and first.queue_pending == 0:
+            second = run_post_fetch(
+                store,
+                provider,
+                platform_providers={"zhihu": _zhihu_provider()},
+                platforms={platform_key},
+                max_count=100,
+                reconcile_zhihu=False,
+                sleep_seconds=1.0,
+                retry_delays=(1.0,),
+                batch_key=history_key,
+                classifier=RuleClassifier(_classification_aliases()),
+            )
+            aggregate.append(second)
+    successful = sum(item.successful_kols for item in aggregate)
+    failed = sum(item.failed_kols for item in aggregate)
+    new_posts = sum(item.new_posts for item in aggregate)
+    errors = [error for item in aggregate for error in item.errors]
+    status = "completed" if not errors or successful else "degraded"
+    store.finish_fetch_batch(
+        batch_id,
+        status=status,
+        completed_kols=successful + failed,
+        successful_kols=successful,
+        failed_kols=failed,
+        new_posts=new_posts,
+        error="; ".join(errors[:5]),
+    )
+    print(json.dumps({
+        "ok": bool(successful),
+        "scope": args.scope,
+        "batch_id": batch_id,
+        "reset_interrupted_queue_items": reset_items,
+        "runs": [item.__dict__ for item in aggregate],
+        "coverage": {
+            "X": store.collection_coverage(platform="X", window_start=start, window_end=end),
+            "Zhihu": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
+        },
+    }, ensure_ascii=False, indent=2))
+    if not successful and failed:
+        raise SystemExit(2)
+
+
+def kol_fetch_queue_compact(args: argparse.Namespace) -> None:
+    store = _post_store()
+    cutoff = datetime.now(SHANGHAI) - timedelta(hours=max(1, args.older_than_hours))
+    keys = store.archive_legacy_fetch_batches(cutoff)
+    print(json.dumps({"ok": True, "archived_batches": len(keys), "batch_keys": keys}, ensure_ascii=False, indent=2))
+
+
+def kol_ai_resume(args: argparse.Namespace) -> None:
+    store = _post_store()
+    completed, failed = classify_pending_with_codex(
+        store,
+        build_post_classifier(KOL_CLASSIFIER_SCHEMA, ROOT),
+        limit=args.limit,
+    )
+    print(json.dumps({"ok": failed == 0, "completed": completed, "failed": failed}, ensure_ascii=False))
 
 
 def kol_import(args: argparse.Namespace) -> None:
@@ -1034,8 +1210,6 @@ def kol_fallback_mode(args: argparse.Namespace) -> None:
 
 def kol_post_fetch(args: argparse.Namespace) -> None:
     store = _post_store()
-    if args.provider == "nitter" and _fallback_mode() != "enabled" and not args.dry_run:
-        raise SystemExit("Nitter is shadow-only until the rollout gate passes; use --dry-run for diagnostics")
     requested = args.backfill or 50
     handles = {
         value.strip().lstrip("@").casefold()
@@ -3814,6 +3988,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_post_backup = sub.add_parser("kol-post-db-backup", help="create a consistent SQLite backup")
     p_post_backup.set_defaults(func=kol_post_db_backup)
 
+    p_reader_migrate = sub.add_parser(
+        "kol-reader-migrate",
+        help="copy the isolated Nitter reader session into ai-hub/twitter-reader",
+    )
+    p_reader_migrate.set_defaults(func=kol_reader_migrate)
+
+    p_collection_doctor = sub.add_parser(
+        "kol-collection-doctor",
+        help="inspect reader credentials and platform collection coverage",
+    )
+    p_collection_doctor.set_defaults(func=kol_collection_doctor)
+
+    p_gap_audit = sub.add_parser("kol-gap-audit", help="audit recent KOL collection gaps")
+    p_gap_audit.add_argument("--from", dest="from_date", required=True)
+    p_gap_audit.add_argument("--to", dest="to_date", default="auto")
+    p_gap_audit.set_defaults(func=kol_gap_audit)
+
+    p_gap_recover = sub.add_parser("kol-gap-recover", help="resume recent or historical KOL collection recovery")
+    p_gap_recover.add_argument("--scope", choices=["recent", "historical"], required=True)
+    p_gap_recover.add_argument("--resume", action="store_true")
+    p_gap_recover.set_defaults(func=kol_gap_recover)
+
+    p_queue_compact = sub.add_parser("kol-fetch-queue-compact", help="archive superseded legacy fetch batches")
+    p_queue_compact.add_argument("--older-than-hours", type=int, default=48)
+    p_queue_compact.set_defaults(func=kol_fetch_queue_compact)
+
+    p_ai_resume = sub.add_parser("kol-ai-resume", help="resume the durable AI review queue")
+    p_ai_resume.add_argument("--limit", type=int, default=0)
+    p_ai_resume.set_defaults(func=kol_ai_resume)
+
     p_fallback_mode = sub.add_parser("kol-fallback-mode", help="inspect or enable Nitter fallback")
     p_fallback_mode.add_argument("--set", choices=["shadow", "enabled"])
     p_fallback_mode.set_defaults(func=kol_fallback_mode)
@@ -3830,7 +4034,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the durable stock-lead extraction pass for a targeted collection retry",
     )
     p_post_fetch.add_argument("--classify-limit", type=int, default=0)
-    p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
+    p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_post_fetch.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_post_fetch.add_argument(
         "--handles",
@@ -3851,7 +4055,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch_resume.add_argument(
         "--provider",
         choices=["auto", "twitter", "nitter"],
-        default="nitter",
+        default="auto",
     )
     p_fetch_resume.add_argument(
         "--platform",
@@ -3911,7 +4115,7 @@ def build_parser() -> argparse.ArgumentParser:
         "kol-morning-run", help="fetch and prepare the evidence-first morning recommendation queue"
     )
     p_morning.add_argument("--as-of")
-    p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
+    p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_morning.add_argument("--fetch-count", type=int, default=50)
     p_morning.add_argument("--backlog-limit", type=int, default=20)
@@ -3923,7 +4127,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_morning_orchestrate = sub.add_parser(
         "kol-morning-orchestrate", help="run the due morning phase and chain missed phases safely"
     )
-    p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="nitter")
+    p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
     p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)

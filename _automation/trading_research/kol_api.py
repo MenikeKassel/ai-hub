@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from kol_posts import (
     KolPostStore,
     ModelWorkerBusyError,
     NitterCredentialStore,
+    ReaderCredentialStore,
     RapidOcrBatchClassifier,
     RuleClassifier,
     STRUCTURED_REVIEW_VERSION,
@@ -145,8 +147,7 @@ class DigestAuthorProfileBatch(BaseModel):
 class FetchRequest(BaseModel):
     max_count: int = Field(default=50, ge=1, le=100)
     classify: bool = True
-    # ACCOUNT SAFETY (2026-08-14): default is nitter; twitter-cli is refused in the handler.
-    provider: str = Field(default="nitter", pattern="^(auto|twitter|nitter)$")
+    provider: str = Field(default="auto", pattern="^(auto|twitter|nitter)$")
 
 
 class TwitterCredentialRequest(BaseModel):
@@ -407,6 +408,7 @@ def create_app(
     review_agent = ReviewAgentRepository(post_store)
     recommendation_drafts = RecommendationDraftRepository(post_store)
     credentials = credential_store or KeyringCredentialStore()
+    reader_credentials = ReaderCredentialStore()
     nitter_credentials = nitter_credential_store or NitterCredentialStore()
     deepseek_credentials = deepseek_credential_store or DeepSeekCredentialStore()
     event_research = EventMethodResearchService(
@@ -470,11 +472,10 @@ def create_app(
         discovery_registry = build_provider_registry(
             capture_root,
             x_provider=build_x_post_provider(
-                # ACCOUNT SAFETY (2026-08-14): nitter only — twitter-cli credential path disabled.
-                "nitter",
-                twitter_credentials=credentials,
+                "auto",
+                twitter_credentials=reader_credentials,
                 xtf_command=xtf_command,
-                fallback_mode="disabled",
+                fallback_mode="shadow",
             ),
             zhihu_provider=zhihu_provider,
         )
@@ -508,6 +509,8 @@ def create_app(
     app.state.review_agent = review_agent
     app.state.recommendation_drafts = recommendation_drafts
     app.state.deepseek_credentials = deepseek_credentials
+    app.state.twitter_reader_credentials = reader_credentials
+    collection_runs: dict[str, dict[str, Any]] = {}
     app.state.discovery_store = discovery_store
     app.state.discovery_service = discovery_service
     app.state.discovery_registry = discovery_registry
@@ -1632,20 +1635,16 @@ def create_app(
 
     @app.post("/api/fetch")
     def fetch_posts(body: FetchRequest) -> dict[str, Any]:
-        # ACCOUNT SAFETY (2026-08-14): user's X account was warned; twitter-cli
-        # credential path is disabled. Only the credential-free Nitter provider may
-        # fetch X timelines. (trading_cli._post_provider has the same guard.)
-        if body.provider != "nitter":
-            raise HTTPException(
-                409,
-                "X credential provider (twitter-cli) disabled for account safety 2026-08-14; use provider=nitter",
-            )
         fallback_mode = _fallback_mode(config.runtime_root)
-        if not timeline_health(config.nitter_url).get("ready"):
-            raise HTTPException(503, "Nitter is not ready; X collection is temporarily unavailable")
+        if body.provider == "nitter":
+            if fallback_mode != "enabled":
+                raise HTTPException(409, "Nitter is shadow-only/optional and not enabled for direct collection")
+            fallback_mode = "disabled"
+        elif fallback_mode in {"shadow", "enabled"} and not timeline_health(config.nitter_url).get("ready"):
+            fallback_mode = "disabled"
         provider = build_x_post_provider(
             body.provider,
-            twitter_credentials=credentials,
+            twitter_credentials=reader_credentials,
             xtf_command=str(xtf_command),
             nitter_url=config.nitter_url,
             fallback_mode=fallback_mode,
@@ -1679,6 +1678,112 @@ def create_app(
             "codex_failed": failed,
             "stock_leads": lead_result,
         }
+
+    @app.get("/api/collection/coverage")
+    def collection_coverage(
+        platform: str = Query(default="", pattern="^(|X|Zhihu)$"),
+        window_start: str = "",
+        window_end: str = "",
+    ) -> dict[str, Any]:
+        if platform:
+            return post_store.collection_coverage(
+                platform=platform,
+                window_start=window_start,
+                window_end=window_end,
+            )
+        return {
+            "platform": "all",
+            "items": [
+                post_store.collection_coverage(
+                    platform=value,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                for value in ("X", "Zhihu")
+            ],
+        }
+
+    @app.post("/api/collection/recovery/preview")
+    def collection_recovery_preview() -> dict[str, Any]:
+        start = (date.today() - timedelta(days=7)).isoformat()
+        end = date.today().isoformat()
+        return {
+            "ok": True,
+            "scope": "recent",
+            "window_start": start,
+            "window_end": end,
+            "coverage": [
+                post_store.collection_coverage(platform=value, window_start=start, window_end=end)
+                for value in ("X", "Zhihu")
+            ],
+            "reader_configured": reader_credentials.configured(),
+            "ai_is_optional": True,
+        }
+
+    @app.post("/api/collection/recovery/start", status_code=202)
+    def collection_recovery_start() -> dict[str, Any]:
+        if not reader_credentials.configured():
+            raise HTTPException(409, "twitter-reader credentials are not configured")
+        run_id = uuid.uuid4().hex
+        cli = ROOT / "_automation" / "trading_research" / "trading_cli.py"
+        log_dir = config.runtime_root / "kol" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"collection-recovery-{run_id}.log"
+        handle = log_path.open("w", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(cli), "kol-gap-recover", "--scope", "recent", "--resume"],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            )
+        finally:
+            handle.close()
+        collection_runs[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "pid": process.pid,
+            "log": str(log_path),
+            "started_at": now_iso(),
+        }
+        return collection_runs[run_id]
+
+    @app.get("/api/collection/recovery/{run_id}")
+    def collection_recovery_status(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        try:
+            process = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {item['pid']}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            alive = str(item["pid"]) in (process.stdout or "")
+        except Exception:
+            alive = False
+        if not alive and item["status"] == "running":
+            item["status"] = "completed"
+            item["completed_at"] = now_iso()
+        item["coverage"] = {
+            "X": post_store.collection_coverage(platform="X"),
+            "Zhihu": post_store.collection_coverage(platform="Zhihu"),
+        }
+        return item
+
+    @app.post("/api/collection/recovery/{run_id}/cancel")
+    def collection_recovery_cancel(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        subprocess.run(["taskkill", "/PID", str(item["pid"]), "/T", "/F"], capture_output=True, check=False)
+        item["status"] = "cancelled"
+        item["completed_at"] = now_iso()
+        return item
 
     @app.post("/api/stock-leads/extract")
     def extract_stock_lead_queue() -> dict[str, Any]:
@@ -2591,11 +2696,14 @@ def create_app(
         review_summary = review_agent.summary()
         market_component = safe_market_health()
         freestock_component = safe_freestockdb_health()
-        discovery_platforms_value = (
-            discovery_registry.platforms()
-            if discovery_registry is not None
-            else []
-        )
+        discovery_platforms_value: list[dict[str, Any]] = []
+        discovery_runtime_error = ""
+        if discovery_registry is not None:
+            try:
+                discovery_platforms_value = discovery_registry.platforms()
+            except Exception as exc:
+                discovery_runtime_error = str(exc)
+                logger.warning("Discovery health degraded: %s", exc)
         discovery_available = discovery_registry is not None
         discovery_scoring_available = discovery_scorer is not None
         return {
@@ -2603,6 +2711,7 @@ def create_app(
             "date": date.today().isoformat(),
             "twitter_cli": shutil.which("twitter") or "",
             "twitter_credentials_configured": credentials.configured(),
+            "twitter_reader_credentials_configured": reader_credentials.configured(),
             "twitter_auth_status": recent_runs[0].get("auth_status", "unknown") if recent_runs else "never",
             "zhihu_capture_available": zhihu_provider.script_path.is_file(),
             "zhihu_active_kols": len(active_zhihu),
@@ -2656,6 +2765,7 @@ def create_app(
                 "scoring_available": discovery_scoring_available,
                 "platforms": discovery_platforms_value,
                 "error": discovery_error,
+                "runtime_error": discovery_runtime_error,
                 "scoring_error": discovery_scorer_error,
             },
             "market": market_component,
@@ -2784,6 +2894,17 @@ def create_app(
         except CredentialStorageError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"ok": True, "configured": True}
+
+    @app.post("/api/system/twitter-reader/promote-nitter")
+    def promote_nitter_reader() -> dict[str, bool]:
+        try:
+            auth_token, ct0 = nitter_credentials.load_values()
+            reader_credentials.save(auth_token, ct0)
+        except CredentialStorageError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="Nitter reader credentials are not configured") from exc
+        return {"ok": True, "configured": reader_credentials.configured()}
 
     @app.post("/api/system/opencode-go-credentials")
     @app.post("/api/system/deepseek-credentials")

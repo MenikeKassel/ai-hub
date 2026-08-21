@@ -986,6 +986,48 @@ class KolPostStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_fetch_queue_pending
                     ON fetch_queue(batch_key,state,not_before,position);
+                CREATE TABLE IF NOT EXISTS fetch_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    batch_kind TEXT NOT NULL CHECK(batch_kind IN ('freshness','recent_recovery','historical_recovery')),
+                    platform TEXT NOT NULL,
+                    window_start TEXT NOT NULL DEFAULT '',
+                    window_end TEXT NOT NULL DEFAULT '',
+                    strategy_version TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    total_kols INTEGER NOT NULL DEFAULT 0,
+                    completed_kols INTEGER NOT NULL DEFAULT 0,
+                    successful_kols INTEGER NOT NULL DEFAULT 0,
+                    failed_kols INTEGER NOT NULL DEFAULT 0,
+                    new_posts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_fetch_batches_status
+                    ON fetch_batches(platform,status,updated_at DESC);
+                CREATE TABLE IF NOT EXISTS fetch_batch_archive (
+                    batch_key TEXT PRIMARY KEY,
+                    reason TEXT NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS collection_gaps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    platform TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    last_post_id TEXT NOT NULL DEFAULT '',
+                    recovery_depth INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    error TEXT NOT NULL DEFAULT '',
+                    last_verified_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(kol_id,window_start,window_end)
+                );
+                CREATE INDEX IF NOT EXISTS idx_collection_gaps_open
+                    ON collection_gaps(platform,status,updated_at);
                 CREATE TABLE IF NOT EXISTS post_sources (
                     post_id TEXT NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
                     provider TEXT NOT NULL,
@@ -1394,7 +1436,7 @@ class KolPostStore:
             if db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0] == 0:
                 db.execute("INSERT INTO schema_meta(version) VALUES (16)")
             else:
-                db.execute("UPDATE schema_meta SET version=16")
+                db.execute("UPDATE schema_meta SET version=17")
             db.execute(
                 """
                 UPDATE classifications
@@ -3116,6 +3158,7 @@ class KolPostStore:
                 SELECT k.*
                 FROM fetch_queue q JOIN kols k ON k.id=q.kol_id
                 WHERE q.batch_key=? AND k.status='active'
+                  AND NOT EXISTS (SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=q.batch_key)
                   AND COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','protected','paused')
                   AND (
                     q.state='queued'
@@ -3209,7 +3252,8 @@ class KolPostStore:
     def latest_pending_fetch_batch(self, platform: str = "") -> str:
         query = (
             "SELECT batch_key,MAX(updated_at) latest FROM fetch_queue "
-            "WHERE state<>'completed'"
+            "WHERE state<>'completed' AND NOT EXISTS "
+            "(SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=fetch_queue.batch_key)"
         )
         params: list[Any] = []
         if platform:
@@ -3219,6 +3263,198 @@ class KolPostStore:
         with self.connect() as db:
             row = db.execute(query, params).fetchone()
         return str(row["batch_key"]) if row else ""
+
+    def reset_interrupted_fetch_queue(self, batch_key: str) -> int:
+        """Make queue items from a killed recovery worker resumable."""
+        timestamp = now_iso()
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE fetch_queue
+                SET state='queued',started_at='',updated_at=?
+                WHERE batch_key=? AND state='running'
+                """,
+                (timestamp, batch_key),
+            )
+        return max(0, cursor.rowcount)
+
+    def archive_legacy_fetch_batches(self, older_than: datetime) -> list[str]:
+        cutoff = older_than.astimezone(SHANGHAI).isoformat(timespec="seconds")
+        timestamp = now_iso()
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT batch_key FROM fetch_queue WHERE updated_at<? GROUP BY batch_key",
+                (cutoff,),
+            ).fetchall()
+            keys = [str(row["batch_key"]) for row in rows]
+            for key in keys:
+                db.execute(
+                    "INSERT OR IGNORE INTO fetch_batch_archive(batch_key,reason,archived_at) VALUES(?,?,?)",
+                    (key, "superseded_legacy", timestamp),
+                )
+        return keys
+
+    def create_fetch_batch(
+        self,
+        batch_id: str,
+        *,
+        batch_kind: str,
+        platform: str,
+        window_start: str,
+        window_end: str,
+        strategy_version: str,
+        total_kols: int,
+    ) -> None:
+        if batch_kind not in {"freshness", "recent_recovery", "historical_recovery"}:
+            raise ValueError(f"invalid fetch batch kind: {batch_kind}")
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO fetch_batches(
+                    batch_id,batch_kind,platform,window_start,window_end,
+                    strategy_version,status,total_kols,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?, 'running',?,?,?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    status=CASE WHEN fetch_batches.status='completed' THEN fetch_batches.status ELSE 'running' END
+                """,
+                (
+                    batch_id,
+                    batch_kind,
+                    platform,
+                    window_start,
+                    window_end,
+                    strategy_version,
+                    max(0, int(total_kols)),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def finish_fetch_batch(
+        self,
+        batch_id: str,
+        *,
+        status: str,
+        completed_kols: int,
+        successful_kols: int,
+        failed_kols: int,
+        new_posts: int,
+        error: str = "",
+    ) -> None:
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE fetch_batches SET status=?,completed_kols=?,successful_kols=?,
+                    failed_kols=?,new_posts=?,error=?,updated_at=?,completed_at=?
+                WHERE batch_id=?
+                """,
+                (
+                    status,
+                    max(0, int(completed_kols)),
+                    max(0, int(successful_kols)),
+                    max(0, int(failed_kols)),
+                    max(0, int(new_posts)),
+                    error[:2000],
+                    timestamp,
+                    timestamp,
+                    batch_id,
+                ),
+            )
+
+    def collection_coverage(
+        self,
+        *,
+        platform: str = "",
+        window_start: str = "",
+        window_end: str = "",
+    ) -> dict[str, Any]:
+        conditions = ["k.status='active'", "COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','paused')"]
+        params: list[Any] = []
+        if platform:
+            conditions.append("lower(k.platform)=?")
+            params.append(platform.casefold())
+        where = " AND ".join(conditions)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT k.id,k.display_name,k.platform,k.handle,k.last_success_at,
+                       k.fetch_status,k.availability_status,k.availability_reason,
+                       COUNT(CASE WHEN p.posted_at>=? AND p.posted_at<=? THEN 1 END) AS window_posts
+                FROM kols k LEFT JOIN posts p ON p.kol_id=k.id
+                WHERE {where}
+                GROUP BY k.id
+                ORDER BY lower(k.platform),lower(k.display_name)
+                """,
+                (window_start or "0000-01-01", window_end or "9999-12-31", *params),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        total = len(items)
+        successful = sum(
+            1 for item in items
+            if str(item.get("last_success_at") or "")
+            and str(item.get("fetch_status") or "") in {"success", "gap_detected"}
+        )
+        return {
+            "platform": platform or "all",
+            "window_start": window_start,
+            "window_end": window_end,
+            "target": total,
+            "successful": successful,
+            "coverage": successful / total if total else 0.0,
+            "items": items,
+        }
+
+    def open_collection_gap(
+        self,
+        kol_id: int,
+        *,
+        platform: str,
+        window_start: str,
+        window_end: str,
+        last_post_id: str = "",
+        recovery_depth: int = 0,
+        status: str = "open",
+        error: str = "",
+    ) -> None:
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO collection_gaps(
+                    kol_id,platform,window_start,window_end,last_post_id,
+                    recovery_depth,status,error,last_verified_at,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(kol_id,window_start,window_end) DO UPDATE SET
+                    last_post_id=excluded.last_post_id,recovery_depth=excluded.recovery_depth,
+                    status=excluded.status,error=excluded.error,
+                    last_verified_at=excluded.last_verified_at,updated_at=excluded.updated_at
+                """,
+                (
+                    kol_id,
+                    platform,
+                    window_start,
+                    window_end,
+                    last_post_id,
+                    max(0, int(recovery_depth)),
+                    status,
+                    error[:2000],
+                    timestamp if status == "closed" else "",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def list_collection_gaps(self, *, status: str = "open", limit: int = 500) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT g.*,k.handle,k.display_name FROM collection_gaps g JOIN kols k ON k.id=g.kol_id "
+                "WHERE g.status=? ORDER BY g.updated_at LIMIT ?",
+                (status, max(1, min(int(limit), 5000))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def start_fetch_run(self, requested_count: int, *, total_kols: int = 0) -> str:
         run_id = uuid.uuid4().hex
@@ -3443,6 +3679,12 @@ class NitterCredentialStore(KeyringCredentialStore):
     def session(self) -> dict[str, str]:
         auth_token, ct0 = self.load_values()
         return {"kind": "cookie", "auth_token": auth_token, "ct0": ct0}
+
+
+class ReaderCredentialStore(KeyringCredentialStore):
+    """Low-frequency reader identity, kept separate from the user's main X session."""
+
+    service_name = "ai-hub/twitter-reader"
 
 
 class OpenCodeGoCredentialStore:
@@ -3901,6 +4143,11 @@ class FallbackXPostProvider:
         self.mode = mode
         self.primary_auth_failed = False
         self.shadow_fallback_failed = False
+
+    @property
+    def credentials(self) -> KeyringCredentialStore | None:
+        """Expose the primary reader store for discovery health checks only."""
+        return getattr(self.primary, "credentials", None)
 
     @staticmethod
     def _failed_attempt(provider: str, started: float, exc: Exception) -> ProviderAttempt:
@@ -4858,6 +5105,7 @@ def classify_pending_with_codex(
                         model_name=str(getattr(classifier, "model_name", "codex")),
                         prompt_version=classifier.prompt_version,
                     )
+
                     completed += 1
                 except Exception as exc:
                     store.save_model_classification(
@@ -4918,7 +5166,21 @@ def _fetch_with_retry(
                     )
                 ]
             attempts.extend(captured)
-            if attempt >= len(retry_delays):
+            detail = str(exc).casefold()
+            deterministic = any(
+                marker in detail
+                for marker in (
+                    "all_backends_failed",
+                    "invalid json",
+                    "not configured",
+                    "not a tweet list",
+                    "not a post list",
+                    "unsupported",
+                    "missing",
+                )
+            )
+            retryable = not isinstance(exc, TwitterRateLimitError) and not deterministic
+            if attempt >= len(retry_delays) or not retryable:
                 exc.attempts = attempts
                 raise
             if retry_delays[attempt] > 0:
@@ -5016,12 +5278,13 @@ def run_post_fetch(
     classifier: RuleClassifier | None = None,
     download_media: bool = True,
     sleep_seconds: float = 2.0,
-    retry_delays: tuple[float, ...] = (5.0, 15.0),
+    retry_delays: tuple[float, ...] = (3.0,),
     batch_key: str = "",
     rate_limit_cooldown_seconds: int = 1800,
     max_gap_pages: int = 3,
     dry_run: bool = False,
     fresh_first_page: bool = False,
+    reconcile_zhihu: bool = True,
 ) -> FetchSummary:
     rule_classifier = classifier or RuleClassifier()
     if not dry_run:
@@ -5053,13 +5316,17 @@ def run_post_fetch(
         and str(kol.get("platform") or "X").casefold() != "zhihu"
         for kol in active_kols
     )
-    requested_depth = max(
-        [max_count, 100 if initial_backfill else max_count]
-        + [
-            int(kol.get("backfill_requested") or 0)
-            for kol in active_kols
-            if str(kol.get("backfill_status") or "") == "queued"
-        ]
+    requested_depth = (
+        max_count
+        if fresh_first_page
+        else max(
+            [max_count, 100 if initial_backfill else max_count]
+            + [
+                int(kol.get("backfill_requested") or 0)
+                for kol in active_kols
+                if str(kol.get("backfill_status") or "") == "queued"
+            ]
+        )
     )
     if batch_key and not dry_run:
         store.prepare_fetch_queue(
@@ -5173,7 +5440,10 @@ def run_post_fetch(
             if platform == "zhihu" or last_fetched or fresh_first_page
             else 100
         )
-        backfill_queued = str(kol.get("backfill_status") or "") == "queued"
+        backfill_queued = (
+            not fresh_first_page
+            and str(kol.get("backfill_status") or "") == "queued"
+        )
         archive_only_backfill = (
             platform == "zhihu"
             and str(kol.get("tracking_mode") or "") == "direct_profile"
@@ -5392,7 +5662,7 @@ def run_post_fetch(
         if batch_key and rate_limited_this_account:
             rate_limit_paused = True
             break
-    if not dry_run and any(
+    if not dry_run and reconcile_zhihu and any(
         str(kol.get("platform") or "X").casefold() == "zhihu" for kol in active_kols
     ):
         store.reconcile_zhihu_historical_backfill()

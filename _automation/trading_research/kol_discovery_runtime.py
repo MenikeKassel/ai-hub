@@ -106,7 +106,10 @@ class DirectProfileProvider:
 
     def health(self) -> dict[str, Any]:
         if self.platform == "x":
-            configured = bool(getattr(self.collector.credentials, "configured", lambda: False)())
+            credentials = getattr(self.collector, "credentials", None)
+            configured = bool(
+                getattr(credentials, "configured", lambda: False)()
+            )
             return {
                 "configured": configured,
                 "mode": "direct_profile",
