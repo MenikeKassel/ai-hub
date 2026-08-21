@@ -807,7 +807,7 @@ def _fallback_mode() -> str:
     return value if value in {"shadow", "enabled"} else "shadow"
 
 
-def _post_provider(mode: str):
+def _post_provider(mode: str, *, timeout_seconds: int = 60):
     # The main X session remains sealed. Automated collection uses a separate
     # low-frequency reader identity stored under ai-hub/twitter-reader.
     if mode not in {"auto", "twitter", "nitter"}:
@@ -819,6 +819,7 @@ def _post_provider(mode: str):
             xtf_command=str(XTF_COMMAND),
             nitter_url=NITTER_URL,
             fallback_mode="disabled",
+            twitter_timeout_seconds=timeout_seconds,
         )
     fallback_mode = _fallback_mode()
     if fallback_mode in {"shadow", "enabled"}:
@@ -833,6 +834,7 @@ def _post_provider(mode: str):
         xtf_command=str(XTF_COMMAND),
         nitter_url=NITTER_URL,
         fallback_mode=fallback_mode,
+        twitter_timeout_seconds=timeout_seconds,
     )
 
 
@@ -1023,13 +1025,27 @@ def kol_gap_recover(args: argparse.Namespace) -> None:
         strategy_version="kol-collection-v3",
         total_kols=len(active),
     )
-    provider = _post_provider("auto")
+    provider = _post_provider("auto", timeout_seconds=20)
     aggregate: list[Any] = []
     reset_items = 0
+    skipped_platforms: list[dict[str, Any]] = []
     for platform in ("x", "zhihu"):
         platform_key = platform.casefold()
         fresh_key = f"{batch_id}:{platform_key}:fresh"
         history_key = f"{batch_id}:{platform_key}:history"
+        platform_name = "X" if platform_key == "x" else "Zhihu"
+        platform_coverage = store.collection_coverage(
+            platform=platform_name,
+            window_start=start,
+            window_end=end,
+        )
+        if args.resume and platform_coverage.get("target", 0) and platform_coverage.get("coverage", 0.0) >= 0.9:
+            skipped_platforms.append({
+                "platform": platform_name,
+                "reason": "coverage_already_at_least_90_percent",
+                "coverage": platform_coverage,
+            })
+            continue
         reset_items += store.reset_interrupted_fetch_queue(fresh_key)
         reset_items += store.reset_interrupted_fetch_queue(history_key)
         first = run_post_fetch(
@@ -1064,7 +1080,10 @@ def kol_gap_recover(args: argparse.Namespace) -> None:
     failed = sum(item.failed_kols for item in aggregate)
     new_posts = sum(item.new_posts for item in aggregate)
     errors = [error for item in aggregate for error in item.errors]
-    status = "completed" if not errors or successful else "degraded"
+    pending_queue = sum(item.queue_pending for item in aggregate)
+    if pending_queue:
+        errors.append(f"{pending_queue} recovery queue items remain pending")
+    status = "completed" if not pending_queue and not errors else "degraded"
     store.finish_fetch_batch(
         batch_id,
         status=status,
@@ -1079,6 +1098,7 @@ def kol_gap_recover(args: argparse.Namespace) -> None:
         "scope": args.scope,
         "batch_id": batch_id,
         "reset_interrupted_queue_items": reset_items,
+        "skipped_platforms": skipped_platforms,
         "runs": [item.__dict__ for item in aggregate],
         "coverage": {
             "X": store.collection_coverage(platform="X", window_start=start, window_end=end),

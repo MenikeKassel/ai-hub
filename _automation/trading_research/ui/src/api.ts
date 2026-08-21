@@ -1,5 +1,5 @@
 import type {
-  BulkApprovalPreview, BulkApprovalResult, Checkpoint, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
+  BulkApprovalPreview, BulkApprovalResult, Checkpoint, CollectionCoverageResponse, CollectionRecoveryPreview, CollectionRecoveryRun, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -154,6 +154,10 @@ export const api = {
   pipelineStatus: () => request<PipelineStatus>('/api/pipeline/status'),
   fetchRuns: () => request<FetchRun[]>('/api/fetch-runs'),
   tasks: () => request<OperatorTasks>('/api/tasks'),
+  collectionCoverage: () => request<CollectionCoverageResponse>('/api/collection/coverage'),
+  collectionRecoveryPreview: () => request<CollectionRecoveryPreview>('/api/collection/recovery/preview', { method: 'POST' }),
+  startCollectionRecovery: () => request<CollectionRecoveryRun>('/api/collection/recovery/start', { method: 'POST' }),
+  collectionRecoveryStatus: (runId: string) => request<CollectionRecoveryRun>(`/api/collection/recovery/${encodeURIComponent(runId)}`),
   startTask: (task: 'morning' | 'fetch' | 'zhihu') =>
     request<{ ok: boolean; task: string; started_at: string }>(`/api/tasks/${task}/start`, { method: 'POST' }),
   saveCredentials: (authToken: string, ct0: string) =>

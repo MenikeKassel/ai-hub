@@ -1473,6 +1473,10 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(200, leaderboard.status_code)
             self.assertEqual(6, len(leaderboard.json()["rows"]))
             self.assertTrue(all(row["tier"] == "collecting" for row in leaderboard.json()["rows"]))
+            recovery_preview = client.post("/api/collection/recovery/preview")
+            self.assertEqual(200, recovery_preview.status_code)
+            self.assertIn("coverage", recovery_preview.json())
+            self.assertIn("reader_configured", recovery_preview.json())
             self.assertEqual(400, client.get("/api/summary", headers={"Host": "attacker.example"}).status_code)
             shadow_nitter = client.post(
                 "/api/fetch",

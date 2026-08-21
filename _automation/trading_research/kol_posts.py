@@ -3317,7 +3317,8 @@ class KolPostStore:
                 ) VALUES(?,?,?,?,?,?, 'running',?,?,?)
                 ON CONFLICT(batch_id) DO UPDATE SET
                     updated_at=excluded.updated_at,
-                    status=CASE WHEN fetch_batches.status='completed' THEN fetch_batches.status ELSE 'running' END
+                    status='running',
+                    error=''
                 """,
                 (
                     batch_id,
@@ -4304,6 +4305,7 @@ def build_x_post_provider(
     nitter_url: str = "http://127.0.0.1:9377",
     fallback_mode: str = "enabled",
     proxy_url: str | None = None,
+    twitter_timeout_seconds: int = 60,
 ) -> XPostProvider:
     if mode not in {"auto", "twitter", "nitter"}:
         raise ValueError(f"unsupported X provider: {mode}")
@@ -4311,6 +4313,7 @@ def build_x_post_provider(
         twitter_command,
         twitter_credentials or KeyringCredentialStore(),
         proxy_url=(proxy_url if proxy_url is not None else os.environ.get("KOL_X_PROXY", "http://127.0.0.1:7897")),
+        timeout_seconds=twitter_timeout_seconds,
     )
     fallback = XtfNitterProvider(xtf_command, nitter_url)
     if mode == "twitter":
@@ -5453,7 +5456,7 @@ def run_post_fetch(
             backfill_target = int(kol.get("backfill_requested") or 0)
             completed_depth = int(kol.get("backfill_completed_depth") or 0)
             requested = min(backfill_target, completed_depth + 100)
-        if last_fetched and not backfill_queued:
+        if last_fetched and not backfill_queued and not fresh_first_page:
             try:
                 if datetime.fromisoformat(last_fetched) < datetime.now(SHANGHAI) - timedelta(days=3):
                     requested = max(max_count, 100)
@@ -5467,7 +5470,11 @@ def run_post_fetch(
                 requested,
                 retry_delays,
                 previous_last_id=previous_last_id,
-                max_pages=max_gap_pages if platform == "x" else 1,
+                # A freshness pass is deliberately one page.  Cursor search
+                # belongs to the later recovery pass; expanding here turns a
+                # requested 20-post sweep into 100/200-post calls and can
+                # starve the remaining accounts under platform limits.
+                max_pages=max_gap_pages if platform == "x" and not fresh_first_page else 1,
             )
             if not dry_run:
                 store.record_fetch_attempts(run_id, kol["id"], kol["handle"], fetch_result.attempts)

@@ -1020,7 +1020,7 @@ class ProviderAndFetchTests(unittest.TestCase):
 
         self.assertEqual([100, 50], requested)
 
-    def test_rate_limit_uses_finite_retry(self) -> None:
+    def test_rate_limit_opens_cooldown_without_repeating_the_provider_call(self) -> None:
         calls = 0
 
         class Provider:
@@ -1044,9 +1044,9 @@ class ProviderAndFetchTests(unittest.TestCase):
                 retry_delays=(0, 0),
             )
 
-        self.assertEqual(3, calls)
-        self.assertEqual(1, result.successful_kols)
-        self.assertEqual(0, result.failed_kols)
+        self.assertEqual(1, calls)
+        self.assertEqual(0, result.successful_kols)
+        self.assertEqual(1, result.failed_kols)
 
     def test_authentication_failure_counts_all_unfetched_accounts(self) -> None:
         calls = 0

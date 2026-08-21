@@ -566,6 +566,11 @@ input:focus, select:focus, textarea:focus { border-color: #6b8d82; box-shadow: 0
 .inline-form { margin-bottom: 14px; padding: 14px; display: grid; grid-template-columns: 1fr 1fr 1.4fr auto; gap: 10px; align-items: end; background: #fff; border: 1px solid var(--border); border-radius: 7px; }
 .inline-form label, .credential-form label { color: var(--muted); display: grid; gap: 5px; font-size: 10px; }
 .health-grid { margin-bottom: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 7px; background: #fff; overflow: hidden; }
+.recovery-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #fff; }
+.recovery-status-grid > div { min-width: 0; padding: 12px 14px; border-right: 1px solid var(--border); }
+.recovery-status-grid > div:last-child { border-right: 0; }
+.recovery-status-grid span, .recovery-status-grid small { display: block; color: var(--muted); font-size: 10px; }
+.recovery-status-grid strong { display: block; margin: 4px 0; font-size: 15px; }
 .task-console { margin-bottom: 18px; }
 .task-progress-row { min-height: 58px; padding: 11px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: minmax(180px, 280px) minmax(140px, 1fr) 44px; gap: 14px; align-items: center; }
 .task-progress-row:last-child { border-bottom: 0; }
@@ -785,6 +790,9 @@ input:focus, select:focus, textarea:focus { border-color: #6b8d82; box-shadow: 0
   .task-progress-row progress { grid-column: 1 / -1; grid-row: 2; }
   .task-progress-row b { grid-column: 2; grid-row: 1; }
   .health-grid { grid-template-columns: 1fr 1fr; }
+  .recovery-status-grid { grid-template-columns: 1fr; }
+  .recovery-status-grid > div { border-right: 0; border-bottom: 1px solid var(--border); }
+  .recovery-status-grid > div:last-child { border-bottom: 0; }
   .review-agent-console .panel-heading { align-items: flex-start; flex-direction: column; gap: 9px; }
   .review-agent-console .panel-heading .segmented { width: 100%; }
   .health-item:nth-child(3n) { border-right: 1px solid var(--border); }

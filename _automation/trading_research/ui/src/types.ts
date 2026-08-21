@@ -1036,3 +1036,45 @@ export interface OperatorTasks {
   fetch: FetchRun | null
   morning: NonNullable<Health['morning_runs']>[number] | null
 }
+
+export interface CollectionCoverageItem {
+  platform: 'X' | 'Zhihu'
+  target: number
+  successful: number
+  coverage: number
+  window_start: string
+  window_end: string
+  items: Array<{
+    display_name: string
+    handle: string
+    fetch_status: string
+    availability_status: string
+    last_success_at: string
+    window_posts: number
+  }>
+}
+
+export interface CollectionCoverageResponse {
+  platform: 'all'
+  items: CollectionCoverageItem[]
+}
+
+export interface CollectionRecoveryPreview {
+  ok: boolean
+  scope: 'recent'
+  window_start: string
+  window_end: string
+  coverage: CollectionCoverageItem[]
+  reader_configured: boolean
+  ai_is_optional: boolean
+}
+
+export interface CollectionRecoveryRun {
+  run_id: string
+  status: 'running' | 'completed' | 'cancelled'
+  pid: number
+  log: string
+  started_at: string
+  completed_at?: string
+  coverage?: Record<string, CollectionCoverageItem>
+}
