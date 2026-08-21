@@ -70,6 +70,42 @@ operator error and use `delegate-to-codex` for maintenance.
 - `list-events`, `event-action`: manage explicit event IDs; use the UI for
   amendments that can recalculate returns.
 
+## Collection recovery
+
+Use the deterministic collection recovery actions when the user reports that
+the workbench has been offline or that recent posts are missing:
+
+- `collection-doctor`: report Reader credential state, X/知乎 coverage,
+  provider cooldowns, open gaps and pending queue items.
+- `gap-audit`: inspect a supplied date window; a successful fetch with zero new
+  posts is inactivity, not a gap.
+- `gap-recover`: recover `recent` first with `--resume`; only start
+  `historical` recovery after the recent window is complete. The operator owns
+  the 20-post freshness pass, cursor checkpoints and batch lock.
+- `ai-resume`: resume only the already-collected AI queue. An AI 503 is
+  reported as `collected_waiting_for_ai`, never as a collection failure.
+
+Recovery rules:
+
+1. Run status/doctor before starting recovery and never create a second active
+   recovery run. If one is running, report its progress.
+2. X automation uses only the isolated `ai-hub/twitter-reader` identity. The
+   sealed primary X credential must never be requested or exposed.
+3. A rate limit, timeout, ClientTransaction error or Nitter failure is a
+   provider problem. Do not label the account suspended; only an explicit
+   platform suspension result may do that.
+4. A failed account remains in the resumable queue. Do not retry it repeatedly
+   in the same request, and do not claim 100% coverage when the operator
+   reports a degraded batch.
+5. Zhihu collection uses one platform-level CDP preflight. If it fails, stop
+   that platform batch without opening one browser per account.
+6. Report X and Zhihu coverage separately, including the date window, last
+   successful time and next action. Do not merge their denominators.
+
+Hermes may call only the corresponding `kol_operator` actions for this flow;
+it must not invoke terminal, raw Python, PowerShell, provider CLIs, or database
+commands to implement recovery.
+
 ## Full-platform discovery
 
 The discovery page is part of the main 8123 console. Use the deterministic

@@ -923,6 +923,7 @@ export interface Health {
   ok: boolean
   twitter_cli: string
   twitter_credentials_configured: boolean
+  twitter_reader_credentials_configured?: boolean
   twitter_auth_status: string
   zhihu_capture_available: boolean
   zhihu_active_kols: number

@@ -3397,6 +3397,10 @@ class KolPostStore:
             1 for item in items
             if str(item.get("last_success_at") or "")
             and str(item.get("fetch_status") or "") in {"success", "gap_detected"}
+            and (
+                not window_start
+                or str(item.get("last_success_at") or "")[:10] >= window_start
+            )
         )
         return {
             "platform": platform or "all",

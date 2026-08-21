@@ -1724,6 +1724,24 @@ def create_app(
     def collection_recovery_start() -> dict[str, Any]:
         if not reader_credentials.configured():
             raise HTTPException(409, "twitter-reader credentials are not configured")
+        for existing in collection_runs.values():
+            if existing.get("status") != "running":
+                continue
+            try:
+                process = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {existing['pid']}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if str(existing["pid"]) in (process.stdout or ""):
+                    raise HTTPException(409, "a collection recovery run is already active")
+            except HTTPException:
+                raise
+            except Exception:
+                existing["status"] = "completed"
+                existing["completed_at"] = now_iso()
         run_id = uuid.uuid4().hex
         cli = ROOT / "_automation" / "trading_research" / "trading_cli.py"
         log_dir = config.runtime_root / "kol" / "logs"

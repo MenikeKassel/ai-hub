@@ -991,7 +991,9 @@ def kol_gap_audit(args: argparse.Namespace) -> None:
         )
         payload["platforms"][platform] = coverage
         for item in coverage["items"]:
-            if not item.get("last_success_at") or item.get("window_posts", 0) == 0:
+            last_success = str(item.get("last_success_at") or "")[:10]
+            fetch_status = str(item.get("fetch_status") or "")
+            if not last_success or last_success < start or fetch_status not in {"success", "gap_detected"}:
                 kol = store.get_kol(int(item["id"]))
                 store.open_collection_gap(
                     int(item["id"]),
@@ -1000,9 +1002,22 @@ def kol_gap_audit(args: argparse.Namespace) -> None:
                     window_end=end,
                     last_post_id=str((kol or {}).get("last_post_id") or ""),
                     status="open",
-                    error="no posts observed in recovery window",
+                    error="no successful fetch observed in recovery window",
                 )
                 payload["gaps"].append({"platform": platform, **item})
+            else:
+                # Zero posts after a successful fetch is valid inactivity, not
+                # a collection gap. Close an older false-positive gap while
+                # keeping its row and verification timestamp for audit.
+                store.open_collection_gap(
+                    int(item["id"]),
+                    platform=platform,
+                    window_start=start,
+                    window_end=end,
+                    last_post_id="",
+                    status="closed",
+                    error="fetch succeeded; no activity is not a gap",
+                )
     payload["open_gaps"] = store.list_collection_gaps(status="open", limit=1000)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
