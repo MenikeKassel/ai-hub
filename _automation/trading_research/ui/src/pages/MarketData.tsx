@@ -74,6 +74,10 @@ export default function MarketData() {
       <div className="provider-status-grid">
         <span>Release <strong className="mono">{value?.foundation?.release_id || '-'}</strong></span>
         <span>有效日期 <strong>{value?.foundation?.as_of || '-'}</strong></span>
+        <span>发布阶段 <strong>{value?.foundation?.release_stage || 'legacy'}</strong></span>
+        <span>核验状态 <strong>{value?.foundation?.verification_status || '-'}</strong></span>
+        <span>主源 <strong>{value?.foundation?.primary_provider || '-'}</strong></span>
+        <span>核验源 <strong>{value?.foundation?.verification_provider || '-'}</strong></span>
         <span>覆盖率 <strong>{value?.foundation?.coverage?.coverage_ratio != null ? `${(value.foundation.coverage.coverage_ratio * 100).toFixed(1)}%` : '-'}</strong></span>
         <span>状态 <strong>{value?.foundation?.coverage_complete ? 'valid' : 'partial'}</strong></span>
       </div>

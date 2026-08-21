@@ -88,6 +88,7 @@ MARK_FIELDS = [
     "valuation_close",
     "last_trade_date",
     "foundation_release_id",
+    "foundation_release_stage",
 ]
 
 CHECKPOINT_FIELDS = [
@@ -114,6 +115,7 @@ CHECKPOINT_FIELDS = [
     "valuation_close",
     "last_trade_date",
     "foundation_release_id",
+    "foundation_release_stage",
 ]
 
 
@@ -280,8 +282,16 @@ class KolStore:
         if not marks_need_migration and not checkpoints_need_migration:
             return
         with FileLock(str(self.returns_lock_path), timeout=60):
-            marks_need_migration = bool(self._csv_fields(self.marks_path)) and "max_favorable_return" not in self._csv_fields(self.marks_path)
-            checkpoints_need_migration = bool(self._csv_fields(self.checkpoints_path)) and "max_favorable_return" not in self._csv_fields(self.checkpoints_path)
+            current_mark_fields = self._csv_fields(self.marks_path)
+            current_checkpoint_fields = self._csv_fields(self.checkpoints_path)
+            marks_need_migration = bool(current_mark_fields) and (
+                "max_favorable_return" not in current_mark_fields
+                or any(field not in current_mark_fields for field in MARK_FIELDS)
+            )
+            checkpoints_need_migration = bool(current_checkpoint_fields) and (
+                "max_favorable_return" not in current_checkpoint_fields
+                or any(field not in current_checkpoint_fields for field in CHECKPOINT_FIELDS)
+            )
             if not marks_need_migration and not checkpoints_need_migration:
                 return
             marks = self._read_csv(self.marks_path)
@@ -944,6 +954,7 @@ def calculate_event_history(
                 "valuation_close": _format_number(valuation_close),
                 "last_trade_date": last_trade_date.strftime("%Y-%m-%d"),
                 "foundation_release_id": str(row.get("foundation_release_id", "")),
+                "foundation_release_stage": str(row.get("foundation_release_stage", "")),
             }
         )
 
@@ -981,6 +992,7 @@ def calculate_event_history(
                 "valuation_close": mark.get("valuation_close", mark.get("close_raw", "")),
                 "last_trade_date": mark.get("last_trade_date", mark.get("trade_date", "")),
                 "foundation_release_id": mark.get("foundation_release_id", ""),
+                "foundation_release_stage": mark.get("foundation_release_stage", ""),
             }
         )
 
@@ -1494,6 +1506,14 @@ def update_kol_tracking(
     checkpoints_to_freeze: list[dict[str, str]] = []
     checkpoint_source_failures: set[str] = set()
     checkpoint_verifier_open = False
+    foundation_stage = ""
+    foundation = getattr(primary, "foundation", None)
+    if foundation is not None:
+        try:
+            foundation_stage = str(foundation.release().get("release_stage") or "legacy")
+        except Exception:
+            foundation_stage = "legacy"
+    checkpoint_freeze_allowed = foundation is None or foundation_stage == "verified"
 
     # The shared foundation stores all instruments in a small number of large
     # Parquet files. Prefetch once per release so a 500-event replay does not
@@ -1606,6 +1626,8 @@ def update_kol_tracking(
                 != row.get("foundation_release_id", "")
             )
         ]
+        if event_checkpoints and not checkpoint_freeze_allowed:
+            event_checkpoints = []
         if event_checkpoints and verifier is not None and not checkpoint_verifier_open:
             try:
                 secondary_raw = verifier.fetch_stock(event.symbol, start, as_of, adjusted=False)

@@ -3109,7 +3109,10 @@ def market_purchased_daily_import(args: argparse.Namespace) -> None:
 
 
 def market_freestockdb_doctor(args: argparse.Namespace) -> None:
-    runtime = FreeStockDBRuntime()
+    runtime = FreeStockDBRuntime(
+        root=getattr(args, "root", None) or None,
+        data_root=getattr(args, "data_root", None) or None,
+    )
     expected = date.fromisoformat(args.expected_date) if args.expected_date else None
     result = runtime.doctor(expected_trade_date=expected)
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -3118,7 +3121,10 @@ def market_freestockdb_doctor(args: argparse.Namespace) -> None:
 
 
 def market_freestockdb_update(args: argparse.Namespace) -> None:
-    runtime = FreeStockDBRuntime()
+    runtime = FreeStockDBRuntime(
+        root=getattr(args, "root", None) or None,
+        data_root=getattr(args, "data_root", None) or None,
+    )
     try:
         result = runtime.update(
             dry_run=bool(args.dry_run),
@@ -4242,6 +4248,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-date",
         help="expected latest completed A-share trading date (YYYY-MM-DD)",
     )
+    p_market_freestockdb_doctor.add_argument("--root")
+    p_market_freestockdb_doctor.add_argument("--data-root")
     p_market_freestockdb_doctor.set_defaults(func=market_freestockdb_doctor)
 
     p_market_freestockdb_update = sub.add_parser(
@@ -4258,6 +4266,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-date",
         help="required latest A-share trading date after the update (YYYY-MM-DD)",
     )
+    p_market_freestockdb_update.add_argument("--root")
+    p_market_freestockdb_update.add_argument("--data-root")
     p_market_freestockdb_update.set_defaults(func=market_freestockdb_update)
 
     p_market_freestockdb_repair = sub.add_parser(

@@ -35,7 +35,11 @@ function Register-ResearchTask([string]$Name, [string]$ScriptName, $Trigger, [st
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $Trigger -Settings $effectiveSettings -Principal $principal -Description $Description -Force | Out-Null
 }
 
-Register-ResearchTask "Market_Data_Sync_Daily" "market-data-sync.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "19:30") "Update active A-share, ETF, and benchmark daily data."
+Register-ResearchTask "Market_Data_Sync_Daily" "market-data-sync.ps1" @(
+    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "19:30"),
+    (New-ScheduledTaskTrigger -Daily -At "23:30"),
+    (New-ScheduledTaskTrigger -Daily -At "06:30")
+) "Read the current unified A-share foundation release and refresh derived market data only when the release changes."
 Register-ResearchTask "FreeStockDB_Update_Daily" "freestockdb-update.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "17:50") "Verify and update the isolated local FreeStockDB mirror before market sync." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 90) -Hidden)
 Register-ResearchTask "KOL_Zhihu_Fetch_Morning" "kol-post-fetch.ps1" (New-ScheduledTaskTrigger -Daily -At "06:30") "Fetch active Zhihu KOL answers before the morning review queue." $settings "-Platform zhihu -FetchCount 10 -NoNotify -SkipAiPrefill"
 Register-ResearchTask "KOL_Zhihu_Fetch_Evening" "kol-post-fetch.ps1" (New-ScheduledTaskTrigger -Daily -At "19:20") "Fetch active Zhihu KOL answers for the next morning preview." $settings "-Platform zhihu -FetchCount 10 -NoNotify"

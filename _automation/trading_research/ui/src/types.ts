@@ -538,6 +538,11 @@ export interface MarketHealth {
     ok?: boolean
     release_id?: string
     as_of?: string
+    release_stage?: 'provisional' | 'verified' | 'legacy' | string
+    primary_provider?: string
+    verification_provider?: string
+    verification_status?: string
+    coverage_ratio?: number | null
     root?: string
     coverage?: {
       trade_date?: string

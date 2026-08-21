@@ -28,8 +28,22 @@ _FILE = Path(__file__).resolve()
 _REPO_ROOT = _FILE.parents[2]
 _WORKSPACE_ROOT = _FILE.parents[3]
 
+def _infer_data_root(root: Path) -> Path:
+    """Prefer the resolved stockdb/data junction over a stale E: live folder."""
+    linked_data = root / "data"
+    try:
+        resolved = linked_data.resolve(strict=False)
+        if linked_data.exists() and resolved != linked_data:
+            return resolved
+    except OSError:
+        pass
+    return root / "live"
+
+
 DEFAULT_ROOT = Path(os.environ.get("FREESTOCKDB_ROOT", _WORKSPACE_ROOT / "stockdb"))
-DEFAULT_DATA_ROOT = Path(os.environ.get("FREESTOCKDB_DATA_ROOT", Path(os.environ.get("FREESTOCKDB_ROOT", _WORKSPACE_ROOT / "stockdb")) / "live"))
+DEFAULT_DATA_ROOT = Path(
+    os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(DEFAULT_ROOT))
+)
 DEFAULT_URL = os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899")
 DEFAULT_RUNTIME_ROOT = Path(
     os.environ.get("TRADING_RUNTIME_ROOT", Path(__file__).resolve().parents[2] / "_runtime" / "trading")
@@ -129,11 +143,17 @@ class FreeStockDBRuntime:
         server_sha256: str = EXPECTED_SERVER_SHA256,
         updater_sha256: str = EXPECTED_UPDATER_SHA256,
     ) -> None:
-        resolved_root = Path(root or DEFAULT_ROOT).expanduser()
+        resolved_root = Path(root or os.environ.get("FREESTOCKDB_ROOT", DEFAULT_ROOT)).expanduser()
         if data_root is not None:
             resolved_data_root = Path(data_root).expanduser()
-        elif root is None or resolved_root.resolve() == DEFAULT_ROOT.resolve():
-            resolved_data_root = DEFAULT_DATA_ROOT.expanduser()
+        elif root is None:
+            resolved_data_root = Path(
+                os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(resolved_root))
+            ).expanduser()
+        elif resolved_root.resolve() == DEFAULT_ROOT.resolve():
+            resolved_data_root = Path(
+                os.environ.get("FREESTOCKDB_DATA_ROOT", _infer_data_root(resolved_root))
+            ).expanduser()
         else:
             resolved_data_root = resolved_root
         self.paths = FreeStockDBPaths.from_root(
@@ -476,6 +496,22 @@ class FreeStockDBRuntime:
 
         current = as_of or datetime.now().astimezone()
         cutoff = current.date() - timedelta(days=1) if current.hour < 15 else current.date()
+        foundation_root = Path(
+            os.environ.get("ASHARE_DATA_ROOT", r"F:\ai-data\ashare")
+        ).expanduser()
+        pointer = foundation_root / "current.json"
+        if pointer.is_file():
+            try:
+                release = json.loads(pointer.read_text(encoding="utf-8"))
+                value = date.fromisoformat(str(release.get("as_of")))
+                if value <= cutoff:
+                    return {
+                        "date": value,
+                        "source": "ashare_foundation_current",
+                        "release_id": str(release.get("release_id") or ""),
+                    }
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
         database = self.paths.state.parent / "market.duckdb"
         if database.is_file():
             try:

@@ -93,6 +93,11 @@ class FoundationMarketReader:
                     "root": str(self.root),
                     "release_id": str(release["release_id"]),
                     "as_of": str(release["as_of"]),
+                    "release_stage": str(release.get("release_stage") or "legacy"),
+                    "primary_provider": str(release.get("primary_provider") or ""),
+                    "verification_provider": str(release.get("verification_provider") or ""),
+                    "coverage_ratio": release.get("coverage_ratio"),
+                    "verification_status": str(release.get("verification_status") or ""),
                     "datasets": list(release.get("datasets") or []),
                 }
         except (FileNotFoundError, KeyError, TypeError, ValueError, OSError) as error:
@@ -179,6 +184,7 @@ class FoundationMarketReader:
         output["last_trade_date"] = output["trade_date"].where(output["market_open"])
         output["provider"] = "ashare-data-foundation"
         output["foundation_release_id"] = str(release["release_id"])
+        output["foundation_release_stage"] = str(release.get("release_stage") or "legacy")
         return {
             symbol: (
                 output[output["symbol"] == symbol]
