@@ -1,4 +1,4 @@
-﻿# KOL and A-share Data Collection v3
+# KOL and A-share Data Collection v3
 
 Updated: 2026-07-14
 

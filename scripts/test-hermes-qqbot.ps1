@@ -1,7 +1,7 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
-    [string]$HermesRepo = "<USER_HOME>\AppData\Local\hermes\hermes-agent",
-    [string]$Uv = "<USER_HOME>\AppData\Local\hermes\bin\uv.exe"
+    [string]$HermesRepo = "$env:LOCALAPPDATA\hermes\hermes-agent",
+    [string]$Uv = "$env:LOCALAPPDATA\hermes\bin\uv.exe"
 )
 
 $ErrorActionPreference = "Stop"

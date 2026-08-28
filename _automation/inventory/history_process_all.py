@@ -1,4 +1,4 @@
-﻿"""Build a full processing ledger for historical Notion and X favorites.
+"""Build a full processing ledger for historical Notion and X favorites.
 
 This script is the all-item layer of the Notion/X -> Obsidian workflow.
 It does not bulk-promote everything into Obsidian. Instead, every raw item is:
@@ -20,17 +20,19 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
-DEFAULT_NOTION_ROOT = r"F:\notion"
-DEFAULT_TWITTER_INPUT = r"<AI_HUB_HOME>\twitter-喜欢-1781096618442.json"
-DEFAULT_OUT_DIR = r"<AI_HUB_HOME>\ai-hub\_runtime\staging"
-DEFAULT_VAULT = r"<OBSIDIAN_VAULT>"
-DEFAULT_OBSIDIAN_REPORT = r"<OBSIDIAN_VAULT>\06_Logs\2026-07-02-history-processing-ledger.md"
-INFO_COLLECTION_ID = "285526335cd6800e96b4c9d97bba2c58"
+# 本地路径/ID 不再硬编码: 通过环境变量提供(缺失时在 main/find_info_csv 给出清晰错误)
+DEFAULT_NOTION_ROOT = os.environ.get("NOTION_EXPORT_ROOT", "")
+DEFAULT_TWITTER_INPUT = os.environ.get("TWITTER_FAVORITES_JSON", "")
+DEFAULT_OUT_DIR = os.environ.get("STAGING_DIR", "")
+DEFAULT_VAULT = os.environ.get("OBSIDIAN_VAULT", "")
+DEFAULT_OBSIDIAN_REPORT = os.environ.get("OBSIDIAN_REPORT_PATH", "")
+INFO_COLLECTION_ID = os.environ.get("NOTION_INFO_COLLECTION_ID", "")
 
 CHINESE_KEYS = {
     "title": "日期",
@@ -230,6 +232,10 @@ def get_cell(row: dict[str, str], key_name: str) -> str:
 
 
 def find_info_csv(root: Path) -> Path:
+    if not INFO_COLLECTION_ID:
+        raise ValueError(
+            "未配置 Notion 信息收集库 ID: 请设置环境变量 NOTION_INFO_COLLECTION_ID"
+        )
     matches = [
         path
         for path in root.rglob(f"*{INFO_COLLECTION_ID}*_all.csv")
@@ -734,7 +740,7 @@ def build_report(summary: dict, top_items: list[dict]) -> str:
             "## 固定规则",
             "",
             "- `raw_index_only`：只保留在台账，不进入 Obsidian 正文。",
-            "- `source_note_needed`：写 `source-note-placeholder.md",
+            "- `source_note_needed`：写 `01_Sources/`，必要时连到项目页。",
             "- `source_resolution_needed`：只有 X/t.co 线索，必须先解析公开源；未确认前不写 Wiki。",
             "- `llm_wiki_needed`：必须走 `01_Sources -> wiki/summaries -> wiki/concepts/entities -> wiki/synthesis -> wiki/index`。",
             "- `kol_event_candidate`：先进入来源页或事件候选，只有满足 KOL、标的、方向、理由、日期、原始链接六要素，才写入 KOL 推荐事件表。",
@@ -752,6 +758,17 @@ def write_jsonl(path: Path, items: list[dict]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if not (
+        args.notion_root
+        and args.twitter_input
+        and args.out_dir
+        and args.vault
+        and args.obsidian_report
+    ):
+        raise ValueError(
+            "缺少必要路径: 请设置环境变量 NOTION_EXPORT_ROOT / TWITTER_FAVORITES_JSON / "
+            "STAGING_DIR / OBSIDIAN_VAULT / OBSIDIAN_REPORT_PATH, 或对应的 --* 命令行参数"
+        )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     vault = Path(args.vault)

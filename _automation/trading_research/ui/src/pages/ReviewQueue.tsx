@@ -233,6 +233,8 @@ export default function ReviewQueue() {
   const [pendingFilter, setPendingFilter] = useState<PendingFilter>('all')
   const [historyPage, setHistoryPage] = useState(1)
   const [selectedPostId, setSelectedPostId] = useState('')
+  const [bulkPreview, setBulkPreview] = useState<Awaited<ReturnType<typeof api.bulkPreviewRecommendationDrafts>> | null>(null)
+  const [bulkResult, setBulkResult] = useState<Awaited<ReturnType<typeof api.bulkApproveRecommendationDrafts>> | null>(null)
   const query = useQuery({
     queryKey: ['morning-review', reviewDate, historyPage],
     queryFn: () => api.morningReview(reviewDate, historyPage),
@@ -245,6 +247,15 @@ export default function ReviewQueue() {
       client.invalidateQueries({ queryKey: ['pipeline-status'] })
     },
   })
+  const bulkPreviewMutation = useMutation({
+    mutationFn: () => api.bulkPreviewRecommendationDrafts(reviewDate, 'morning'),
+    onSuccess: (value) => { setBulkPreview(value); setBulkResult(null) },
+  })
+  const bulkApproveMutation = useMutation({
+    mutationFn: (token: string) => api.bulkApproveRecommendationDrafts(token, '批量批准当前晨报可批准草稿'),
+    onSuccess: (value) => { setBulkResult(value); setBulkPreview(null); refresh() },
+  })
+  const canBulkApprove = reviewDate === today() && view === 'pending' && pendingFilter === 'all'
   const allDrafts = useMemo(() => {
     const unique = new Map<number, RecommendationDraft>()
     ;[...(query.data?.drafts || []), ...(query.data?.history_drafts || []), ...(query.data?.approved_drafts || [])].forEach((draft) => unique.set(draft.id, draft))
@@ -302,6 +313,7 @@ export default function ReviewQueue() {
         : delivery.latest_run_id
           ? `${delivery.latest_phase || 'pipeline'} · ${delivery.stage || delivery.latest_status} · ${delivery.progress_current}/${delivery.progress_total}`
           : '完整晨报尚未启动；帖子补抓成功后仍需运行完整晨报。'}{delivery.completed_at ? ` · ${formatDate(delivery.completed_at)}` : ''}</p>
+      {delivery.platform_breakdown && <div className="platform-breakdown">{Object.entries(delivery.platform_breakdown).map(([platform, value]) => <span key={platform}><b>{platform === 'x' ? 'X' : platform === 'zhihu' ? '知乎' : platform}</b> {value.success}/{value.target} 成功{value.rate_limited ? ` · 限流 ${value.rate_limited}` : ''}{value.blocked ? ` · 熔断 ${value.blocked}` : ''}{value.provider_failed ? ` · 失败 ${value.provider_failed}` : ''}</span>)}</div>}
       {delivery.errors.length > 0 && <details className="morning-delivery-errors"><summary>{delivery.errors.length} 组异常，展开查看</summary><small>{delivery.errors.join('；')}</small></details>}
     </div>}
     <div className="metric-grid metric-grid-five morning-metrics" aria-label="晨间队列筛选">
@@ -312,6 +324,16 @@ export default function ReviewQueue() {
         </button>
       })}
     </div>
+    {view === 'pending' && <div className="bulk-approval-toolbar"><button className="primary-button" disabled={!canBulkApprove || bulkPreviewMutation.isPending} title={!canBulkApprove ? '仅允许对今日晨报的全部可批准草稿执行批量操作' : '先预览，再确认批量批准'} onClick={() => bulkPreviewMutation.mutate()}>批准当前可批准项</button>{reviewDate !== today() && <span className="secondary-line">批量批准仅开放给今日晨报</span>}{pendingFilter === 'attention' && <span className="secondary-line">异常筛选不会进入批量批准</span>}</div>}
+    {bulkPreviewMutation.isError && <div className="error-banner">批量预览失败：{String(bulkPreviewMutation.error)}</div>}
+    {bulkApproveMutation.isError && <div className="error-banner">批量批准失败：{String(bulkApproveMutation.error)}</div>}
+    {bulkPreview && <div className="bulk-approval-panel panel">
+      <div className="panel-heading"><div><h2>批量批准预览</h2><span>仅包含当前晨报中 ready 且无阻塞原因的草稿。</span></div><button className="icon-button" onClick={() => setBulkPreview(null)} title="关闭"><X size={15} /></button></div>
+      <p><strong>{bulkPreview.count}</strong> 条草稿将逐条注册为正式事件。快照有效至 {formatDate(bulkPreview.expires_at)}。</p>
+      <div className="bulk-approval-list">{bulkPreview.drafts.slice(0, 12).map((draft) => <span key={draft.id} className="badge neutral">{draft.symbol} {draft.security_name}</span>)}{bulkPreview.count > 12 && <span className="badge neutral">另有 {bulkPreview.count - 12} 条</span>}</div>
+      <div className="review-actions"><button className="secondary-button" onClick={() => setBulkPreview(null)}>取消</button><button className="primary-button" disabled={bulkApproveMutation.isPending} onClick={() => bulkApproveMutation.mutate(bulkPreview.snapshot_token)}><Check size={15} />确认批量批准</button></div>
+    </div>}
+    {bulkResult && <div className="notice-banner">批量批准完成：成功 {bulkResult.approved.length}，跳过 {bulkResult.skipped.length}，失败 {bulkResult.failed.length}；行情刷新已{bulkResult.refresh_status === 'queued' ? '排队' : '无需排队'}。</div>}
     <div className="morning-view-bar">
       <span><strong>{viewMeta[view].label}</strong>{viewMeta[view].description}</span>
       {view === 'pending' && <div className="header-actions"><div className="segmented" role="tablist"><button className={pendingFilter === 'all' ? 'active' : ''} onClick={() => setPendingFilter('all')}>全部草稿</button><button className={pendingFilter === 'attention' ? 'active' : ''} onClick={() => setPendingFilter('attention')}>只看异常</button></div><div className="segmented" aria-label="历史修复分页"><button className="icon-button" title="上一页历史修复" disabled={historyPage <= 1} onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}>‹</button><span className="pagination-label">历史第 {historyPage} 页</span><button className="icon-button" title="下一页历史修复" disabled={!query.data?.history_has_more} onClick={() => setHistoryPage((value) => value + 1)}>›</button></div></div>}

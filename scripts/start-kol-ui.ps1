@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [int]$Port = 8123,
@@ -7,6 +7,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+# uv-installed reader tools live in the per-user bin directory.  Make the
+# managed API inherit that path so scheduled/manual collection resolves
+# ``twitter.exe`` without relying on a global PATH edit.
+$userToolBin = Join-Path $env:USERPROFILE ".local\bin"
+if (Test-Path -LiteralPath $userToolBin) { $env:PATH = "$userToolBin;$env:PATH" }
+$workspaceRoot = Split-Path -Parent $RepoRoot
+$env:FREESTOCKDB_ROOT = Join-Path $workspaceRoot "freestock\stockdb"
+$env:FREESTOCKDB_DATA_ROOT = $env:FREESTOCKDB_ROOT
+$env:FREESTOCKDB_URL = "http://127.0.0.1:7899"
+# Keep Zhihu collection in its isolated Hermes profile.  Chrome is selected
+# explicitly because the regular Edge desktop session can hold the profile
+# lock and does not expose the DevTools endpoint reliably.
+$zhihuChrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+if (Test-Path -LiteralPath $zhihuChrome) { $env:ZHIHU_BROWSER_PATH = $zhihuChrome }
+$env:ZHIHU_PROFILE_DIRECTORY = "Default"
+$env:ZHIHU_USER_DATA_DIR = Join-Path $env:LOCALAPPDATA "hermes\browser-profiles\zhihu-edge"
+$env:ZHIHU_CDP_PORT = "9223"
+$freestockStarter = Join-Path $RepoRoot "scripts\start-freestockdb.ps1"
+if (-not (Test-Path -LiteralPath $freestockStarter)) { throw "FreeStockDB starter not found: $freestockStarter" }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $freestockStarter -RepoRoot $RepoRoot
+if ($LASTEXITCODE -ne 0) { throw "FreeStockDB did not become ready on 127.0.0.1:7899." }
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $appDirectory = Join-Path $RepoRoot "_automation\trading_research"
@@ -35,6 +56,35 @@ function Get-ListenerProcess {
     } catch {
         return @()
     }
+}
+
+function Get-ProcessRecord {
+    param([int]$ProcessId)
+    try {
+        return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
+    } catch {
+        return $null
+    }
+}
+
+function Test-ExpectedListener {
+    $listeners = @(Get-ListenerProcess)
+    foreach ($listenerId in $listeners) {
+        $listener = Get-ProcessRecord $listenerId
+        if (-not $listener) { continue }
+        if ($listener.CommandLine -notmatch "kol_api:app" -or
+            $listener.CommandLine -notmatch "--port\s+$Port") { continue }
+
+        # On Windows, a venv launcher can leave the base interpreter in the
+        # listening child command line. The supervisor remains the source of
+        # truth for the selected venv in that case.
+        if ($listener.CommandLine -match [regex]::Escape($python)) { return $true }
+        if ($listener.ParentProcessId) {
+            $parent = Get-ProcessRecord $listener.ParentProcessId
+            if ($parent -and $parent.CommandLine -match [regex]::Escape($python)) { return $true }
+        }
+    }
+    return $false
 }
 
 function Get-ErrorTail {
@@ -87,10 +137,14 @@ try {
         throw "Another KOL UI start operation is already in progress."
     }
 
-    if (Get-HttpReady) {
+    if ((Get-HttpReady) -and (Test-ExpectedListener)) {
         if (-not $NoBrowser) { Start-Process $url }
         Write-Host "KOL research console is already running: $url"
         exit 0
+    }
+
+    if (Get-HttpReady) {
+        throw "Port $Port serves an unmanaged KOL UI process; stop it explicitly before starting the project."
     }
 
     $listeners = @(Get-ListenerProcess)
@@ -126,6 +180,7 @@ try {
     Set-Content -LiteralPath $pidPath -Value $process.Id -Encoding ASCII
     $metadata = [ordered]@{
         pid = $process.Id
+        supervisor_pid = $process.Id
         port = $Port
         python = $identity.executable
         python_version = $identity.version
@@ -143,8 +198,35 @@ try {
         if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
         throw "KOL UI failed to start. interpreter=$($identity.executable); stderr=$((Get-ErrorTail))"
     }
+    $listenerIds = @(Get-ListenerProcess)
+    $managedListener = $null
+    foreach ($listenerId in $listenerIds) {
+        $listener = Get-ProcessRecord $listenerId
+        if (-not $listener -or $listener.CommandLine -notmatch "kol_api:app") { continue }
+        if ($listener.CommandLine -match [regex]::Escape($python)) {
+            $managedListener = $listener
+            break
+        }
+        $parent = if ($listener.ParentProcessId) { Get-ProcessRecord $listener.ParentProcessId } else { $null }
+        if ($parent -and $parent.CommandLine -match [regex]::Escape($python)) {
+            $managedListener = $listener
+            break
+        }
+    }
+    if (-not $managedListener) {
+        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        throw "KOL UI became healthy but its listener is not owned by the selected interpreter: $($identity.executable)"
+    }
+    # Store the actual listener PID for status/stop operations and retain the
+    # venv launcher as supervisor_pid for diagnostics.
+    Set-Content -LiteralPath $pidPath -Value $managedListener.ProcessId -Encoding ASCII
+    $metadata.pid = [int]$managedListener.ProcessId
+    $metadata.listener_pid = [int]$managedListener.ProcessId
+    $metadata.supervisor_pid = [int]$process.Id
+    $metadata.listener_command = $managedListener.CommandLine
+    $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath $metadataPath -Encoding UTF8
     if (-not $NoBrowser) { Start-Process $url }
-    Write-Host "KOL research console: $url (pid=$($process.Id), python=$($identity.executable))"
+    Write-Host "KOL research console: $url (pid=$($managedListener.ProcessId), supervisor=$($process.Id), python=$($identity.executable))"
 } finally {
     if ($savedPythonEnvironment.Count -gt 0) {
         Restore-ProcessEnvironment $savedPythonEnvironment

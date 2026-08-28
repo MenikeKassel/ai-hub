@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -9,10 +10,21 @@ from pathlib import Path
 from typing import Any
 
 
-APPDATA_HOME = Path(r"<USER_HOME>\AppData\Local\hermes")
-LEGACY_HOME = Path(r"<USER_HOME>\.hermes")
+# 从环境变量推导 Hermes 主目录, 避免硬编码用户名
+_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "")
+_USERPROFILE = os.environ.get("USERPROFILE", "")
+APPDATA_HOME = (
+    Path(_LOCALAPPDATA) / "hermes"
+    if _LOCALAPPDATA
+    else Path(r"C:\Users\YOUR_USER\AppData\Local\hermes")
+)
+LEGACY_HOME = (
+    Path(_USERPROFILE) / ".hermes"
+    if _USERPROFILE
+    else Path(r"C:\Users\YOUR_USER\.hermes")
+)
 PIPELINE = Path(__file__).resolve().parent / "capture_pipeline.py"
-VAULT = Path(r"<OBSIDIAN_VAULT>")
+VAULT = Path(r"F:\research")
 
 
 def check(name: str, ok: bool, detail: str = "") -> dict[str, Any]:

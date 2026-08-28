@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [string]$ProxyUrl = "http://127.0.0.1:7897"

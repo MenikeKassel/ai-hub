@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import gzip
 import hashlib
@@ -407,7 +407,8 @@ class MarketStore:
                     warnings_json VARCHAR NOT NULL,
                     source_hash VARCHAR NOT NULL,
                     error VARCHAR NOT NULL,
-                    computed_at VARCHAR NOT NULL
+                    computed_at VARCHAR NOT NULL,
+                    foundation_release_id VARCHAR NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS event_intraday_context(
                     snapshot_id VARCHAR PRIMARY KEY,
@@ -493,6 +494,16 @@ class MarketStore:
                     }
                     if "direction" not in intraday_columns:
                         db.execute("ALTER TABLE event_intraday_context ADD COLUMN direction VARCHAR DEFAULT 'long'")
+                    context_columns = {
+                        str(row[0])
+                        for row in db.execute(
+                            "SELECT column_name FROM information_schema.columns WHERE table_name='event_technical_context'"
+                        ).fetchall()
+                    }
+                    if "foundation_release_id" not in context_columns:
+                        db.execute(
+                            "ALTER TABLE event_technical_context ADD COLUMN foundation_release_id VARCHAR DEFAULT ''"
+                        )
                     if context_table_exists and not context_has_snapshot_id:
                         db.execute(
                             """
@@ -514,9 +525,9 @@ class MarketStore:
                         db.execute("DROP TABLE event_technical_context_v3")
                     count = db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0]
                     if count:
-                        db.execute("UPDATE schema_meta SET version=8")
+                        db.execute("UPDATE schema_meta SET version=9")
                     else:
-                        db.execute("INSERT INTO schema_meta VALUES (8)")
+                        db.execute("INSERT INTO schema_meta VALUES (9)")
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
@@ -539,6 +550,7 @@ class MarketStore:
             "macd_hist", "macd_hist_pct", "atr14", "atr14_pct", "volume_ratio_5",
             "return_20d", "distance_60d_high", "history_bars", "status",
             "warnings_json", "source_hash", "error", "computed_at",
+            "foundation_release_id",
         ]
         missing = [column for column in columns if column not in record]
         if missing:
@@ -549,7 +561,22 @@ class MarketStore:
                 [record["snapshot_id"]],
             ).fetchone()
             if exists:
-                return False
+                if not force:
+                    return False
+                assignments = ",".join(f"{column}=?" for column in columns if column != "snapshot_id")
+                values = [record[column] for column in columns if column != "snapshot_id"]
+                values.append(record["snapshot_id"])
+                db.execute("BEGIN TRANSACTION")
+                try:
+                    db.execute(
+                        f"UPDATE event_technical_context SET {assignments} WHERE snapshot_id=?",
+                        values,
+                    )
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
+                return True
             db.execute("BEGIN TRANSACTION")
             try:
                 placeholders = ",".join("?" for _ in columns)
@@ -1519,6 +1546,15 @@ class MarketStore:
 
     def write_daily(self, frame: pd.DataFrame, *, symbol: str, adjustment: str) -> list[str]:
         output_paths: list[str] = []
+        if frame is None or frame.empty:
+            # Nothing to write (no new bars); never crash the sync on this.
+            return output_paths
+        required = {"trade_date"}
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise ValueError(
+                f"daily frame missing columns for {symbol}/{adjustment}: " + ", ".join(missing)
+            )
         frame = frame.copy()
         years = pd.to_datetime(frame["trade_date"]).dt.year
         with self.lock(timeout=30):
@@ -1926,6 +1962,7 @@ def sync_daily_bars(
     adjustment: str = "raw",
     promote: bool = True,
     preserve_existing_before: date | None = None,
+    allow_source_anomalies: bool = False,
 ) -> SyncResult:
     instrument = store.get_instrument(symbol)
     if instrument is None:
@@ -1984,11 +2021,18 @@ def sync_daily_bars(
                 ),
             ]
         quality_status = audit.status
+        # Purchased historical snapshots are treated as authoritative input,
+        # but a small number of vendor rows contain an OHLC typo.  Keep the
+        # row for auditability and publish the series as a warning instead of
+        # quarantining the entire symbol.  The normal sync path retains the
+        # strict quarantine behavior.
+        if allow_source_anomalies and quality_status == "quarantined" and normalised.shape[0] > 0:
+            quality_status = "warning"
         if quality_status == "valid" and (range_issues or not promote):
             quality_status = "warning"
         paths = (
             store.write_daily(normalised, symbol=symbol, adjustment=adjustment)
-            if promote and audit.status != "quarantined"
+            if promote and (audit.status != "quarantined" or allow_source_anomalies)
             else []
         )
         result = SyncResult(
@@ -2510,7 +2554,15 @@ class FreeStockDBMarketProvider:
             lambda value: datetime.strptime(_free_stockdb_date_key(value), "%Y%m%d").date().isoformat()
         )
         if adjustment != "raw":
-            frame = _apply_free_stockdb_adjustment(frame, self._fetch_factors(symbol), adjustment)
+            factors = self._fetch_factors(symbol)
+            # ETFs in the local FreeStockDB catalog do not carry corporate
+            # action factors.  Their qfq series is therefore identical to
+            # the raw traded series; retain it rather than rejecting an
+            # otherwise complete historical dataset.
+            if factors:
+                frame = _apply_free_stockdb_adjustment(frame, factors, adjustment)
+            elif instrument_type != "etf":
+                raise RuntimeError("FreeStockDB returned no adjustment factors")
         return frame.sort_values("date").reset_index(drop=True)
 
     def fetch_daily_cross_section(self, as_of: date) -> pd.DataFrame:

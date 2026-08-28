@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [string]$TaskName = "Hermes_Gateway_Watchdog",

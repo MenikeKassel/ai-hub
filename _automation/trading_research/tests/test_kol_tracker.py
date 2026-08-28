@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import sys
@@ -48,7 +48,7 @@ def active_event(**overrides: str) -> EventRecord:
         "kol_name": "测试KOL",
         "platform": "X",
         "source_url": "https://x.com/test/status/1",
-        "source_note": "source-note-placeholder.md",
+        "source_note": "01_Sources/test.md",
         "posted_at": "2026-07-08T10:00:00+08:00",
         "symbol": "600000",
         "security_name": "浦发银行",
@@ -163,6 +163,33 @@ class WarehousePriceProviderTests(unittest.TestCase):
 
 
 class BaselineAndReturnTests(unittest.TestCase):
+    def test_suspension_counts_market_time_but_uses_last_trade_valuation(self) -> None:
+        dates = [
+            "2026-07-22",
+            "2026-07-23",
+            "2026-07-24",
+            "2026-07-27",
+            "2026-07-28",
+            "2026-07-29",
+            "2026-07-30",
+        ]
+        raw = price_frame(dates, [7.2, 7.23, 7.23, 7.23, 7.23, 7.23, 6.9], [7.23, 7.23, 7.23, 7.23, 7.23, 7.23, 7.1])
+        raw["trade_status"] = [1, 0, 0, 0, 0, 0, 1]
+        benchmark = price_frame(dates, [100] * len(dates), [100, 101, 102, 103, 104, 105, 106])
+        event = active_event(posted_at="2026-07-22T09:00:11+08:00")
+
+        result = calculate_event_history(event, raw, raw, benchmark)
+        suspended = result.marks[1]
+        checkpoint = next(item for item in result.checkpoints if item["horizon"] == "1W")
+
+        self.assertEqual("0", suspended["market_open"])
+        self.assertEqual("1", suspended["suspended"])
+        self.assertEqual("2026-07-22", suspended["last_trade_date"])
+        self.assertEqual("7.23000000", suspended["valuation_close"])
+        self.assertEqual("1", checkpoint["suspended_at_checkpoint"])
+        self.assertEqual("0", checkpoint["executable"])
+        self.assertEqual("2026-07-29", checkpoint["trade_date"])
+
     def test_after_close_uses_next_trading_day_open(self) -> None:
         event = active_event(
             posted_at="2026-07-08T19:35:49+08:00",
@@ -325,6 +352,31 @@ class StoreAndDashboardTests(unittest.TestCase):
             store.freeze_checkpoints([revised])
 
             self.assertEqual("0.10000000", store.load_checkpoints()[0]["raw_return"])
+
+    def test_checkpoint_release_change_is_logged_without_overwriting_frozen_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            first = {
+                "event_id": "KOL-T001",
+                "horizon": "1W",
+                "trade_date": "2026-07-08",
+                "raw_return": "0.10000000",
+                "verification_status": "verified_suspended",
+                "foundation_release_id": "release-old",
+                "finalized_at": "2026-07-08T20:00:00+08:00",
+            }
+            refreshed = dict(first, foundation_release_id="release-new", finalized_at="2026-07-09T20:00:00+08:00")
+            store.freeze_checkpoints([first])
+            store.freeze_checkpoints([refreshed])
+
+            self.assertEqual("release-old", store.load_checkpoints()[0]["foundation_release_id"])
+            revisions = [
+                line
+                for line in store.checkpoint_revisions_path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            self.assertEqual(1, len(revisions))
+            self.assertIn("release-new", revisions[0])
 
     def test_dashboard_is_generated_separately_from_manual_event_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

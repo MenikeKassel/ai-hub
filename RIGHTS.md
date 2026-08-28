@@ -1,4 +1,4 @@
-﻿# Rights Notice
+# Rights Notice
 
 This repository is published for inspection and interoperability reference.
 Unless a separate file says otherwise, no permission is granted to copy,

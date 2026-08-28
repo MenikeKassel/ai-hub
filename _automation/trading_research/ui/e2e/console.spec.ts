@@ -45,28 +45,6 @@ const health = {
   morning_runs: [{ run_id: 'morning-1', review_date: '2026-07-17', status: 'completed', reviewed_posts: 3, ready_drafts: 2, attention_drafts: 1, failed_posts: 0 }],
 }
 
-const board = {
-  board_key: 'industry:BK0001', board_code: 'BK0001', board_name: '示例行业',
-  board_type: 'industry', trade_date: '2026-07-17', close: 1234.5, turnover: 2,
-  up_count: 8, down_count: 2, leader_name: '示例股份', leader_change: 0.05,
-  return_50: 0.2, return_120: 0.3, return_250: 0.4, rps_50: 95,
-  rps_120: 90, rps_250: 88, breadth: 0.8, turnover_ratio_20: 1.2,
-  status: 'mainline_candidate', coverage_ratio: 1, warnings: [],
-}
-
-const boardRankPoints = Array.from({ length: 130 }, (_, index) => {
-  const value = new Date(Date.UTC(2026, 0, 1 + index))
-  return {
-    trade_date: value.toISOString().slice(0, 10),
-    rank: index % 3 === 0 ? 8 : index % 3 === 1 ? 20 : 45,
-    universe_size: 86,
-    rps: index % 3 === 0 ? 95 : index % 3 === 1 ? 80 : 55,
-    period_return: index / 1000,
-    status: index % 3 === 0 ? 'strong_watch' : 'neutral',
-    warnings: [],
-  }
-})
-
 const mentions = Array.from({ length: 50 }, (_, index) => ({
   id: index + 1, post_id: `2078000000000000${String(index).padStart(3, '0')}`, kol_id: 1,
   display_name: '演示研究员', handle: 'fixture', url: `https://x.com/fixture/status/${index + 1}`,
@@ -135,34 +113,6 @@ async function mockApi(page: Page) {
     else if (path === '/api/kol-leaderboard') body = { policy: {}, rows: [] }
     else if (path === '/api/stock-leads') body = []
     else if (path === '/api/stock-mentions') body = { items: mentions, total: 1500, page: 1, page_size: 50, total_pages: 30 }
-    else if (path === '/api/board-mainline/health') body = {
-      status: 'ready', formula_version: 'board-rps-v1',
-      catalog_counts: { industry: 86 }, rps_counts: { industry: 86 },
-      coverage_ratios: { industry: 1 },
-      latest_trade_dates: { industry: '2026-07-17' }, pending_backfill: 0, latest_run: null,
-    }
-    else if (path === '/api/board-mainline/BK0001/rank-series') body = {
-      board_code: 'BK0001', board_name: '示例行业', board_type: 'industry', window: 50,
-      available_from: boardRankPoints[0].trade_date,
-      available_to: boardRankPoints.at(-1)?.trade_date,
-      display_from: boardRankPoints[10].trade_date,
-      display_to: boardRankPoints.at(-1)?.trade_date,
-      total_point_count: 130, returned_point_count: 120, point_count: 120,
-      truncated: true, points: boardRankPoints.slice(-120),
-    }
-    else if (path === '/api/board-mainline/BK0001/series') body = [
-      { trade_date: '2026-07-16', open: 1200, high: 1240, low: 1190, close: 1220, volume: 1000, amount: 1220000, turnover: 1, up_count: 6, down_count: 4, source_kind: 'history', rps_50: 90, rps_120: 86, rps_250: 83, breadth: 0.6, turnover_ratio_20: 1, status: 'strong_watch', warnings: [] },
-      { trade_date: '2026-07-17', open: 1220, high: 1250, low: 1210, close: 1234.5, volume: 1100, amount: 1357950, turnover: 2, up_count: 8, down_count: 2, source_kind: 'history', rps_50: 95, rps_120: 90, rps_250: 88, breadth: 0.8, turnover_ratio_20: 1.2, status: 'mainline_candidate', warnings: [] },
-    ]
-    else if (path === '/api/board-mainline/BK0001') body = {
-      board_key: board.board_key, board_code: board.board_code, board_name: board.board_name,
-      board_type: board.board_type, status: 'active', provider: 'fixture',
-      first_seen_at: '2026-07-17', last_seen_at: '2026-07-17', updated_at: '2026-07-17',
-      latest: board, members: [], related_events: [],
-    }
-    else if (path === '/api/board-mainline') body = {
-      items: [board], total: 1, page: 1, page_size: 200, total_pages: 1,
-    }
     else if (path === '/api/pipeline/status') body = { latest_fetch_at: '2026-07-18T19:08:00+08:00', latest_fetch_status: 'success', latest_ai_at: '2026-07-18T20:00:00+08:00', pending_ai: 0, morning_delivery: { status: 'ready', completed_at: '2026-07-18T08:55:00+08:00' }, next_preview: {}, latest_trade_date: '2026-07-17', expected_trade_date: '2026-07-17', market_status: 'closed', lagging_symbols: [], refresh: { status: 'completed', phase: 'done', symbols: [], error: '' } }
     else if (path === '/api/system/health') body = health
     else if (path === '/api/fetch-runs') body = []
@@ -175,7 +125,6 @@ test.beforeEach(async ({ page }) => { await mockApi(page) })
 for (const [hash, heading] of [
   ['events', '正式事件'],
   ['backtests', '收益审计'],
-  ['boards', '板块主线'],
   ['kols', 'KOL管理'],
   ['system', '数据健康'],
   ['history', '历史归档'],
@@ -187,26 +136,6 @@ for (const [hash, heading] of [
     expect(await page.evaluate(() => document.body.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   })
 }
-
-test('board mainline renders price and three RPS series without a trading signal', async ({ page }) => {
-  const rankRequest = page.waitForRequest((request) => request.url().includes('/rank-series'))
-  await page.goto('/#/boards')
-  const rankUrl = new URL((await rankRequest).url())
-  expect(rankUrl.searchParams.get('range')).toBe('120')
-  await expect(page.getByText('示例行业').first()).toBeVisible()
-  await expect(page.locator('.badge').filter({ hasText: '主线候选' }).first()).toBeVisible()
-  await expect(page.locator('.candlestick-canvas canvas:visible').first()).toBeVisible()
-  await expect(page.locator('.board-rank-canvas canvas:visible').first()).toBeVisible()
-  await page.locator('.board-score-details summary').click()
-  await expect(page.locator('.board-rps-canvas canvas:visible').first()).toBeVisible()
-  const rankChart = page.locator('.board-rank-chart')
-  await expect(rankChart).toHaveAttribute('data-inverted-y', 'true')
-  await expect(rankChart).toHaveAttribute('data-rank-bands', '1-10:red:4,11-30:orange:3,31+:blue:2')
-  await expect(rankChart).toHaveAttribute('data-range', '120')
-  await expect(rankChart.getByText(/显示 .*120 点.*全部 130 点/)).toBeVisible()
-  await expect(page.getByText('板块相对强度')).toBeVisible()
-  await expect(page.getByText('买入信号')).toHaveCount(0)
-})
 
 test('return audit renders real-price candlesticks for a tracked event', async ({ page }) => {
   await page.goto('/#/backtests')

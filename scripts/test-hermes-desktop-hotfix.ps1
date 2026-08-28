@@ -1,7 +1,7 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
-$HermesRepo = "<USER_HOME>\AppData\Local\hermes\hermes-agent"
-$Uv = "<USER_HOME>\AppData\Local\hermes\bin\uv.exe"
+$HermesRepo = "$env:LOCALAPPDATA\hermes\hermes-agent"
+$Uv = "$env:LOCALAPPDATA\hermes\bin\uv.exe"
 
 if (-not (Test-Path $HermesRepo)) {
     throw "Hermes repo not found: $HermesRepo"

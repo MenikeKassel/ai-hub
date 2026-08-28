@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import tempfile
@@ -37,63 +37,6 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(_read_process_pid(invalid), "")
             self.assertEqual(_read_process_pid(root / "missing.pid"), "")
 
-    def test_board_mainline_endpoints_expose_health_list_detail_and_series(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            app = create_app(ApiSettings(
-                runtime_root=root / "runtime",
-                frontend_dist=root / "dist",
-                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
-            ))
-            market = app.state.market_store
-            timestamp = "2026-07-24T09:00:00+08:00"
-            with market.connect() as db:
-                db.execute(
-                    "INSERT INTO board_catalog VALUES (?,?,?,?,?,?,?,?,?)",
-                    ["industry:BK0001", "BK0001", "fixture board", "industry", "active", "fixture", timestamp, timestamp, timestamp],
-                )
-                db.execute(
-                    "INSERT INTO board_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 100, 105, 99, 104, 1000, 104000,
-                        1.2, 8, 2, "leader", 0.05, "fixture", "history", True, timestamp, "hash",
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 0.2, 0.4, 0.6, 95, 90, 88,
-                        0.8, 1.2, "mainline_candidate", "board-rps-v1", 100, 100, 100,
-                        1.0, "[]", "hash", timestamp,
-                    ],
-                )
-                db.execute(
-                    "INSERT INTO board_rank VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        "industry:BK0001", "2026-07-24", 1, 2, 3,
-                        100, 100, 100, "board-rank-v1", "hash", timestamp,
-                    ],
-                )
-            client = TestClient(app)
-
-            health = client.get("/api/board-mainline/health")
-            listing = client.get("/api/board-mainline?board_type=industry")
-            detail = client.get("/api/board-mainline/BK0001?board_type=industry")
-            series = client.get("/api/board-mainline/BK0001/series?board_type=industry")
-            rank_series = client.get(
-                "/api/board-mainline/BK0001/rank-series?board_type=industry&window=50&range=all"
-            )
-
-            self.assertEqual(200, health.status_code, health.text)
-            self.assertEqual("ready", health.json()["status"])
-            self.assertEqual(1, listing.json()["total"])
-            self.assertEqual("fixture board", detail.json()["board_name"])
-            self.assertEqual([], detail.json()["related_events"])
-            self.assertEqual(104, series.json()[0]["close"])
-            self.assertEqual(1, rank_series.json()["point_count"])
-            self.assertEqual(1, rank_series.json()["points"][0]["rank"])
-            self.assertFalse(rank_series.json()["truncated"])
-
     def test_pipeline_status_is_lightweight_and_scopes_pending_ai(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -103,13 +46,13 @@ class ApiTests(unittest.TestCase):
                 codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
             ))
             store = app.state.post_store
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000001",
                     "text": "关注 002414 高德红外",
-                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_2", "name": "fixture"},
+                    "url": "https://x.com/WwQQ129146/status/2078000000000000001",
+                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
                     "createdAtISO": datetime.now(SHANGHAI).astimezone(timezone.utc).isoformat(),
                     "media": [],
                     "isRetweet": False,
@@ -221,7 +164,7 @@ class ApiTests(unittest.TestCase):
             ))
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             values = [
                 ("2078000000000000801", "2026-07-17T02:00:00+00:00"),
                 ("2078000000000000802", "2026-07-18T00:00:00+00:00"),
@@ -232,8 +175,8 @@ class ApiTests(unittest.TestCase):
                     {
                         "id": post_id,
                         "text": f"fixture {post_id}",
-                        "url": f"https://x.com/public_kol_2/status/{post_id}",
-                        "author": {"screenName": "public_kol_2", "name": "fixture"},
+                        "url": f"https://x.com/WwQQ129146/status/{post_id}",
+                        "author": {"screenName": "WwQQ129146", "name": "fixture"},
                         "createdAtISO": posted_at,
                         "media": [],
                         "isRetweet": False,
@@ -266,13 +209,13 @@ class ApiTests(unittest.TestCase):
             app.state.market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", source="fixture")
             )
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000999",
                     "text": "今日补充关注 002414 高德红外。",
-                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_2", "name": "fixture"},
+                    "url": "https://x.com/WwQQ129146/status/2078000000000000999",
+                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
                     "createdAtISO": "2026-07-18T00:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -603,7 +546,7 @@ class ApiTests(unittest.TestCase):
             app = create_app(settings)
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             timestamp = "2026-07-18T08:00:00+08:00"
             with store.connect() as db:
                 posts = []
@@ -670,14 +613,14 @@ class ApiTests(unittest.TestCase):
                 Instrument("000938", "Unisplendour", "stock", "SZ", source="fixture"),
             ]
             market_store.upsert_instruments(instruments)
-            kol = post_store.get_kol_by_handle("public_kol_2")
+            kol = post_store.get_kol_by_handle("WwQQ129146")
             text = "Morning picks: 605178, 002303, 000938. No individual thesis was provided."
             post = normalise_twitter_post(
                 {
                     "id": "2078000000000000123",
                     "text": text,
-                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_2", "name": "fixture"},
+                    "url": "https://x.com/WwQQ129146/status/2078000000000000123",
+                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
                     "createdAtISO": "2026-07-17T00:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -770,6 +713,108 @@ class ApiTests(unittest.TestCase):
             self.assertEqual("tracking", market_store.get_instrument(first["symbol"])["lifecycle"])
             self.assertEqual("rejected", rejected.json()["status"])
 
+    def test_bulk_approval_is_scoped_and_queues_one_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            post_store = app.state.post_store
+            market_store = app.state.market_store
+            market_store.upsert_instruments([
+                Instrument("002414", "High", "stock", "SZ", source="fixture"),
+                Instrument("600900", "Power", "stock", "SH", source="fixture"),
+            ])
+            kol = post_store.get_kol_by_handle("WwQQ129146")
+            drafts = []
+            for index, symbol in enumerate(("002414", "600900")):
+                post = normalise_twitter_post(
+                    {
+                        "id": str(2078000000000000200 + index),
+                        "text": f"Morning recommendation {symbol} with evidence.",
+                        "url": f"https://x.com/WwQQ129146/status/{2078000000000000200 + index}",
+                        "author": {"screenName": "WwQQ129146", "name": "fixture"},
+                        "createdAtISO": "2026-07-17T00:30:00+00:00",
+                        "media": [],
+                        "isRetweet": False,
+                    },
+                    kol,
+                )
+                post_store.upsert_post(post)
+                post_store.save_rule_classification(
+                    post.post_id,
+                    RuleResult(90, True, [symbol], "long", ["fixture"], "original_pre_event", "recommendation"),
+                )
+                post_store.save_model_classification(
+                    post.post_id,
+                    {
+                        "content_type": "recommendation",
+                        "evidence_type": "original_pre_event",
+                        "confidence": 0.99,
+                        "summary": "fixture",
+                        "drafts": [{
+                            "symbol": symbol,
+                            "security_name": symbol,
+                            "direction": "long",
+                            "thesis": "Evidence-backed recommendation.",
+                            "evidence_type": "original_pre_event",
+                            "confidence": 0.99,
+                            "evidence_spans": [f"Morning recommendation {symbol} with evidence."],
+                            "evidence_source": "text",
+                            "conditions": [],
+                            "depends_on_ocr": False,
+                            "mention_kind": "recommendation",
+                        }],
+                    },
+                    model_name="fixture",
+                    prompt_version="bulk-fixture",
+                )
+                RecommendationDraftRepository(post_store).sync_post(
+                    post.post_id,
+                    market_store.instrument_map(),
+                    queue_scope="morning",
+                    review_date="2026-07-17",
+                )
+                drafts.extend(RecommendationDraftRepository(post_store).list_drafts(post_id=post.post_id))
+
+            preview = client.post("/api/recommendation-drafts/bulk-preview", json={
+                "review_date": "2026-07-17",
+                "queue_scope": "morning",
+            })
+            self.assertEqual(200, preview.status_code, preview.text)
+            self.assertEqual(2, preview.json()["count"])
+            with patch("kol_api.run_post_approval_refresh") as refresh:
+                result = client.post("/api/recommendation-drafts/bulk-approve", json={
+                    "snapshot_token": preview.json()["snapshot_token"],
+                    "note": "batch review",
+                })
+            self.assertEqual(200, result.status_code, result.text)
+            self.assertEqual(2, len(result.json()["approved"]))
+            self.assertEqual([], result.json()["failed"])
+            self.assertEqual(1, refresh.call_count)
+            self.assertEqual(2, len(app.state.event_store.load_events()))
+
+            repeated = client.post("/api/recommendation-drafts/bulk-approve", json={
+                "snapshot_token": preview.json()["snapshot_token"],
+            })
+            self.assertEqual(409, repeated.status_code)
+
+    def test_discovery_run_rejects_unconfigured_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            response = client.post("/api/discovery/runs", json={"platform": "douyin", "query": "fixture"})
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertIn("blocked", response.json()["detail"])
+
     def test_review_agent_api_defaults_to_shadow_and_records_human_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -781,13 +826,13 @@ class ApiTests(unittest.TestCase):
             app = create_app(settings)
             client = TestClient(app)
             store = app.state.post_store
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(
                 {
                     "id": "2076000000000000888",
                     "text": "普通市场观察",
-                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_2", "name": "fixture"},
+                    "url": "https://x.com/WwQQ129146/status/2076000000000000888",
+                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
                     "createdAtISO": "2026-07-15T02:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
@@ -833,13 +878,13 @@ class ApiTests(unittest.TestCase):
             market_store.upsert_instrument(
                 Instrument("002414", "Gaode Infrared", "stock", "SZ", lifecycle="archived", source="fixture")
             )
-            kol = post_store.get_kol_by_handle("public_kol_2")
+            kol = post_store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(
                 {
                     "id": "2077000000000000999",
                     "text": "002414 long thesis",
-                    "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_2", "name": "fixture"},
+                    "url": "https://x.com/WwQQ129146/status/2077000000000000999",
+                    "author": {"screenName": "WwQQ129146", "name": "fixture"},
                     "metrics": {},
                     "createdAtISO": "2026-07-14T08:30:00+00:00",
                     "media": [],
@@ -891,8 +936,8 @@ class ApiTests(unittest.TestCase):
             post_store = app.state.post_store
             event_store = app.state.event_store
             kol_id, _ = post_store.add_kol(
-                "Public KOL 10",
-                "public_kol_10",
+                "A股趋势捕手",
+                "Aw3ff_",
                 "A股技术复盘",
                 status="paused",
             )
@@ -901,8 +946,8 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077011102911852883",
                     "text": "明日参考：603127 昭衍新药。逻辑：医疗服务+创新药。",
-                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
+                    "url": "https://x.com/Aw3ff_/status/2077011102911852883",
+                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
                     "metrics": {},
                     "createdAtISO": "2026-07-14T12:43:30+00:00",
                     "media": [],
@@ -915,12 +960,12 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077210207818764707",
                     "text": "涨停，逻辑预判正确。大资金都去医药了。",
-                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
+                    "url": "https://x.com/Aw3ff_/status/2077210207818764707",
+                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
                     "quotedTweet": {
                         "id": original.post_id,
                         "text": original.text,
-                        "author": {"screenName": "public_kol_10"},
+                        "author": {"screenName": "Aw3ff_"},
                     },
                     "metrics": {},
                     "createdAtISO": "2026-07-15T01:54:40+00:00",
@@ -934,12 +979,12 @@ class ApiTests(unittest.TestCase):
                 {
                     "id": "2077210207818764708",
                     "text": "尚未人工审核的复盘。",
-                    "url": "https://x.com/public_kol_10/status/0000000000000000000",
-                    "author": {"screenName": "public_kol_10", "name": "Public KOL 10"},
+                    "url": "https://x.com/Aw3ff_/status/2077210207818764708",
+                    "author": {"screenName": "Aw3ff_", "name": "A股趋势捕手"},
                     "quotedTweet": {
                         "id": original.post_id,
                         "text": original.text,
-                        "author": {"screenName": "public_kol_10"},
+                        "author": {"screenName": "Aw3ff_"},
                     },
                     "metrics": {},
                     "createdAtISO": "2026-07-15T02:54:40+00:00",
@@ -966,7 +1011,7 @@ class ApiTests(unittest.TestCase):
             post_store.set_review(retrospective.post_id, "excluded", "涨后复盘，不重复注册事件")
             event = EventRecord(
                 event_id="KOL-T001",
-                kol_name="Public KOL 10",
+                kol_name="A股趋势捕手",
                 platform="X",
                 source_url=original.url,
                 source_note=f"post:{original.post_id}",
@@ -1244,12 +1289,12 @@ class ApiTests(unittest.TestCase):
             market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", lifecycle="tracking", source="fixture")
             )
-            kol = post_store.get_kol_by_handle("public_kol_2")
+            kol = post_store.get_kol_by_handle("WwQQ129146")
             payload = {
                 "id": "2077000000000000101",
                 "text": "关注 002414 高德红外，继续看多。",
-                "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                "author": {"screenName": "public_kol_2", "name": "林哥"},
+                "url": "https://x.com/WwQQ129146/status/2077000000000000101",
+                "author": {"screenName": "WwQQ129146", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-14T08:30:00+00:00",
                 "media": [],
@@ -1283,12 +1328,12 @@ class ApiTests(unittest.TestCase):
             app.state.market_store.upsert_instrument(
                 Instrument("002414", "高德红外", "stock", "SZ", lifecycle="archived", source="fixture_master")
             )
-            kol = post_store.get_kol_by_handle("public_kol_2")
+            kol = post_store.get_kol_by_handle("WwQQ129146")
             payload = {
                 "id": "2077000000000000102",
                 "text": "高德红外值得继续研究。",
-                "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                "author": {"screenName": "public_kol_2", "name": "林哥"},
+                "url": "https://x.com/WwQQ129146/status/2077000000000000102",
+                "author": {"screenName": "WwQQ129146", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-14T08:30:00+00:00",
                 "media": [],
@@ -1342,6 +1387,79 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(502, failed_queue.status_code)
             self.assertEqual("pending", post_store.get_stock_lead(lead["id"])["status"])
             self.assertEqual("archived", app.state.market_store.get_instrument("002414")["lifecycle"])
+
+    def test_historical_lead_confirmation_queues_admission_without_market_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            )
+            app = create_app(settings)
+            client = TestClient(app)
+            post_store = app.state.post_store
+            market_store = app.state.market_store
+            mode_path = settings.runtime_root / "market" / "recovery-mode.json"
+            mode_path.write_text(
+                '{"mode":"historical","as_of":"2026-08-25","write_enabled":false}',
+                encoding="utf-8",
+            )
+            market_store.upsert_instrument(
+                Instrument("002414", "高德红外", "stock", "SZ", lifecycle="archived", source="fixture")
+            )
+            kol = post_store.get_kol_by_handle("WwQQ129146")
+            post = normalise_twitter_post(
+                {
+                    "id": "2077000000000000199",
+                    "text": "高德红外值得继续研究。",
+                    "url": "https://x.com/WwQQ129146/status/2077000000000000199",
+                    "author": {"screenName": "WwQQ129146", "name": "林哥"},
+                    "createdAtISO": "2026-07-14T08:30:00+00:00",
+                    "media": [],
+                    "isRetweet": False,
+                },
+                kol,
+            )
+            post_store.upsert_post(post)
+            post_store.upsert_stock_lead(
+                {
+                    "post_id": post.post_id,
+                    "kol_id": kol["id"],
+                    "symbol": "002414",
+                    "security_name": "高德红外",
+                    "extraction_method": "name_match",
+                    "confidence": 0.8,
+                    "status": "pending",
+                }
+            )
+            lead = post_store.list_stock_leads(post_id=post.post_id)[0]
+
+            response = client.post(
+                f"/api/stock-leads/{lead['id']}/review",
+                json={"action": "confirmed", "symbol": "002414", "security_name": "高德红外"},
+            )
+
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("queued", response.json()["market_admission_status"])
+            self.assertEqual("archived", market_store.get_instrument("002414")["lifecycle"])
+            self.assertEqual([], market_store.pending_sync())
+            admissions = client.get("/api/market/admissions").json()
+            self.assertEqual(1, admissions["summary"]["pending"])
+
+    def test_lightweight_health_does_not_run_deep_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+            with patch("kol_api.docker_health", side_effect=AssertionError("deep probe called")):
+                response = client.get("/api/system/health")
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertTrue(response.json()["lightweight"])
 
     def test_credential_endpoint_returns_actionable_validation_error(self) -> None:
         class RecordingCredentials:
@@ -1428,6 +1546,10 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(200, leaderboard.status_code)
             self.assertEqual(6, len(leaderboard.json()["rows"]))
             self.assertTrue(all(row["tier"] == "collecting" for row in leaderboard.json()["rows"]))
+            recovery_preview = client.post("/api/collection/recovery/preview")
+            self.assertEqual(200, recovery_preview.status_code)
+            self.assertIn("coverage", recovery_preview.json())
+            self.assertIn("reader_configured", recovery_preview.json())
             self.assertEqual(400, client.get("/api/summary", headers={"Host": "attacker.example"}).status_code)
             shadow_nitter = client.post(
                 "/api/fetch",
@@ -1450,12 +1572,12 @@ class ApiTests(unittest.TestCase):
             self.assertEqual("queued", queued.json()["backfill_status"])
 
             store = app.state.post_store
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             payload = {
                 "id": "2076000000000000001",
                 "text": "关注 002414 高德红外，继续看多。",
-                "url": "https://x.com/public_kol_2/status/0000000000000000000",
-                "author": {"screenName": "public_kol_2", "name": "林哥"},
+                "url": "https://x.com/WwQQ129146/status/2076000000000000001",
+                "author": {"screenName": "WwQQ129146", "name": "林哥"},
                 "metrics": {},
                 "createdAtISO": "2026-07-13T08:30:00+00:00",
                 "media": [],

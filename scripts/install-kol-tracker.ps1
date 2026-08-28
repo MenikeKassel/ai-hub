@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [string]$TaskName = "KOL_Return_Tracker_Daily",

@@ -1,4 +1,4 @@
-﻿name: Public mirror security scan
+name: Public mirror security scan
 
 on:
   push:

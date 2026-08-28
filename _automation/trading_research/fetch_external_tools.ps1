@@ -1,5 +1,5 @@
-﻿param(
-    [string]$ExternalRoot = "<AI_HUB_HOME>\ai-hub\_external"
+param(
+    [string]$ExternalRoot = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "_external")
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,4 +18,3 @@ Write-Output "Cloning daily_stock_analysis into $dailyStockPath"
 git clone --depth 1 $dailyStockRepo $dailyStockPath
 
 Write-Output "Done. Next inspect README/config before running any report task."
-

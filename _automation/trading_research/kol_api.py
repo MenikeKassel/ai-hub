@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -6,10 +6,12 @@ import os
 import re
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,6 +35,10 @@ from kol_posts import (
     KolPostStore,
     ModelWorkerBusyError,
     NitterCredentialStore,
+    ReaderCredentialStore,
+    XSessionManager,
+    XSessionUnavailableError,
+    PublicBackupGate,
     RapidOcrBatchClassifier,
     RuleClassifier,
     STRUCTURED_REVIEW_VERSION,
@@ -46,18 +52,18 @@ from kol_posts import (
     media_disk_usage,
     run_post_fetch,
     validate_twitter_credentials,
+    _resolve_twitter_command,
 )
 from kol_review import approve_post, approve_recommendation_draft, post_review_lock
 from kol_leaderboard import build_kol_leaderboard
 from kol_performance import KolPerformanceService
 from kol_tracker import MARK_FIELDS, SHANGHAI, KolStore, now_iso, validate_event
 from event_context import FEATURE_VERSION, event_context_input_hash
-from nitter_runtime import docker_container_health, docker_health, timeline_health, xtf_version
+from nitter_runtime import docker_container_health, docker_health, http_health, xtf_version
 from market_data import FreeStockDBMarketProvider, Instrument, MarketStore
 from market_indicators import INDICATOR_VERSION, compute_daily_indicators
 from freestockdb_runtime import FreeStockDBRuntime
 from kol_intraday import backfill_event_intraday
-from board_mainline import BoardMainlineStore, FallbackBoardProvider, sync_board_snapshot
 from event_dossier import EventDossierService
 from event_research_ai import build_event_research_interpreter
 from event_research_service import EventMethodResearchService
@@ -66,9 +72,24 @@ from review_agent import ReviewAgentRepository, rollback_decision
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
+from market_admissions import MarketAdmissionRepository, read_published_manifest
+from market_policy import (
+    MarketWriteBlockedError,
+    assert_market_runtime_writes_allowed,
+    load_market_recovery_mode,
+    market_runtime_writes_enabled,
+)
+from model_budget import ModelDailyBudget
+from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 
 
 ROOT = Path(__file__).resolve().parents[2]
+FOUNDATION_ROOT = Path(
+    os.environ.get(
+        "ASHARE_FOUNDATION_ROOT",
+        ROOT / "_runtime" / "trading" / "market" / "foundation",
+    )
+)
 OPERATOR_TASKS = {
     "morning": "KOL_Morning_Pipeline",
     "fetch": "KOL_Post_Fetch_Daily",
@@ -83,7 +104,12 @@ class ApiSettings:
     codex_schema: Path
     xtf_command: Path | None = None
     nitter_url: str = "http://127.0.0.1:9377"
-    freestockdb_root: Path = Path("<AI_HUB_HOME>/stockdb")
+    freestockdb_root: Path = Path(
+        os.environ.get(
+            "FREESTOCKDB_ROOT",
+            Path(__file__).resolve().parents[3] / "freestock" / "stockdb",
+        )
+    )
     freestockdb_url: str = "http://127.0.0.1:7899"
 
     @classmethod
@@ -95,7 +121,12 @@ class ApiSettings:
             codex_schema=Path(__file__).with_name("kol_classifier_schema.json"),
             xtf_command=ROOT / "_runtime" / "venv-x-fetcher" / "Scripts" / "xtf.exe",
             nitter_url=os.environ.get("KOL_NITTER_URL", "http://127.0.0.1:9377"),
-            freestockdb_root=Path(os.environ.get("FREESTOCKDB_ROOT", "<AI_HUB_HOME>/stockdb")),
+            freestockdb_root=Path(
+                os.environ.get(
+                    "FREESTOCKDB_ROOT",
+                    Path(__file__).resolve().parents[3] / "freestock" / "stockdb",
+                )
+            ),
             freestockdb_url=os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899"),
         )
 
@@ -114,10 +145,22 @@ class KolPatch(BaseModel):
     domain: str | None = Field(default=None, max_length=300)
     status: str | None = None
     tracking_mode: str | None = Field(default=None, max_length=30)
+    availability_status: str | None = Field(default=None, max_length=30)
+    availability_reason: str | None = Field(default=None, max_length=2000)
 
 
 class KolBackfillRequest(BaseModel):
     count: int = Field(default=200, ge=1)
+
+
+class DiscoveryRunRequest(BaseModel):
+    platform: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    query: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class DiscoveryDecisionRequest(BaseModel):
+    note: str = Field(default="", max_length=2000)
 
 
 class DigestAuthorProfileInput(BaseModel):
@@ -140,12 +183,38 @@ class TwitterCredentialRequest(BaseModel):
     ct0: str = Field(min_length=1, max_length=8192)
 
 
+class XSessionCredentialRequest(TwitterCredentialRequest):
+    label: str = Field(default="", max_length=100)
+
+
+class XSessionStatusRequest(BaseModel):
+    status: str = Field(pattern="^(ready|disabled)$")
+    reason: str = Field(default="", max_length=2000)
+
+
+class XCollectionPolicyRequest(BaseModel):
+    enabled: bool | None = None
+    paused: bool | None = None
+    reason: str = Field(default="", max_length=2000)
+
+
+class PublicBackupPolicyRequest(BaseModel):
+    enabled: bool | None = None
+    paused: bool | None = None
+    reason: str = Field(default="", max_length=2000)
+
+
 class DeepSeekCredentialRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=1024)
 
 
 class PerformanceRefreshRequest(BaseModel):
     as_of: str | None = None
+
+
+class FoundationRefreshRequest(BaseModel):
+    as_of: str = Field(default="auto", pattern=r"^(auto|\d{4}-\d{2}-\d{2})$")
+    notify: bool = True
 
 
 class Draft(BaseModel):
@@ -193,6 +262,18 @@ class RecommendationDraftPatch(BaseModel):
 
 
 class RecommendationDraftAction(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+class RecommendationDraftBulkPreviewRequest(BaseModel):
+    review_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    queue_scope: str = Field(default="morning", pattern="^(morning|backlog)$")
+    status: str = Field(default="ready", pattern="^ready$")
+    limit: int = Field(default=200, ge=1, le=200)
+
+
+class RecommendationDraftBulkApproveRequest(BaseModel):
+    snapshot_token: str = Field(min_length=20, max_length=200)
     note: str = Field(default="", max_length=2000)
 
 
@@ -270,10 +351,6 @@ class MarketSyncRequest(BaseModel):
     symbols: list[str] = Field(default_factory=list)
     start: date | None = None
     end: date | None = None
-
-
-class BoardSyncRequest(BaseModel):
-    as_of: date | None = None
 
 
 class FreeStockDBUpdateRequest(BaseModel):
@@ -362,16 +439,28 @@ def create_app(
     post_store.interrupt_stale_fetch_runs()
     event_store = KolStore(kol_root)
     performance = KolPerformanceService(event_store, post_store=post_store)
-    market_store = MarketStore(config.runtime_root / "market")
+    local_market_store = MarketStore(config.runtime_root / "market")
+    default_runtime = Path(
+        os.environ.get("TRADING_RUNTIME_ROOT", ROOT / "_runtime" / "trading")
+    ).resolve()
+    market_store = (
+        FoundationBackedMarketStore(local_market_store, FOUNDATION_ROOT)
+        if (FOUNDATION_ROOT / "current.json").is_file()
+        and config.runtime_root.resolve() == default_runtime
+        else local_market_store
+    )
     freestockdb_runtime = FreeStockDBRuntime(
         config.freestockdb_root,
         config.freestockdb_url,
         runtime_root=config.runtime_root,
     )
-    board_store = BoardMainlineStore(market_store)
     review_agent = ReviewAgentRepository(post_store)
     recommendation_drafts = RecommendationDraftRepository(post_store)
+    market_admissions = MarketAdmissionRepository(post_store)
     credentials = credential_store or KeyringCredentialStore()
+    reader_credentials = ReaderCredentialStore()
+    x_sessions = XSessionManager(post_store)
+    public_backup = PublicBackupGate(post_store)
     nitter_credentials = nitter_credential_store or NitterCredentialStore()
     deepseek_credentials = deepseek_credential_store or DeepSeekCredentialStore()
     event_research = EventMethodResearchService(
@@ -399,7 +488,7 @@ def create_app(
             "ZHIHU_USER_DATA_DIR",
             str(Path.home() / "AppData" / "Local" / "hermes" / "browser-profiles" / "zhihu-edge"),
         ),
-        port=int(os.environ.get("ZHIHU_CDP_PORT", "9222")),
+        port=int(os.environ.get("ZHIHU_CDP_PORT", "9223")),
     )
     ocr_root = Path(os.environ.get("UNLIMITED_OCR_ROOT", ROOT.parent / "Unlimited-OCR"))
     ocr_runner = Path(__file__).with_name("unlimited_ocr_batch.py")
@@ -410,6 +499,56 @@ def create_app(
     rapid_ocr_runner = Path(__file__).with_name("rapid_ocr_batch.py")
     initialize_seed_kols(post_store)
 
+    # The discovery core is mounted into this application.  It shares the
+    # existing posts.db and KOL identity tables, so discovery cannot create a
+    # second universe of accounts or require a second console port.
+    discovery_store = None
+    discovery_service = None
+    discovery_registry = None
+    discovery_scorer = None
+    discovery_error = ""
+    discovery_scorer_error = ""
+    try:
+        from kol_audit.discovery.scoring import CandidateScorer
+        from kol_audit.discovery.service import DiscoveryService
+        from kol_audit.discovery.store import DiscoveryStore
+        from kol_discovery_runtime import build_provider_registry
+
+        capture_root = Path(
+            os.environ.get(
+                "KOL_DISCOVERY_CAPTURE_ROOT",
+                str(config.runtime_root / "kol-discovery" / "captures"),
+            )
+        )
+        discovery_store = DiscoveryStore(kol_root / "posts.db", post_store)
+        discovery_registry = build_provider_registry(
+            capture_root,
+            x_provider=build_x_post_provider(
+                "auto",
+                xtf_command=xtf_command,
+                fallback_mode="disabled",
+                session_manager=x_sessions,
+                batch_key="discovery:shared",
+            ),
+            zhihu_provider=zhihu_provider,
+        )
+        discovery_service = DiscoveryService(discovery_store, discovery_registry)
+    except Exception as exc:
+        discovery_error = str(exc)
+        logger.warning("Full-platform discovery is unavailable: %s", exc)
+    if discovery_store is not None:
+        try:
+            from kol_audit.discovery.scoring import CandidateScorer
+            from kol_discovery_runtime import OpenCodeGoCandidateScoreProvider
+
+            discovery_scorer = CandidateScorer(
+                discovery_store,
+                OpenCodeGoCandidateScoreProvider(),
+            )
+        except Exception as exc:
+            discovery_scorer_error = str(exc)
+            logger.warning("Discovery AI scoring is unavailable: %s", exc)
+
     app = FastAPI(title="KOL Research Console", version="3.0.0")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
     app.state.settings = config
@@ -418,16 +557,105 @@ def create_app(
     app.state.kol_performance = performance
     app.state.market_store = market_store
     app.state.freestockdb_runtime = freestockdb_runtime
-    app.state.board_store = board_store
     app.state.event_dossier = event_dossier
     app.state.event_research = event_research
     app.state.review_agent = review_agent
     app.state.recommendation_drafts = recommendation_drafts
+    app.state.market_admissions = market_admissions
     app.state.deepseek_credentials = deepseek_credentials
+    app.state.twitter_reader_credentials = reader_credentials
+    app.state.x_sessions = x_sessions
+    app.state.public_backup = public_backup
+    collection_runs: dict[str, dict[str, Any]] = {}
+    app.state.discovery_store = discovery_store
+    app.state.discovery_service = discovery_service
+    app.state.discovery_registry = discovery_registry
+    app.state.discovery_scorer = discovery_scorer
+    app.state.discovery_error = discovery_error
+    app.state.discovery_scorer_error = discovery_scorer_error
 
-    def safe_market_health() -> dict[str, Any]:
+    recovery_mode_path = config.runtime_root / "market" / "recovery-mode.json"
+
+    def market_recovery_mode() -> dict[str, Any]:
+        return load_market_recovery_mode(recovery_mode_path).as_dict()
+
+    def assert_market_writes_allowed() -> None:
         try:
-            return market_store.health()
+            assert_market_runtime_writes_allowed(recovery_mode_path)
+        except MarketWriteBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def market_writes_enabled() -> bool:
+        return market_runtime_writes_enabled(recovery_mode_path)
+
+    app.state.market_recovery_mode = market_recovery_mode
+
+    def compute_market_health() -> dict[str, Any]:
+        mode = market_recovery_mode()
+        # Health must stay responsive while a sync/update process owns the
+        # DuckDB lock.  Do not queue a UI request behind a long market job.
+        try:
+            with market_store.lock(timeout=0.05):
+                pass
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if any(token in lowered for token in ("lock", "timeout", "already open", "cannot open file")):
+                return {
+                    "ok": False,
+                    "status": "degraded",
+                    "market_status": "market_locked",
+                    "daily_data_status": "market_locked",
+                    "market_session_status": "unknown",
+                    "database": str(market_store.db_path),
+                    "lagging_symbols": [],
+                    "lagging_symbol_count": 0,
+                    "error_type": "database_lock",
+                    "error": "market database is busy; retry after the current task completes",
+                    "recovery_mode": mode.get("mode", "live"),
+                    "as_of": mode.get("as_of", ""),
+                    "write_enabled": bool(mode.get("write_enabled", True)),
+                }
+        try:
+            value = market_store.health()
+            # Expose the restored tracked-union coverage explicitly so the
+            # console can distinguish a complete historical snapshot from
+            # the larger instrument catalog.
+            try:
+                active_symbols = {
+                    str(item.get("symbol"))
+                    for item in market_store.list_instruments()
+                    if str(item.get("lifecycle") or "") in {"tracking", "pinned"}
+                }
+                coverage_rows = market_store.get_coverage()
+                daily_rows = [
+                    row for row in coverage_rows
+                    if str(row.get("dataset")) == "daily"
+                    and str(row.get("symbol")) in active_symbols
+                ]
+                value["target_sequence_count"] = len(active_symbols)
+                value["raw_sequence_count"] = sum(str(row.get("adjustment")) == "raw" for row in daily_rows)
+                value["qfq_sequence_count"] = sum(str(row.get("adjustment")) == "qfq" for row in daily_rows)
+                value["raw_current_sequence_count"] = sum(
+                    str(row.get("adjustment")) == "raw" and str(row.get("end_date")) == str(mode.get("as_of") or "")
+                    for row in daily_rows
+                )
+                value["qfq_current_sequence_count"] = sum(
+                    str(row.get("adjustment")) == "qfq" and str(row.get("end_date")) == str(mode.get("as_of") or "")
+                    for row in daily_rows
+                )
+            except Exception as coverage_error:
+                value["coverage_error"] = str(coverage_error)[:500]
+            foundation_reader = FoundationMarketReader(FOUNDATION_ROOT)
+            foundation = foundation_reader.health()
+            if foundation.get("ok"):
+                foundation["coverage"] = foundation_reader.coverage(str(foundation.get("as_of") or ""))
+                foundation["coverage_complete"] = bool(foundation["coverage"].get("complete"))
+            value["foundation"] = foundation
+            value["recovery_mode"] = mode.get("mode", "live")
+            value["as_of"] = mode.get("as_of", "")
+            value["write_enabled"] = bool(mode.get("write_enabled", True))
+            return value
         except Exception as exc:
             message = str(exc)
             lowered = message.lower()
@@ -443,7 +671,39 @@ def create_app(
                 "lagging_symbol_count": 0,
                 "error_type": "database_lock" if locked else type(exc).__name__,
                 "error": message[-1000:],
+                "recovery_mode": mode.get("mode", "live"),
+                "as_of": mode.get("as_of", ""),
+                "write_enabled": bool(mode.get("write_enabled", True)),
             }
+
+    market_health_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+    market_health_lock = threading.Lock()
+
+    def safe_market_health(*, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        cached = market_health_cache.get("value")
+        if not force and cached is not None and now < market_health_cache["expires_at"]:
+            return cached
+        with market_health_lock:
+            now = time.monotonic()
+            cached = market_health_cache.get("value")
+            if not force and cached is not None and now < market_health_cache["expires_at"]:
+                return cached
+            value = compute_market_health()
+            manifest = read_published_manifest(config.runtime_root / "market")
+            value["published_manifest"] = {
+                key: manifest.get(key)
+                for key in (
+                    "as_of", "baseline_count", "extension_count", "published_count",
+                    "symbols_sha256", "source", "updated_at",
+                )
+                if key in manifest
+            }
+            value["admissions"] = market_admissions.summary()
+            market_health_cache.update(
+                {"expires_at": time.monotonic() + 30.0, "value": value}
+            )
+            return value
 
     freestockdb_health_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
     freestockdb_health_lock = threading.Lock()
@@ -468,6 +728,26 @@ def create_app(
                     "base_url": config.freestockdb_url,
                     "error": str(exc)[:1000],
                 }
+            mode = market_recovery_mode()
+            historical = (
+                str(mode.get("mode")) == "historical"
+                and not bool(mode.get("write_enabled", True))
+            )
+            value["root"] = str(config.freestockdb_root)
+            value["data_path"] = str(config.freestockdb_root / "data")
+            value["base_url"] = config.freestockdb_url
+            value["url"] = config.freestockdb_url
+            value["read_only"] = historical
+            value["recovery_mode"] = mode.get("mode", "live")
+            value["as_of"] = mode.get("as_of", "")
+            value["write_enabled"] = bool(mode.get("write_enabled", True))
+            if historical:
+                provider_ok = bool(value.get("provider", {}).get("ok"))
+                service_ok = bool(value.get("service_ok"))
+                loopback_ok = bool(value.get("listener", {}).get("loopback_only"))
+                value["ok"] = service_ok and provider_ok and loopback_ok
+                value["status"] = "historical_read_only" if value["ok"] else "historical_unavailable"
+                value["service_status"] = value.get("status")
             freestockdb_health_cache.update(
                 {"expires_at": time.monotonic() + 60.0, "value": value}
             )
@@ -481,7 +761,19 @@ def create_app(
                 aliases.setdefault(symbol, name)
         return aliases
 
-    def queue_confirmed_leads(symbols: list[str]) -> list[str]:
+    def route_confirmed_leads(symbols: list[str]) -> dict[str, Any]:
+        if not market_writes_enabled():
+            mode = market_recovery_mode()
+            admitted = market_admissions.queue_confirmed_symbols(
+                symbols,
+                as_of=str(mode.get("as_of") or ""),
+            )
+            return {
+                "queued_symbols": [],
+                "queued_symbol_count": 0,
+                "admission_symbols": admitted[:20],
+                "admission_symbol_count": len(set(admitted)),
+            }
         queued: list[str] = []
         for symbol in symbols:
             if market_store.get_instrument(symbol) is None:
@@ -496,7 +788,12 @@ def create_app(
             market_store.touch_mention(symbol, mentioned)
             market_store.enqueue_sync(symbol, reason=f"kol_lead:{leads[0]['post_id']}")
             queued.append(symbol)
-        return sorted(set(queued))
+        return {
+            "queued_symbols": sorted(set(queued))[:20],
+            "queued_symbol_count": len(set(queued)),
+            "admission_symbols": [],
+            "admission_symbol_count": 0,
+        }
 
     def extract_leads() -> dict[str, Any]:
         result = extract_stock_leads(
@@ -506,10 +803,14 @@ def create_app(
         )
         reconciled = reconcile_exact_stock_leads(post_store, market_store.instrument_map())
         symbols = sorted(set(result.confirmed_symbols) | set(reconciled))
+        routed = route_confirmed_leads(symbols)
         return {
             **asdict(result),
             "reconciled_symbols": reconciled,
-            "queued_symbols": queue_confirmed_leads(symbols),
+            **routed,
+            "market_write_mode": (
+                "live" if market_writes_enabled() else "historical_admission_only"
+            ),
         }
 
     def extract_leads_for_post(post_id: str) -> dict[str, Any]:
@@ -525,10 +826,14 @@ def create_app(
             post_id=post_id,
         )
         symbols = sorted(set(result.confirmed_symbols) | set(reconciled))
+        routed = route_confirmed_leads(symbols)
         return {
             **asdict(result),
             "reconciled_symbols": reconciled,
-            "queued_symbols": queue_confirmed_leads(symbols),
+            **routed,
+            "market_write_mode": (
+                "live" if market_writes_enabled() else "historical_admission_only"
+            ),
         }
 
     def recommendation_queue_scope(post: dict[str, Any]) -> str:
@@ -556,9 +861,10 @@ def create_app(
                 if not claimed:
                     raise ModelWorkerBusyError("post classification is already running")
                 current = claimed[0]
-                classifier = DeepSeekPostClassifier(
+                classifier = build_post_classifier(
                     config.codex_schema,
-                    deepseek_credentials,
+                    ROOT,
+                    deepseek_credentials=deepseek_credentials,
                 )
                 try:
                     payload = classifier.classify(current)
@@ -589,28 +895,6 @@ def create_app(
             )
         extract_leads_for_post(post_id)
         return result
-
-    def board_with_related_events(board_code: str, board_type: str | None) -> dict[str, Any]:
-        board = board_store.get_board(board_code, board_type)
-        if board is None:
-            raise HTTPException(404, "board not found")
-        symbols = {str(item["symbol"]) for item in board.get("members", [])}
-        board["related_events"] = [
-            {
-                "event_id": event.event_id,
-                "kol_name": event.kol_name,
-                "platform": event.platform,
-                "posted_at": event.posted_at,
-                "symbol": event.symbol,
-                "security_name": event.security_name,
-                "direction": event.direction,
-                "status": event.status,
-                "source_url": event.source_url,
-            }
-            for event in event_store.load_events()
-            if event.status in {"active", "completed"} and event.symbol in symbols
-        ]
-        return board
 
     def technical_context_for(event: Any) -> dict[str, Any] | None:
         return market_store.get_event_technical_context(
@@ -677,13 +961,74 @@ def create_app(
                     security_name=draft.security_name or instruments[draft.symbol]["name"],
                 )
 
-            try:
-                mentioned = datetime.fromisoformat(str(post["posted_at"]).replace("Z", "+00:00")).date()
-            except ValueError:
-                mentioned = date.today()
-            market_store.touch_mention(draft.symbol, mentioned)
-            market_store.enqueue_sync(draft.symbol, reason=f"kol_review:{post_id}")
+            if market_writes_enabled():
+                try:
+                    mentioned = datetime.fromisoformat(str(post["posted_at"]).replace("Z", "+00:00")).date()
+                except ValueError:
+                    mentioned = date.today()
+                market_store.touch_mention(draft.symbol, mentioned)
+                market_store.enqueue_sync(draft.symbol, reason=f"kol_review:{post_id}")
+            else:
+                market_admissions.queue_confirmed_symbols(
+                    [draft.symbol],
+                    as_of=str(market_recovery_mode().get("as_of") or ""),
+                )
         return symbols
+
+    def approve_draft_record(draft_id: int, note: str = "") -> tuple[dict[str, Any], Any]:
+        """Apply the same guarded approval path used by the single-item endpoint."""
+        current = recommendation_drafts.get_draft(draft_id)
+        if current["status"] == "approved":
+            return current, None
+        if current["status"] not in {"ready", "needs_attention"}:
+            raise ValueError("recommendation draft is not pending review")
+        hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
+        if hard_blockers:
+            raise ValueError(
+                "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
+            )
+        instrument = market_store.get_instrument(current["symbol"])
+        if instrument is None:
+            raise ValueError("instrument is not available in the market master")
+        event_draft = {
+            "symbol": current["symbol"],
+            "security_name": current["security_name"] or instrument["name"],
+            "direction": current["direction"],
+            "thesis": current["thesis"],
+            "evidence_type": current["evidence_type"],
+            "conditions": current["conditions"],
+        }
+        result = approve_recommendation_draft(
+            post_store,
+            event_store,
+            current["post_id"],
+            event_draft,
+            note=note,
+            audit_detail={"recommendation_draft_id": draft_id},
+        )
+        approved = recommendation_drafts.mark_approved(
+            draft_id,
+            result.event_ids[0],
+            note,
+        )
+        review_agent.mark_overridden_for_post(
+            current["post_id"],
+            "approved",
+            [event_draft],
+        )
+        if market_writes_enabled():
+            try:
+                mentioned_at = datetime.fromisoformat(
+                    str(current["posted_at"]).replace("Z", "+00:00")
+                ).date()
+            except ValueError:
+                mentioned_at = date.today()
+            market_store.touch_mention(current["symbol"], mentioned_at)
+            market_store.enqueue_sync(
+                current["symbol"],
+                reason=f"recommendation_draft:{draft_id}",
+            )
+        return approved, result
 
     @app.get("/api/summary")
     def summary() -> dict[str, Any]:
@@ -708,6 +1053,151 @@ def create_app(
     @app.get("/api/kols")
     def list_kols(status: str | None = None) -> list[dict[str, Any]]:
         return post_store.list_kols(status)
+
+    def require_discovery(*, require_scorer: bool = False) -> tuple[Any, Any, Any, Any]:
+        if not all(
+            value is not None
+            for value in (
+                discovery_store,
+                discovery_service,
+                discovery_registry,
+            )
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=f"full-platform discovery unavailable: {discovery_error or 'not configured'}",
+            )
+        if require_scorer and discovery_scorer is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"discovery AI scoring unavailable: {discovery_scorer_error or 'not configured'}",
+            )
+        return discovery_store, discovery_service, discovery_registry, discovery_scorer
+
+    @app.get("/api/discovery/platforms")
+    def discovery_platforms() -> list[dict[str, Any]]:
+        _store, _service, registry, _scorer = require_discovery()
+        return registry.platforms()
+
+    @app.post("/api/discovery/runs", status_code=201)
+    def start_discovery(body: DiscoveryRunRequest) -> dict[str, Any]:
+        _store, service, registry, _scorer = require_discovery()
+        try:
+            platform_info = next(
+                item for item in registry.platforms() if item["platform"] == body.platform
+            )
+            health = platform_info.get("health") or {}
+            if not platform_info.get("available"):
+                status = str(health.get("status") or "untested")
+                reason = str(health.get("reason") or health.get("mode") or "provider is not ready")
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{body.platform} discovery is {status}: {reason}",
+                )
+            return service.run(body.platform, body.query, limit=body.limit)
+        except KeyError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/discovery/runs/{run_id}")
+    def discovery_run(run_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/discovery/candidates")
+    def discovery_candidates(
+        state: str | None = None,
+        platform: str | None = None,
+        query: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        store, _service, _registry, _scorer = require_discovery()
+        return store.list_candidates(
+            state=state,
+            platform=platform,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/discovery/candidates/{candidate_id}")
+    def discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.get_candidate(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/score")
+    def score_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        _store, _service, _registry, scorer = require_discovery(require_scorer=True)
+        try:
+            return scorer.score(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/accept")
+    def accept_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.accept(candidate_id, note=body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/reject")
+    def reject_discovery_candidate(
+        candidate_id: str,
+        body: DiscoveryDecisionRequest,
+    ) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.reject(candidate_id, body.note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/discovery/candidates/{candidate_id}/retry")
+    def retry_discovery_candidate(candidate_id: str) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        try:
+            return store.retry(candidate_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/discovery/kols/{kol_id}/profile")
+    def discovery_kol_profile(kol_id: int) -> dict[str, Any]:
+        store, _service, _registry, _scorer = require_discovery()
+        kol = post_store.get_kol(kol_id)
+        if kol is None:
+            raise HTTPException(404, "KOL not found")
+        return {"kol": kol, "history": store.profile_history(kol_id)}
+
+    @app.post("/api/discovery/kols/{kol_id}/fetch", status_code=202)
+    def discovery_kol_fetch(kol_id: int, body: KolBackfillRequest) -> dict[str, Any]:
+        require_discovery()
+        try:
+            return post_store.queue_backfill(kol_id, body.count)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/digest-authors")
     def digest_authors(limit: int = Query(default=200, ge=1, le=500)) -> list[dict[str, Any]]:
@@ -751,6 +1241,10 @@ def create_app(
                 "rank_horizon": item["rank_horizon"],
                 "score": None,
                 "event_count": item["horizons"]["1W"]["event_count"],
+                "long_event_count": item["horizons"]["1W"]["long_event_count"],
+                "short_event_count": item["horizons"]["1W"]["short_event_count"],
+                "executable_long_event_count": item["horizons"]["1W"]["executable_long_event_count"],
+                "audit_event_count": item["horizons"]["1W"]["audit_event_count"],
                 "executable_event_count": item["horizons"]["1W"]["event_count"],
                 "horizons": horizons,
             })
@@ -761,6 +1255,7 @@ def create_app(
                 "score": None,
                 "direction_policy": "short events are retained for audit but excluded from A-share return statistics",
                 "sample_policy": "small long-only samples are shown but never formally ranked",
+                "counting_policy": "long_event_count counts the long events in the return sample; short_event_count counts excluded short events (audit only, independent of window/horizon); executable_long_event_count counts long events free of primary execution warnings; audit_event_count = long_event_count + short_event_count",
             },
             "as_of": result["as_of"],
             "rows": rows,
@@ -822,6 +1317,7 @@ def create_app(
 
     @app.post("/api/kol-performance/refresh")
     def refresh_kol_performance(body: PerformanceRefreshRequest | None = None) -> dict[str, Any]:
+        assert_market_writes_allowed()
         try:
             effective_date = date.fromisoformat(body.as_of) if body and body.as_of else date.today()
             performance.migrate_event_identities()
@@ -859,7 +1355,20 @@ def create_app(
     @app.patch("/api/kols/{kol_id}")
     def patch_kol(kol_id: int, body: KolPatch) -> dict[str, Any]:
         try:
-            return post_store.update_kol(kol_id, body.model_dump(exclude_none=True))
+            values = body.model_dump(exclude_none=True)
+            availability = values.pop("availability_status", None)
+            reason = values.pop("availability_reason", "")
+            result = post_store.update_kol(kol_id, values) if values else post_store.get_kol(kol_id)
+            if result is None:
+                raise KeyError(f"KOL not found: {kol_id}")
+            if availability is not None:
+                result = post_store.set_account_availability(
+                    kol_id,
+                    availability,
+                    reason=reason,
+                    source="manual_ui",
+                )
+            return result
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -987,6 +1496,86 @@ def create_app(
             "approved_drafts": [sanitize_recommendation_draft(item) for item in approved_drafts],
         }
 
+    @app.post("/api/recommendation-drafts/bulk-preview")
+    def bulk_preview_recommendation_drafts(
+        body: RecommendationDraftBulkPreviewRequest,
+    ) -> dict[str, Any]:
+        try:
+            return {
+                **recommendation_drafts.create_bulk_snapshot(
+                    review_date=body.review_date,
+                    queue_scope=body.queue_scope,
+                    status_filter=body.status,
+                    limit=body.limit,
+                ),
+                "ok": True,
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/recommendation-drafts/bulk-approve")
+    def bulk_approve_recommendation_drafts(
+        body: RecommendationDraftBulkApproveRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        try:
+            snapshot = recommendation_drafts.consume_bulk_snapshot(body.snapshot_token)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        approved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        symbols: set[str] = set()
+        event_ids: list[str] = []
+        for raw_id in snapshot["draft_ids"]:
+            draft_id = int(raw_id)
+            try:
+                current = recommendation_drafts.get_draft(draft_id)
+                if current["status"] != "ready" or current.get("attention_reasons"):
+                    skipped.append({
+                        "draft_id": draft_id,
+                        "reason": "changed_since_preview",
+                        "status": current["status"],
+                        "attention_reasons": current.get("attention_reasons", []),
+                    })
+                    continue
+                result, approval = approve_draft_record(draft_id, body.note)
+                symbols.add(str(result["symbol"]))
+                if approval is not None:
+                    event_ids.extend(approval.event_ids)
+                approved.append({
+                    "draft_id": draft_id,
+                    "event_id": result.get("event_id") or (approval.event_ids[0] if approval else ""),
+                    "status": result["status"],
+                    "symbol": result["symbol"],
+                })
+            except KeyError as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)})
+            except Exception as exc:
+                failed.append({"draft_id": draft_id, "error": str(exc)[:1000]})
+        if symbols:
+            background_tasks.add_task(
+                run_post_approval_refresh,
+                config.runtime_root,
+                ROOT,
+                sorted(symbols),
+                as_of=date.today(),
+            )
+        if event_ids:
+            background_tasks.add_task(
+                lambda ids=sorted(set(event_ids)): [event_dossier.refresh(event_id) for event_id in ids]
+            )
+        return {
+            "ok": not failed,
+            "snapshot_consumed": True,
+            "processed": len(approved) + len(skipped) + len(failed),
+            "approved": approved,
+            "skipped": skipped,
+            "failed": failed,
+            "queued_symbols": sorted(symbols),
+            "refresh_status": "queued" if symbols else "not_needed",
+        }
+
     @app.get("/api/recommendation-drafts/{draft_id}")
     def get_recommendation_draft(draft_id: int) -> dict[str, Any]:
         try:
@@ -1053,60 +1642,14 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             current = recommendation_drafts.get_draft(draft_id)
-            if current["status"] == "approved":
-                return sanitize_recommendation_draft(current)
-            if current["status"] not in {"ready", "needs_attention"}:
-                raise ValueError("recommendation draft is not pending review")
-            hard_blockers = set(current["attention_reasons"]) - {"image_dependency"}
-            if hard_blockers:
-                raise ValueError(
-                    "recommendation draft still needs attention: " + ", ".join(sorted(hard_blockers))
-                )
-            instrument = market_store.get_instrument(current["symbol"])
-            if instrument is None:
-                raise ValueError("instrument is not available in the market master")
-            event_draft = {
-                "symbol": current["symbol"],
-                "security_name": current["security_name"] or instrument["name"],
-                "direction": current["direction"],
-                "thesis": current["thesis"],
-                "evidence_type": current["evidence_type"],
-                "conditions": current["conditions"],
-            }
-            result = approve_recommendation_draft(
-                post_store,
-                event_store,
-                current["post_id"],
-                event_draft,
-                note=body.note,
-                audit_detail={"recommendation_draft_id": draft_id},
-            )
-            approved = recommendation_drafts.mark_approved(
-                draft_id,
-                result.event_ids[0],
-                body.note,
-            )
-            review_agent.mark_overridden_for_post(
-                current["post_id"],
-                "approved",
-                [event_draft],
-            )
-            try:
-                mentioned_at = datetime.fromisoformat(
-                    str(current["posted_at"]).replace("Z", "+00:00")
-                ).date()
-            except ValueError:
-                mentioned_at = date.today()
-            market_store.touch_mention(current["symbol"], mentioned_at)
-            market_store.enqueue_sync(
-                current["symbol"],
-                reason=f"recommendation_draft:{draft_id}",
-            )
+            approved, result = approve_draft_record(draft_id, body.note)
+            if result is None:
+                return sanitize_recommendation_draft(approved)
             background_tasks.add_task(
                 run_post_approval_refresh,
                 config.runtime_root,
                 ROOT,
-                [current["symbol"]],
+                [approved["symbol"]],
                 as_of=date.today(),
             )
             background_tasks.add_task(event_dossier.refresh, result.event_ids[0])
@@ -1225,26 +1768,27 @@ def create_app(
                     "approved",
                     [draft.model_dump() for draft in body.drafts],
                 )
-                for draft in body.drafts:
-                    instrument = market_store.get_instrument(draft.symbol)
-                    if instrument is None:
-                        continue
-                    market_store.upsert_instrument(
-                        Instrument(
-                            symbol=draft.symbol,
-                            name=draft.security_name or instrument["name"],
-                            instrument_type=instrument["instrument_type"],
-                            exchange=instrument["exchange"],
-                            status=instrument["status"],
-                            list_date=instrument["list_date"],
-                            lifecycle="pinned",
-                            source="kol_event",
-                            first_seen_at=instrument["first_seen_at"],
-                            last_mentioned_at=str(post_store.get_post(post_id)["posted_at"])[:10],
+                if market_writes_enabled():
+                    for draft in body.drafts:
+                        instrument = market_store.get_instrument(draft.symbol)
+                        if instrument is None:
+                            continue
+                        market_store.upsert_instrument(
+                            Instrument(
+                                symbol=draft.symbol,
+                                name=draft.security_name or instrument["name"],
+                                instrument_type=instrument["instrument_type"],
+                                exchange=instrument["exchange"],
+                                status=instrument["status"],
+                                list_date=instrument["list_date"],
+                                lifecycle="pinned",
+                                source="kol_event",
+                                first_seen_at=instrument["first_seen_at"],
+                                last_mentioned_at=str(post_store.get_post(post_id)["posted_at"])[:10],
+                            )
                         )
-                    )
                 refresh_status = "not_requested"
-                if body.refresh_returns and queued_symbols:
+                if body.refresh_returns and queued_symbols and market_writes_enabled():
                     background_tasks.add_task(
                         run_post_approval_refresh,
                         config.runtime_root,
@@ -1286,14 +1830,16 @@ def create_app(
     @app.post("/api/fetch")
     def fetch_posts(body: FetchRequest) -> dict[str, Any]:
         fallback_mode = _fallback_mode(config.runtime_root)
-        if body.provider == "nitter" and fallback_mode != "enabled":
-            raise HTTPException(409, "Nitter is shadow-only until the rollout gate passes")
+        if body.provider == "nitter":
+            raise HTTPException(409, "Nitter is shadow-only and disabled for automatic collection")
+        fallback_mode = "disabled"
         provider = build_x_post_provider(
             body.provider,
-            twitter_credentials=credentials,
             xtf_command=str(xtf_command),
             nitter_url=config.nitter_url,
             fallback_mode=fallback_mode,
+            session_manager=x_sessions,
+            batch_key=f"api:fetch:{uuid.uuid4().hex}",
         )
         result = run_post_fetch(
             post_store,
@@ -1325,6 +1871,131 @@ def create_app(
             "stock_leads": lead_result,
         }
 
+    @app.get("/api/collection/coverage")
+    def collection_coverage(
+        platform: str = Query(default="", pattern="^(|X|Zhihu)$"),
+        window_start: str = "",
+        window_end: str = "",
+    ) -> dict[str, Any]:
+        if platform:
+            return post_store.collection_coverage(
+                platform=platform,
+                window_start=window_start,
+                window_end=window_end,
+            )
+        return {
+            "platform": "all",
+            "items": [
+                post_store.collection_coverage(
+                    platform=value,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                for value in ("X", "Zhihu")
+            ],
+        }
+
+    @app.post("/api/collection/recovery/preview")
+    def collection_recovery_preview() -> dict[str, Any]:
+        start = (date.today() - timedelta(days=7)).isoformat()
+        end = date.today().isoformat()
+        return {
+            "ok": True,
+            "scope": "recent",
+            "window_start": start,
+            "window_end": end,
+            "coverage": [
+                post_store.collection_coverage(platform=value, window_start=start, window_end=end)
+                for value in ("X", "Zhihu")
+            ],
+            "reader_configured": any(item.get("status") == "ready" for item in x_sessions.policy_status().get("slots", [])),
+            "x_session_ready": any(item.get("status") == "ready" for item in x_sessions.policy_status().get("slots", [])),
+            "ai_is_optional": True,
+        }
+
+    @app.post("/api/collection/recovery/start", status_code=202)
+    def collection_recovery_start() -> dict[str, Any]:
+        if not any(item.get("status") == "ready" for item in x_sessions.policy_status().get("slots", [])):
+            raise HTTPException(409, "no verified X session is ready")
+        for existing in collection_runs.values():
+            if existing.get("status") != "running":
+                continue
+            try:
+                process = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {existing['pid']}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if str(existing["pid"]) in (process.stdout or ""):
+                    raise HTTPException(409, "a collection recovery run is already active")
+            except HTTPException:
+                raise
+            except Exception:
+                existing["status"] = "completed"
+                existing["completed_at"] = now_iso()
+        run_id = uuid.uuid4().hex
+        cli = ROOT / "_automation" / "trading_research" / "trading_cli.py"
+        log_dir = config.runtime_root / "kol" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"collection-recovery-{run_id}.log"
+        handle = log_path.open("w", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(cli), "kol-gap-recover", "--scope", "recent", "--resume"],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            )
+        finally:
+            handle.close()
+        collection_runs[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "pid": process.pid,
+            "log": str(log_path),
+            "started_at": now_iso(),
+        }
+        return collection_runs[run_id]
+
+    @app.get("/api/collection/recovery/{run_id}")
+    def collection_recovery_status(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        try:
+            process = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {item['pid']}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            alive = str(item["pid"]) in (process.stdout or "")
+        except Exception:
+            alive = False
+        if not alive and item["status"] == "running":
+            item["status"] = "completed"
+            item["completed_at"] = now_iso()
+        item["coverage"] = {
+            "X": post_store.collection_coverage(platform="X"),
+            "Zhihu": post_store.collection_coverage(platform="Zhihu"),
+        }
+        return item
+
+    @app.post("/api/collection/recovery/{run_id}/cancel")
+    def collection_recovery_cancel(run_id: str) -> dict[str, Any]:
+        item = collection_runs.get(run_id)
+        if not item:
+            raise HTTPException(404, "recovery run not found in this server session")
+        subprocess.run(["taskkill", "/PID", str(item["pid"]), "/T", "/F"], capture_output=True, check=False)
+        item["status"] = "cancelled"
+        item["completed_at"] = now_iso()
+        return item
+
     @app.post("/api/stock-leads/extract")
     def extract_stock_lead_queue() -> dict[str, Any]:
         return extract_leads()
@@ -1346,6 +2017,21 @@ def create_app(
             limit=limit,
             offset=offset,
         )
+
+    @app.get("/api/market/admissions")
+    def list_market_admissions(
+        status: str | None = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        try:
+            return {
+                "items": market_admissions.list(status=status, limit=limit, offset=offset),
+                "summary": market_admissions.summary(),
+                "published_manifest": read_published_manifest(config.runtime_root / "market"),
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/stock-mentions")
     def list_stock_mentions(
@@ -1382,16 +2068,24 @@ def create_app(
             current = post_store.get_stock_lead(lead_id)
             symbol = body.symbol or current["symbol"]
             instrument_before = None
+            writes_enabled = market_writes_enabled()
             if body.action == "confirmed":
                 if current["status"] == "confirmed":
                     if body.symbol is not None and body.symbol != current["symbol"]:
                         raise ValueError("已确认线索不能直接改代码，请先退回待确认")
+                    if not writes_enabled:
+                        market_admissions.queue_confirmed_symbols(
+                            [symbol],
+                            as_of=str(market_recovery_mode().get("as_of") or ""),
+                        )
+                        return {**current, "market_admission_status": "queued"}
                     return current
                 if current["status"] != "pending":
                     raise ValueError("只有待确认线索可以晋升为确认状态")
-                instrument_before = market_store.get_instrument(symbol)
-                if instrument_before is None:
-                    raise ValueError(f"{symbol} 不在证券主数据中，请先刷新主数据或修正代码")
+                if writes_enabled:
+                    instrument_before = market_store.get_instrument(symbol)
+                    if instrument_before is None:
+                        raise ValueError(f"{symbol} 不在证券主数据中，请先刷新主数据或修正代码")
             reviewed = post_store.review_stock_lead(
                 lead_id,
                 body.action,
@@ -1400,6 +2094,12 @@ def create_app(
                 security_name=body.security_name,
             )
             if body.action == "confirmed":
+                if not writes_enabled:
+                    market_admissions.queue_confirmed_symbols(
+                        [symbol],
+                        as_of=str(market_recovery_mode().get("as_of") or ""),
+                    )
+                    return {**reviewed, "market_admission_status": "queued"}
                 try:
                     mentioned = datetime.fromisoformat(str(current["posted_at"]).replace("Z", "+00:00")).date()
                 except ValueError:
@@ -1415,12 +2115,12 @@ def create_app(
                         symbol=current["symbol"],
                         security_name=current["security_name"],
                     )
-                    assert instrument_before is not None
-                    market_store.restore_research_state(
-                        symbol,
-                        lifecycle=instrument_before["lifecycle"],
-                        last_mentioned_at=instrument_before["last_mentioned_at"],
-                    )
+                    if instrument_before is not None:
+                        market_store.restore_research_state(
+                            symbol,
+                            lifecycle=instrument_before["lifecycle"],
+                            last_mentioned_at=instrument_before["last_mentioned_at"],
+                        )
                     raise
             return reviewed
         except KeyError as exc:
@@ -1436,10 +2136,12 @@ def create_app(
 
     @app.post("/api/instruments", status_code=201)
     def create_instrument(body: InstrumentCreate) -> dict[str, Any]:
+        assert_market_writes_allowed()
         return market_store.upsert_instrument(Instrument(**body.model_dump()))
 
     @app.patch("/api/instruments/{symbol}")
     def patch_instrument(symbol: str, body: InstrumentPatch) -> dict[str, Any]:
+        assert_market_writes_allowed()
         current = market_store.get_instrument(symbol)
         if current is None:
             raise HTTPException(404, "instrument not found")
@@ -1461,6 +2163,7 @@ def create_app(
 
     @app.post("/api/market/sync", status_code=202)
     def enqueue_market_sync(body: MarketSyncRequest) -> dict[str, Any]:
+        assert_market_writes_allowed()
         symbols = body.symbols or [
             item["symbol"]
             for item in market_store.list_instruments()
@@ -1480,6 +2183,77 @@ def create_app(
             except KeyError as exc:
                 raise HTTPException(404, str(exc)) from exc
         return {"ok": True, "queued_symbols": queued}
+
+    def run_foundation_refresh_job(as_of: str, notify: bool, state_path: Path) -> None:
+        command = [
+            sys.executable,
+            str(ROOT / "_automation" / "trading_research" / "trading_cli.py"),
+            "kol-data-refresh",
+            "--as-of",
+            as_of,
+        ]
+        if notify:
+            command.append("--notify")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1800,
+                check=False,
+            )
+            output = (completed.stdout or completed.stderr or "").strip()
+            state = {
+                "status": "completed" if completed.returncode == 0 else "degraded",
+                "returncode": completed.returncode,
+                "output_tail": output[-4000:],
+                "finished_at": now_iso(),
+            }
+        except subprocess.TimeoutExpired:
+            state = {
+                "status": "degraded",
+                "returncode": -1,
+                "output_tail": "shared foundation refresh timed out after 1800 seconds",
+                "finished_at": now_iso(),
+            }
+        temporary = state_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, state_path)
+
+    @app.post("/api/market/foundation-refresh", status_code=202)
+    def refresh_foundation(
+        body: FoundationRefreshRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        assert_market_writes_allowed()
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            current = {}
+        if current.get("status") == "running":
+            return {"ok": True, "status": "already_running", "state": current}
+        state_path.write_text(
+            json.dumps(
+                {"status": "running", "as_of": body.as_of, "started_at": now_iso()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        background_tasks.add_task(run_foundation_refresh_job, body.as_of, body.notify, state_path)
+        return {"ok": True, "status": "triggered", "as_of": body.as_of}
+
+    @app.get("/api/market/foundation-refresh")
+    def foundation_refresh_status() -> dict[str, Any]:
+        state_path = config.runtime_root / "market" / "foundation-refresh.json"
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {"status": "idle"}
 
     @app.get("/api/market/health")
     def market_health() -> dict[str, Any]:
@@ -1509,6 +2283,7 @@ def create_app(
         body: FreeStockDBUpdateRequest,
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
+        assert_market_writes_allowed()
         current = safe_freestockdb_health(force=True)
         if current.get("port_conflict"):
             raise HTTPException(409, "FreeStockDB port conflict")
@@ -1593,86 +2368,6 @@ def create_app(
             "rows": rows,
         }
 
-    @app.get("/api/board-mainline/health")
-    def board_mainline_health() -> dict[str, Any]:
-        return board_store.health()
-
-    @app.get("/api/board-mainline")
-    def list_board_mainline(
-        board_type: str = Query(default="industry", pattern="^(industry|concept)$"),
-        status: str = "",
-        q: str = "",
-        as_of: date | None = None,
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=100, ge=1, le=200),
-        sort_by: str = Query(
-            default="rps_50",
-            pattern="^(rps_50|rps_120|rps_250|breadth|turnover_ratio_20|board_name)$",
-        ),
-        descending: bool = True,
-    ) -> dict[str, Any]:
-        return board_store.list_mainline(
-            board_type=board_type,
-            status=status,
-            query=q,
-            as_of=as_of,
-            page=page,
-            page_size=page_size,
-            sort_by=sort_by,
-            descending=descending,
-        )
-
-    @app.get("/api/board-mainline/{board_code}/series")
-    def board_mainline_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        limit: int = Query(default=320, ge=1, le=1000),
-    ) -> list[dict[str, Any]]:
-        if board_store.get_board(board_code, board_type) is None:
-            raise HTTPException(404, "board not found")
-        return board_store.series(board_code, board_type=board_type, limit=limit)
-
-    @app.get("/api/board-mainline/{board_code}/rank-series")
-    def board_rank_series(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-        window: int = Query(default=50, ge=1, le=250),
-        range_name: str = Query(default="120", alias="range", pattern="^(all|120|250)$"),
-    ) -> dict[str, Any]:
-        try:
-            return board_store.rank_series(
-                board_code,
-                board_type=board_type,
-                window=window,
-                range_name=range_name,
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.get("/api/board-mainline/{board_code}")
-    def board_mainline_detail(
-        board_code: str,
-        board_type: str | None = Query(default=None, pattern="^(industry|concept)$"),
-    ) -> dict[str, Any]:
-        return board_with_related_events(board_code, board_type)
-
-    def run_board_sync_job(as_of: date) -> None:
-        store = BoardMainlineStore(MarketStore(config.runtime_root / "market"))
-        result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-        if result.succeeded:
-            store.compute_rps(as_of=as_of, formula_version="board-rps-v2")
-
-    @app.post("/api/board-mainline/sync", status_code=202)
-    def sync_board_mainline(
-        body: BoardSyncRequest,
-        background_tasks: BackgroundTasks,
-    ) -> dict[str, Any]:
-        if board_store.health()["latest_run"] and board_store.health()["latest_run"]["status"] == "running":
-            return {"ok": True, "status": "already_running"}
-        as_of = body.as_of or date.today()
-        background_tasks.add_task(run_board_sync_job, as_of)
-        return {"ok": True, "status": "queued", "as_of": as_of.isoformat()}
-
     @app.get("/api/events")
     def list_events() -> list[dict[str, Any]]:
         latest: dict[str, dict[str, str]] = {}
@@ -1747,6 +2442,7 @@ def create_app(
         fetch_minute: bool = False,
         with_ai: bool = False,
     ) -> dict[str, Any]:
+        assert_market_writes_allowed()
         provider: FreeStockDBMarketProvider | None = None
         try:
             if fetch_cross_section or fetch_minute:
@@ -1844,6 +2540,7 @@ def create_app(
 
     @app.post("/api/events/{event_id}/data-refresh", status_code=202)
     def refresh_event_dossier(event_id: str) -> dict[str, Any]:
+        assert_market_writes_allowed()
         try:
             dossier = event_dossier.refresh(event_id)
         except KeyError as exc:
@@ -1891,22 +2588,23 @@ def create_app(
             if errors:
                 raise HTTPException(422, "激活信息不完整：" + ", ".join(errors))
             instrument = market_store.get_instrument(candidate.symbol)
-            market_store.upsert_instrument(
-                Instrument(
-                    symbol=candidate.symbol,
-                    name=candidate.security_name or (instrument or {}).get("name", candidate.symbol),
-                    instrument_type=(instrument or {}).get("instrument_type", "stock"),
-                    exchange=(instrument or {}).get(
-                        "exchange",
-                        "BJ" if candidate.symbol.startswith(("4", "8", "92")) else "SH" if candidate.symbol.startswith("6") else "SZ",
-                    ),
-                    lifecycle="pinned",
-                    source="kol_event",
-                    first_seen_at=(instrument or {}).get("first_seen_at", ""),
-                    last_mentioned_at=candidate.posted_at[:10],
+            if market_writes_enabled():
+                market_store.upsert_instrument(
+                    Instrument(
+                        symbol=candidate.symbol,
+                        name=candidate.security_name or (instrument or {}).get("name", candidate.symbol),
+                        instrument_type=(instrument or {}).get("instrument_type", "stock"),
+                        exchange=(instrument or {}).get(
+                            "exchange",
+                            "BJ" if candidate.symbol.startswith(("4", "8", "92")) else "SH" if candidate.symbol.startswith("6") else "SZ",
+                        ),
+                        lifecycle="pinned",
+                        source="kol_event",
+                        first_seen_at=(instrument or {}).get("first_seen_at", ""),
+                        last_mentioned_at=candidate.posted_at[:10],
+                    )
                 )
-            )
-            market_store.enqueue_sync(candidate.symbol, reason=f"kol_event:{candidate.event_id}")
+                market_store.enqueue_sync(candidate.symbol, reason=f"kol_event:{candidate.event_id}")
         elif body.action == "exclude":
             reason = (body.exclusion_reason or "").strip()
             if not reason:
@@ -1943,7 +2641,7 @@ def create_app(
                 reason=body.reason,
             )
             refresh_status = "not_required"
-            if revision.get("recalculation_required"):
+            if revision.get("recalculation_required") and market_writes_enabled():
                 instrument = market_store.get_instrument(updated.symbol)
                 market_store.upsert_instrument(
                     Instrument(
@@ -2088,6 +2786,7 @@ def create_app(
 
     @app.post("/api/events/{event_id}/intraday-backfill", status_code=202)
     def event_intraday_backfill(event_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+        assert_market_writes_allowed()
         if not any(event.event_id == event_id for event in event_store.load_events()):
             raise HTTPException(404, "event not found")
 
@@ -2177,29 +2876,63 @@ def create_app(
     def fetch_attempts(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
         return post_store.recent_fetch_attempts(limit)
 
-    @app.get("/api/system/health")
-    def system_health() -> dict[str, Any]:
+    def build_system_diagnostics(*, force: bool = False) -> dict[str, Any]:
         recent_runs = post_store.recent_fetch_runs(limit=1)
         attempts = post_store.recent_fetch_attempts(limit=100)
         twitter_attempts = [item for item in attempts if item["provider"] == "twitter-cli"]
         fallback_attempts = [item for item in attempts if item["provider"] == "nitter"]
         docker = docker_health()
-        nitter = timeline_health(config.nitter_url)
+        # Health polling must not issue an authenticated timeline request to
+        # X.  Nitter remains shadow-only; an inexpensive loopback probe is
+        # sufficient for the console status card.
+        nitter = http_health(config.nitter_url)
+        nitter = {
+            "ready": bool(nitter.get("ready")),
+            "status": "http_ok" if nitter.get("ready") else "unavailable",
+            "http_status": int(nitter.get("status") or 0),
+            "error": str(nitter.get("error") or ""),
+        }
         redis = docker_container_health("nitter-redis")
         zhihu_kols = [item for item in post_store.list_kols() if item.get("platform") == "Zhihu"]
         active_zhihu = [item for item in zhihu_kols if item.get("status") == "active"]
         paused_zhihu = [item for item in zhihu_kols if item.get("status") == "paused"]
+        health_cutoff = datetime.now(SHANGHAI) - timedelta(hours=24)
+
+        def checked_recently(item: dict[str, Any]) -> bool:
+            raw = str(item.get("availability_checked_at") or item.get("updated_at") or "")
+            try:
+                checked = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if checked.tzinfo is None:
+                    checked = checked.replace(tzinfo=SHANGHAI)
+                return checked.astimezone(SHANGHAI) >= health_cutoff
+            except ValueError:
+                return False
+
         zhihu_failed = [
             item for item in active_zhihu
-            if str(item.get("fetch_status") or "") not in {"never", "success"}
+            if checked_recently(item)
+            and str(item.get("fetch_status") or "") not in {"never", "success"}
         ]
+        zhihu_stale = [item for item in active_zhihu if not checked_recently(item)]
         zhihu_status = (
             "disabled"
             if not active_zhihu
             else "degraded" if zhihu_failed
             else "success" if any(item.get("fetch_status") == "success" for item in active_zhihu)
-            else "never"
+            else "stale"
         )
+        try:
+            with socket.create_connection(("127.0.0.1", int(zhihu_provider.port)), timeout=0.4):
+                zhihu_browser_status = "ready"
+        except OSError:
+            zhihu_browser_status = "browser_unavailable"
+        if zhihu_failed:
+            recent_errors = " ".join(str(item.get("last_error") or "") for item in zhihu_failed)
+            lowered_errors = recent_errors.casefold()
+            if "rate" in lowered_errors or "429" in lowered_errors:
+                zhihu_browser_status = "rate_limited"
+            elif "auth" in lowered_errors or "登录" in recent_errors:
+                zhihu_browser_status = "auth_required"
         latest_twitter_attempt = twitter_attempts[0] if twitter_attempts else {}
         latest_twitter_error = str(
             latest_twitter_attempt.get("error_code") or ""
@@ -2244,20 +2977,62 @@ def create_app(
         except (OSError, subprocess.SubprocessError):
             gateway_running = False
         review_summary = review_agent.summary()
-        market_component = safe_market_health()
-        freestock_component = safe_freestockdb_health()
+        market_component = safe_market_health(force=force)
+        freestock_component = safe_freestockdb_health(force=force)
+        post_recovery = post_store.post_recovery_summary()
+        x_session_health = x_sessions.policy_status()
+        public_backup_health = public_backup.status()
+        slot_statuses = [str(item.get("status") or "") for item in x_session_health.get("slots", [])]
+        x_pool_status = (
+            "cooldown" if x_session_health.get("paused_until") or "cooldown" in slot_statuses
+            else "ready" if "ready" in slot_statuses
+            else "auth_required" if "auth_required" in slot_statuses
+            else "disabled" if slot_statuses and all(value == "disabled" for value in slot_statuses)
+            else "pending_verification"
+        )
+        discovery_platforms_value: list[dict[str, Any]] = []
+        discovery_runtime_error = ""
+        if discovery_registry is not None:
+            try:
+                discovery_platforms_value = discovery_registry.platforms()
+            except Exception as exc:
+                discovery_runtime_error = str(exc)
+                logger.warning("Discovery health degraded: %s", exc)
+        discovery_available = discovery_registry is not None
+        discovery_scoring_available = discovery_scorer is not None
+        refresh_state = read_refresh_state(config.runtime_root)
+        if (
+            str(market_component.get("recovery_mode")) == "historical"
+            and refresh_state.get("status") == "failed"
+        ):
+            refresh_state = {
+                **refresh_state,
+                "status": "disabled",
+                "reason": "historical_read_only",
+                "legacy_state": refresh_state.get("status"),
+            }
         return {
             "ok": True,
             "date": date.today().isoformat(),
-            "twitter_cli": shutil.which("twitter") or "",
+            "recovery_mode": market_component.get("recovery_mode", "live"),
+            "as_of": market_component.get("as_of", ""),
+            "write_enabled": bool(market_component.get("write_enabled", True)),
+            "twitter_cli": _resolve_twitter_command("twitter"),
             "twitter_credentials_configured": credentials.configured(),
+            "twitter_reader_credentials_configured": reader_credentials.configured(),
+            "x_sessions": x_session_health,
+            "x_collection_status": x_pool_status,
+            "public_backup": public_backup_health,
             "twitter_auth_status": recent_runs[0].get("auth_status", "unknown") if recent_runs else "never",
             "zhihu_capture_available": zhihu_provider.script_path.is_file(),
             "zhihu_active_kols": len(active_zhihu),
             "zhihu_paused_kols": len(paused_zhihu),
             "zhihu_failed_kols": len(zhihu_failed),
             "zhihu_failure_handles": [str(item.get("handle")) for item in zhihu_failed[:20]],
+            "zhihu_stale_kols": len(zhihu_stale),
             "zhihu_fetch_status": zhihu_status,
+            "zhihu_status": zhihu_browser_status,
+            "zhihu_cdp_port": int(zhihu_provider.port),
             "nitter_credentials_configured": nitter_credentials.configured(),
             "nitter_url": config.nitter_url,
             "nitter_ready": nitter["ready"],
@@ -2290,6 +3065,7 @@ def create_app(
             "database": str(post_store.path),
             "media_root": str(post_store.media_root),
             "media_bytes": media_disk_usage(post_store.media_root),
+            "post_recovery": post_recovery,
             "post_fetch_task": _task_status("KOL_Post_Fetch_Daily"),
             "return_task": _task_status("KOL_Return_Tracker_Daily"),
             "market_sync_task": _task_status("Market_Data_Sync_Daily"),
@@ -2299,6 +3075,14 @@ def create_app(
             "morning_runs": recommendation_drafts.recent_morning_runs(5),
             "digest_task": _task_status("Research_Data_Digest_Daily"),
             "review_agent": review_summary,
+            "discovery": {
+                "available": discovery_available,
+                "scoring_available": discovery_scoring_available,
+                "platforms": discovery_platforms_value,
+                "error": discovery_error,
+                "runtime_error": discovery_runtime_error,
+                "scoring_error": discovery_scorer_error,
+            },
             "market": market_component,
             "freestockdb": freestock_component,
             "component_status": {
@@ -2308,7 +3092,7 @@ def create_app(
                 },
                 "operator": {"status": "available"},
                 "x": {
-                    "status": x_status,
+                    "status": x_pool_status,
                     "error_code": latest_twitter_error,
                 },
                 "nitter": {
@@ -2336,9 +3120,180 @@ def create_app(
                     ),
                     "ok": bool(freestock_component.get("ok")),
                 },
+                "discovery": {
+                    "status": "ready" if discovery_available else "unavailable",
+                    "platform_count": len(discovery_platforms_value),
+                    "scoring_status": "ready" if discovery_scoring_available else "degraded",
+                },
             },
+            "pipeline_refresh": refresh_state,
+            "nitter_start_task": _task_status("KOL_Nitter_Shadow_Logon"),
+        }
+
+    diagnostics_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+    diagnostics_lock = threading.Lock()
+
+    @app.get("/api/system/diagnostics")
+    def system_diagnostics(force: bool = Query(default=False)) -> dict[str, Any]:
+        current = time.monotonic()
+        cached = diagnostics_cache.get("value")
+        if not force and cached is not None and current < diagnostics_cache["expires_at"]:
+            return {**cached, "diagnostics_cached": True}
+        with diagnostics_lock:
+            current = time.monotonic()
+            cached = diagnostics_cache.get("value")
+            if not force and cached is not None and current < diagnostics_cache["expires_at"]:
+                return {**cached, "diagnostics_cached": True}
+            value = build_system_diagnostics(force=force)
+            diagnostics_cache.update(
+                {"expires_at": time.monotonic() + 60.0, "value": value}
+            )
+            return {**value, "diagnostics_cached": False}
+
+    @app.get("/api/system/health")
+    def system_health() -> dict[str, Any]:
+        """Return the console-critical state without invoking deep OS/provider probes."""
+        mode = market_recovery_mode()
+        recent_runs = post_store.recent_fetch_runs(limit=1)
+        attempts = post_store.recent_fetch_attempts(limit=20)
+        twitter_attempts = [item for item in attempts if item["provider"] == "twitter-cli"]
+        latest_twitter_attempt = twitter_attempts[0] if twitter_attempts else {}
+        latest_twitter_error = str(latest_twitter_attempt.get("error_code") or "")
+        x_session_health = x_sessions.policy_status()
+        slot_statuses = [str(item.get("status") or "") for item in x_session_health.get("slots", [])]
+        x_pool_status = (
+            "cooldown" if x_session_health.get("paused_until") or "cooldown" in slot_statuses
+            else "ready" if "ready" in slot_statuses
+            else "auth_required" if "auth_required" in slot_statuses
+            else "disabled" if slot_statuses and all(value == "disabled" for value in slot_statuses)
+            else "pending_verification"
+        )
+        zhihu_kols = [item for item in post_store.list_kols() if item.get("platform") == "Zhihu"]
+        active_zhihu = [item for item in zhihu_kols if item.get("status") == "active"]
+        paused_zhihu = [item for item in zhihu_kols if item.get("status") == "paused"]
+        failed_zhihu = [
+            item for item in active_zhihu
+            if str(item.get("fetch_status") or "") not in {"never", "success"}
+        ]
+        try:
+            with socket.create_connection(("127.0.0.1", int(zhihu_provider.port)), timeout=0.15):
+                zhihu_browser_status = "ready"
+        except OSError:
+            zhihu_browser_status = "browser_unavailable"
+
+        cached_diagnostics = dict(diagnostics_cache.get("value") or {})
+        cached_market = market_health_cache.get("value") or {
+            "ok": False,
+            "status": "checking",
+            "market_status": "checking",
+            "active_instruments": 0,
+            "coverage_count": 0,
+            "lagging_symbol_count": 0,
+            "recovery_mode": mode.get("mode", "live"),
+            "as_of": mode.get("as_of", ""),
+            "write_enabled": bool(mode.get("write_enabled", True)),
+            "admissions": market_admissions.summary(),
+        }
+        cached_freestock = freestockdb_health_cache.get("value") or {
+            "ok": False,
+            "status": "checking",
+            "service_status": "checking",
+            "root": str(config.freestockdb_root),
+            "data_path": str(config.freestockdb_root / "data"),
+            "url": config.freestockdb_url,
+            "read_only": not market_writes_enabled(),
+        }
+        component_status = dict(cached_diagnostics.get("component_status") or {})
+        component_status.update(
+            {
+                "operator": {"status": "available"},
+                "x": {"status": x_pool_status, "error_code": latest_twitter_error},
+                "market": {
+                    "status": cached_market.get("market_status", cached_market.get("status", "checking")),
+                    "ok": bool(cached_market.get("ok")),
+                },
+                "freestockdb": {
+                    "status": cached_freestock.get("service_status", "checking"),
+                    "ok": bool(cached_freestock.get("ok")),
+                },
+            }
+        )
+        component_status.setdefault("hermes_gateway", {"status": "checking", "pid": ""})
+        component_status.setdefault("nitter", {"status": "checking", "ready": False})
+        component_status.setdefault("ai", {"status": "ready"})
+        model_budget = ModelDailyBudget(post_store, daily_limit=250).status()
+        return {
+            **cached_diagnostics,
+            "ok": True,
+            "date": date.today().isoformat(),
+            "lightweight": True,
+            "diagnostics_cached": bool(cached_diagnostics),
+            "recovery_mode": mode.get("mode", "live"),
+            "as_of": mode.get("as_of", ""),
+            "write_enabled": bool(mode.get("write_enabled", True)),
+            "twitter_cli": _resolve_twitter_command("twitter"),
+            "twitter_credentials_configured": credentials.configured(),
+            "twitter_reader_credentials_configured": reader_credentials.configured(),
+            "x_sessions": x_session_health,
+            "x_collection_status": x_pool_status,
+            "public_backup": public_backup.status(),
+            "twitter_auth_status": recent_runs[0].get("auth_status", "unknown") if recent_runs else "never",
+            "zhihu_capture_available": zhihu_provider.script_path.is_file(),
+            "zhihu_active_kols": len(active_zhihu),
+            "zhihu_paused_kols": len(paused_zhihu),
+            "zhihu_failed_kols": len(failed_zhihu),
+            "zhihu_failure_handles": [str(item.get("handle") or "") for item in failed_zhihu[:20]],
+            "zhihu_fetch_status": "degraded" if failed_zhihu else "success" if active_zhihu else "disabled",
+            "zhihu_status": zhihu_browser_status,
+            "zhihu_cdp_port": int(zhihu_provider.port),
+            "codex_cli": shutil.which("codex") or "",
+            "deepseek_credentials_configured": deepseek_credentials.configured(),
+            "deepseek_provider": DeepSeekPostClassifier.provider_name,
+            "deepseek_model": DeepSeekPostClassifier.model_name,
+            "unlimited_ocr_root": str(ocr_root),
+            "unlimited_ocr_available": UnlimitedOcrBatchClassifier(ocr_root, ocr_runner).available(),
+            "rapid_ocr_runtime": str(rapid_ocr_python),
+            "rapid_ocr_available": RapidOcrBatchClassifier(rapid_ocr_python, rapid_ocr_runner).available(),
+            "ocr_provider": "rapidocr",
+            "database": str(post_store.path),
+            "media_root": str(post_store.media_root),
+            "media_bytes": int(cached_diagnostics.get("media_bytes") or 0),
+            "post_recovery": post_store.post_recovery_summary(),
+            "model_daily_budget": model_budget,
+            "model_queue": post_store.model_queue_summary(daily_limit=250),
+            "market_admissions": market_admissions.summary(),
+            "post_fetch_task": cached_diagnostics.get("post_fetch_task", "checking"),
+            "return_task": cached_diagnostics.get("return_task", "disabled" if not market_writes_enabled() else "checking"),
+            "market_sync_task": cached_diagnostics.get("market_sync_task", "disabled" if not market_writes_enabled() else "checking"),
+            "classification_task": cached_diagnostics.get("classification_task", "checking"),
+            "review_agent_task": cached_diagnostics.get("review_agent_task", "checking"),
+            "morning_pipeline_task": cached_diagnostics.get("morning_pipeline_task", "checking"),
+            "morning_runs": recommendation_drafts.recent_morning_runs(5),
+            "digest_task": cached_diagnostics.get("digest_task", "checking"),
+            "nitter_credentials_configured": nitter_credentials.configured(),
+            "nitter_url": config.nitter_url,
+            "nitter_ready": bool(cached_diagnostics.get("nitter_ready")),
+            "nitter_status": cached_diagnostics.get("nitter_status", "checking"),
+            "nitter_http_status": int(cached_diagnostics.get("nitter_http_status") or 0),
+            "redis_ready": bool(cached_diagnostics.get("redis_ready")),
+            "docker_installed": bool(cached_diagnostics.get("docker_installed")),
+            "docker_ready": bool(cached_diagnostics.get("docker_ready")),
+            "docker_version": str(cached_diagnostics.get("docker_version") or ""),
+            "xtf_command": str(xtf_command) if xtf_command.exists() else "",
+            "xtf_version": cached_diagnostics.get("xtf_version", ""),
+            "nitter_start_task": cached_diagnostics.get("nitter_start_task", "checking"),
+            "twitter_success_rate": (
+                sum(item["status"] == "success" for item in twitter_attempts) / len(twitter_attempts)
+                if twitter_attempts else None
+            ),
+            "nitter_attempt_count": int(cached_diagnostics.get("nitter_attempt_count") or 0),
+            "fallback_mode": _fallback_mode(config.runtime_root),
+            "market": cached_market,
+            "freestockdb": cached_freestock,
             "pipeline_refresh": read_refresh_state(config.runtime_root),
-            "nitter_start_task": _task_status("KOL_Nitter_Start"),
+            "review_agent": cached_diagnostics.get("review_agent", {}),
+            "shadow_rollout": cached_diagnostics.get("shadow_rollout", post_store.shadow_rollout_status()),
+            "component_status": component_status,
         }
 
     @app.get("/api/pipeline/status")
@@ -2399,16 +3354,60 @@ def create_app(
             "refresh": read_refresh_state(config.runtime_root),
         }
 
-    @app.post("/api/system/twitter-credentials")
-    def save_twitter_credentials(body: TwitterCredentialRequest) -> dict[str, bool]:
+    @app.get("/api/system/x-sessions")
+    def x_session_status() -> dict[str, Any]:
+        return x_sessions.policy_status()
+
+    @app.put("/api/system/x-sessions/{slot_id}/credentials")
+    def save_x_session_credentials(slot_id: int, body: XSessionCredentialRequest) -> dict[str, Any]:
         try:
-            auth_token, ct0 = validate_twitter_credentials(body.auth_token, body.ct0)
-            credentials.save(auth_token, ct0)
-        except CredentialValidationError as exc:
+            return x_sessions.save_credentials(slot_id, body.auth_token, body.ct0, label=body.label)
+        except (CredentialValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except CredentialStorageError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"ok": True, "configured": True}
+
+    @app.post("/api/system/x-sessions/{slot_id}/verify")
+    def verify_x_session(slot_id: int) -> dict[str, Any]:
+        try:
+            return x_sessions.verify_slot(slot_id, _resolve_twitter_command("twitter"))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except XSessionUnavailableError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.patch("/api/system/x-sessions/{slot_id}")
+    def patch_x_session(slot_id: int, body: XSessionStatusRequest) -> dict[str, Any]:
+        try:
+            return x_sessions.set_status(slot_id, body.status, reason=body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.patch("/api/system/x-policy")
+    def patch_x_policy(body: XCollectionPolicyRequest) -> dict[str, Any]:
+        if body.enabled is None and body.paused is None:
+            raise HTTPException(status_code=422, detail="enabled or paused is required")
+        return x_sessions.set_policy(enabled=body.enabled, paused=body.paused, reason=body.reason)
+
+    @app.get("/api/system/public-backup")
+    def public_backup_status() -> dict[str, Any]:
+        return public_backup.status()
+
+    @app.patch("/api/system/public-backup")
+    def patch_public_backup(body: PublicBackupPolicyRequest) -> dict[str, Any]:
+        if body.enabled is None and body.paused is None:
+            raise HTTPException(status_code=422, detail="enabled or paused is required")
+        return public_backup.set_policy(enabled=body.enabled, paused=body.paused, reason=body.reason)
+
+    @app.post("/api/system/twitter-credentials")
+    def save_twitter_credentials(body: TwitterCredentialRequest) -> dict[str, bool]:
+        try:
+            validate_twitter_credentials(body.auth_token, body.ct0)
+        except CredentialValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="请选择 X 会话槽位后保存，旧单槽位接口不会覆盖现有会话")
 
     @app.post("/api/system/nitter-credentials")
     def save_nitter_credentials(body: TwitterCredentialRequest) -> dict[str, bool]:
@@ -2420,6 +3419,17 @@ def create_app(
         except CredentialStorageError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"ok": True, "configured": True}
+
+    @app.post("/api/system/twitter-reader/promote-nitter")
+    def promote_nitter_reader() -> dict[str, bool]:
+        try:
+            auth_token, ct0 = nitter_credentials.load_values()
+            reader_credentials.save(auth_token, ct0)
+        except CredentialStorageError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="Nitter reader credentials are not configured") from exc
+        return {"ok": True, "configured": reader_credentials.configured()}
 
     @app.post("/api/system/opencode-go-credentials")
     @app.post("/api/system/deepseek-credentials")

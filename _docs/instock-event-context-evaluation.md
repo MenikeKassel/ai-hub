@@ -1,4 +1,4 @@
-﻿# InStock Event-Context Evaluation
+# InStock Event-Context Evaluation
 
 Updated: 2026-07-20
 

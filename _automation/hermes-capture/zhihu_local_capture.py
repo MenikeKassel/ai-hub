@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import base64
@@ -96,7 +96,10 @@ def capture_zhihu(
 
     endpoint = wait_for_cdp(port, seconds=2)
     if not endpoint and launch:
-        launch_chrome(chrome_path, profile_directory, user_data_dir, port, url)
+        # Keep one blank tab alive. Per-request tabs are closed after capture;
+        # without a keeper tab Chrome exits and the next account sees a dead
+        # DevTools endpoint.
+        launch_chrome(chrome_path, profile_directory, user_data_dir, port, "about:blank")
         endpoint = wait_for_cdp(port, seconds=wait_seconds)
     if not endpoint:
         user_data_arg = f' --user-data-dir="{user_data_dir}"' if user_data_dir else ""
@@ -676,9 +679,3 @@ def error_result(url: str, error: str, method: str = "zhihu-local-browser") -> d
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-
-
-
-

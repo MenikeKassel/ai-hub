@@ -1,4 +1,4 @@
-﻿"""Thin private adapter for the versioned kol-audit-workbench package."""
+"""Thin private adapter for the versioned kol-audit-workbench package."""
 
 from __future__ import annotations
 
@@ -6,12 +6,16 @@ import os
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = ROOT / "_runtime" / "trading" / "public-core"
 
 
 def main() -> int:
+    if sys.argv[1:2] and sys.argv[1].startswith("serve"):
+        raise SystemExit(
+            "The private KOL console is served only by ai-hub on "
+            "http://127.0.0.1:8123; use scripts/start-kol-ui.ps1."
+        )
     try:
         from kol_audit.cli import run
     except ImportError as exc:

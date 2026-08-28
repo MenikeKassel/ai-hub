@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -16,15 +17,17 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 from filelock import FileLock, Timeout
 
 from kol_tracker import (
-    AKShareProvider,
+    AKShareCheckpointProvider,
     EventRecord,
     KolStore,
     WarehousePriceProvider,
@@ -44,7 +47,6 @@ from event_context import (
 from market_indicators import INDICATOR_VERSION, compute_daily_indicators
 from kol_posts import (
     DeepSeekCredentialStore,
-    DeepSeekBatchPostClassifier,
     DeepSeekPostClassifier,
     STRUCTURED_REVIEW_VERSION,
     KeyringCredentialStore,
@@ -52,18 +54,29 @@ from kol_posts import (
     ModelWorkerBusyError,
     ModelProviderUnavailableError,
     NitterCredentialStore,
+    ReaderCredentialStore,
+    XSessionManager,
     RapidOcrBatchClassifier,
     RuleClassifier,
     UnlimitedOcrBatchClassifier,
     ZhihuProfileProvider,
+    build_batch_post_classifier,
     build_post_classifier,
     build_x_post_provider,
+    FxTwitterPublicPostProvider,
+    PublicBackupGate,
+    PublicBackupNotFoundError,
+    PublicBackupRateLimitError,
     classify_pending_with_codex,
+    classify_pending_in_batches,
     initialize_seed_kols,
     load_stock_aliases,
     media_disk_usage,
     process_pending_with_ocr,
     run_post_fetch,
+    normalise_twitter_post,
+    normalise_zhihu_answer,
+    _resolve_twitter_command,
 )
 from morning_pipeline import MorningPipeline
 from morning_orchestrator import MorningOrchestrator
@@ -87,21 +100,21 @@ from market_data import (
     normalise_daily_bars,
     sync_daily_bars,
 )
+from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 from purchased_daily import (
     PURCHASED_DAILY_PROVIDER,
     PurchasedDailyProvider,
     audit_purchased_daily_archive,
     import_historical_daily,
 )
-from board_mainline import (
-    BoardMainlineStore,
-    EastmoneyBoardProvider,
-    FallbackBoardProvider,
-    backfill_boards,
-    sync_board_snapshot,
-    sync_candidate_memberships,
-)
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
+from market_admissions import (
+    MarketAdmissionRepository,
+    read_published_manifest,
+    write_published_manifest,
+)
+from market_policy import load_market_recovery_mode, market_runtime_writes_enabled
+from model_budget import ModelDailyBudget
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from kol_performance import DeepSeekPerformanceInterpreter, KolPerformanceService, build_weekly_message
@@ -111,6 +124,7 @@ from public_dataset import (
     public_dataset_doctor as run_public_dataset_doctor,
     validate_public_dataset,
 )
+from public_dataset_restore import restore_public_dataset
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -119,7 +133,7 @@ WATCHLIST = RUNTIME / "watchlist.csv"
 RUN_LOG = RUNTIME / "run_log.jsonl"
 PRICE_DIR = RUNTIME / "data" / "prices"
 REPORT_DIR = RUNTIME / "reports"
-OBSIDIAN_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", "<OBSIDIAN_VAULT>"))
+OBSIDIAN_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", Path(__file__).resolve().parents[1] / "_vault"))
 OBSIDIAN_PROJECTS = OBSIDIAN_VAULT / "04_Projects"
 KOL_ROOT = RUNTIME / "kol"
 KOL_DASHBOARD = KOL_ROOT / "reports" / "KOL推荐收益看板.md"
@@ -136,8 +150,21 @@ NITTER_RUNTIME = KOL_ROOT / "nitter"
 NOTIFICATION_STATE = KOL_ROOT / "notification_state.json"
 FALLBACK_MODE_STATE = KOL_ROOT / "fallback_mode.json"
 MARKET_ROOT = RUNTIME / "market"
+FOUNDATION_ROOT = Path(
+    os.environ.get(
+        "ASHARE_FOUNDATION_ROOT",
+        RUNTIME / "market" / "foundation",
+    )
+)
+FOUNDATION_REPO = Path(
+    os.environ.get("ASHARE_FOUNDATION_REPO", ROOT / "_external" / "ashare-data-foundation")
+)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 PURCHASED_DAILY_ROOT = Path(
-    os.environ.get("PURCHASED_DAILY_ROOT", "<PURCHASED_DATA_HOME>/数据更新时间2026.7.31")
+    os.environ.get(
+        "PURCHASED_DAILY_ROOT",
+        ROOT.parent / "freestock" / "数据更新时间2026.8.25" / "数据更新时间2026.8.25",
+    )
 )
 EVENT_RESEARCH_LOCK = MARKET_ROOT / "event-method-research.lock"
 PORTFOLIO_ROOT = RUNTIME / "portfolio"
@@ -567,17 +594,39 @@ def _send_pending_notifications(store: KolStore) -> list[str]:
 
 
 def kol_update(args: argparse.Namespace) -> None:
+    KOL_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = KOL_ROOT / "kol-update.lock"
+    lock = FileLock(str(lock_path), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(json.dumps({
+            "ok": True,
+            "status": "already_running",
+            "dry_run": bool(args.dry_run),
+            "lock": str(lock_path),
+        }, ensure_ascii=False))
+        return
+    try:
+        _kol_update_locked(args)
+    finally:
+        lock.release()
+
+
+def _kol_update_locked(args: argparse.Namespace) -> None:
     store = KolStore(KOL_ROOT)
     if not store.events_path.exists():
         raise RuntimeError("KOL event store is not initialized; run kol-init first")
     as_of = date.fromisoformat(args.as_of)
+    market_store = _market_store()
     result = update_kol_tracking(
         store,
-        WarehousePriceProvider(MARKET_ROOT / "warehouse"),
-        AKShareProvider(),
+        market_store,
+        AKShareCheckpointProvider(),
         as_of=as_of,
         dashboard_path=KOL_DASHBOARD,
         dry_run=args.dry_run,
+        event_ids={args.event_id} if getattr(args, "event_id", "") else None,
     )
     failures: list[str] = []
     performance_summary: dict[str, Any] | None = None
@@ -734,6 +783,24 @@ def _post_store() -> KolPostStore:
     return store
 
 
+def _market_recovery_mode() -> dict[str, Any]:
+    return load_market_recovery_mode(MARKET_ROOT / "recovery-mode.json").as_dict()
+
+
+def _market_writes_enabled() -> bool:
+    return market_runtime_writes_enabled(MARKET_ROOT / "recovery-mode.json")
+
+
+def _require_live_market_writes(command: str) -> None:
+    if _market_writes_enabled():
+        return
+    mode = _market_recovery_mode()
+    raise SystemExit(
+        f"{command} is disabled: market runtime is historical/read-only as of "
+        f"{mode.get('as_of') or 'unknown'}; use an explicit restore/admission maintenance command"
+    )
+
+
 def _send_feishu(message: str) -> bool:
     temporary_path: Path | None = None
     try:
@@ -785,13 +852,33 @@ def _fallback_mode() -> str:
     return value if value in {"shadow", "enabled"} else "shadow"
 
 
-def _post_provider(mode: str):
+def _post_provider(mode: str, *, timeout_seconds: int = 60, batch_key: str = "", history_mode: bool = False):
+    # The main X session remains sealed. Automated collection uses a separate
+    # low-frequency reader identity stored under ai-hub/twitter-reader.
+    if mode not in {"auto", "twitter", "nitter"}:
+        raise SystemExit(f"unsupported X provider: {mode}")
+    if mode == "nitter":
+        return build_x_post_provider(
+            "nitter",
+            twitter_credentials=ReaderCredentialStore(),
+            xtf_command=str(XTF_COMMAND),
+            nitter_url=NITTER_URL,
+            fallback_mode="disabled",
+            twitter_timeout_seconds=timeout_seconds,
+        )
+    # The guarded session pool is the only automatic X source.  Nitter/XTF
+    # stays shadow-only and is never selected as an emergency bypass after a
+    # primary rate-limit or authentication response.
+    session_manager = XSessionManager(_post_store())
     return build_x_post_provider(
         mode,
-        twitter_credentials=KeyringCredentialStore(),
         xtf_command=str(XTF_COMMAND),
         nitter_url=NITTER_URL,
-        fallback_mode=_fallback_mode(),
+        fallback_mode="disabled",
+        twitter_timeout_seconds=timeout_seconds,
+        session_manager=session_manager,
+        batch_key=batch_key,
+        history_mode=history_mode,
     )
 
 
@@ -802,12 +889,14 @@ def _zhihu_provider() -> ZhihuProfileProvider:
         browser_path=os.environ.get("ZHIHU_BROWSER_PATH", ""),
         profile_directory=os.environ.get("ZHIHU_PROFILE_DIRECTORY", "Default"),
         user_data_dir=str(ZHIHU_USER_DATA_DIR),
-        port=int(os.environ.get("ZHIHU_CDP_PORT", "9222")),
+        port=int(os.environ.get("ZHIHU_CDP_PORT", "9223")),
     )
 
 
 def kol_post_doctor(args: argparse.Namespace) -> None:
     store = _post_store()
+    x_sessions = XSessionManager(store)
+    x_policy = x_sessions.policy_status()
     healthy_fetch_states = {"never", "success", "gap_detected"}
     all_kols = store.list_kols()
     scoped_kols = [
@@ -835,8 +924,10 @@ def kol_post_doctor(args: argparse.Namespace) -> None:
         "posts": store.count_posts(),
         "pending_reviews": store.count_pending(),
         "media_bytes": media_disk_usage(store.media_root),
-        "twitter_cli": shutil.which("twitter") or "",
+        "twitter_cli": _resolve_twitter_command("twitter"),
         "twitter_credentials_configured": KeyringCredentialStore().configured(),
+        "twitter_reader_credentials_configured": ReaderCredentialStore().configured(),
+        "x_sessions": x_policy,
         "zhihu_capture_available": ZHIHU_PROFILE_CAPTURE.is_file(),
         "zhihu_active_kols": len(active_zhihu),
         "zhihu_paused_kols": len(paused_zhihu),
@@ -862,7 +953,7 @@ def kol_post_doctor(args: argparse.Namespace) -> None:
     }
     platform_ok = {
         "all": bool(checks["twitter_cli"] and checks["zhihu_capture_available"]),
-        "x": bool(checks["twitter_cli"] and checks["twitter_credentials_configured"]),
+        "x": bool(checks["twitter_cli"] and any(item["status"] == "ready" for item in x_policy["slots"])),
         "zhihu": bool(checks["zhihu_capture_available"]),
     }
     dependencies_ok = bool(
@@ -891,6 +982,588 @@ def kol_post_db_backup(_: argparse.Namespace) -> None:
     for expired in backups[14:]:
         expired.unlink(missing_ok=True)
     print(json.dumps({"ok": True, "backup": str(target)}, ensure_ascii=False))
+
+
+def kol_reader_migrate(_: argparse.Namespace) -> None:
+    """Copy the existing Nitter reader session into its isolated X reader slot."""
+    source = NitterCredentialStore()
+    target = ReaderCredentialStore()
+    auth_token, ct0 = source.load_values()
+    target.save(auth_token, ct0)
+    print(json.dumps({
+        "ok": True,
+        "source": source.service_name,
+        "target": target.service_name,
+        "credentials_configured": target.configured(),
+    }, ensure_ascii=False))
+
+
+def kol_collection_doctor(_: argparse.Namespace) -> None:
+    store = _post_store()
+    x_policy = XSessionManager(store).policy_status()
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=7)).isoformat()
+    checks = {
+        "ok": any(item["status"] == "ready" for item in x_policy["slots"]),
+        "x_sessions": x_policy,
+        "database": str(store.path),
+        "reader_credentials_configured": ReaderCredentialStore().configured(),
+        "main_credentials_configured": KeyringCredentialStore().configured(),
+        "nitter_optional": True,
+        "nitter": timeline_health(NITTER_URL),
+        "x_recent": store.collection_coverage(platform="X", window_start=start, window_end=end),
+        "zhihu_recent": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
+        "open_gaps": store.list_collection_gaps(status="open", limit=100),
+        "latest_runs": store.recent_fetch_runs(limit=5),
+    }
+    print(json.dumps(checks, ensure_ascii=False, indent=2))
+    if not checks["ok"]:
+        raise SystemExit(2)
+
+
+def kol_gap_audit(args: argparse.Namespace) -> None:
+    store = _post_store()
+    end = date.today().isoformat() if args.to_date == "auto" else args.to_date
+    start = args.from_date
+    payload: dict[str, Any] = {
+        "ok": True,
+        "from": start,
+        "to": end,
+        "platforms": {},
+        "gaps": [],
+    }
+    for platform in ("X", "Zhihu"):
+        coverage = store.collection_coverage(
+            platform=platform,
+            window_start=start,
+            window_end=end,
+        )
+        payload["platforms"][platform] = coverage
+        for item in coverage["items"]:
+            last_success = str(item.get("last_success_at") or "")[:10]
+            fetch_status = str(item.get("fetch_status") or "")
+            if not last_success or last_success < start or fetch_status not in {"success", "gap_detected"}:
+                kol = store.get_kol(int(item["id"]))
+                store.open_collection_gap(
+                    int(item["id"]),
+                    platform=platform,
+                    window_start=start,
+                    window_end=end,
+                    last_post_id=str((kol or {}).get("last_post_id") or ""),
+                    status="open",
+                    error="no successful fetch observed in recovery window",
+                )
+                payload["gaps"].append({"platform": platform, **item})
+            else:
+                # Zero posts after a successful fetch is valid inactivity, not
+                # a collection gap. Close an older false-positive gap while
+                # keeping its row and verification timestamp for audit.
+                store.open_collection_gap(
+                    int(item["id"]),
+                    platform=platform,
+                    window_start=start,
+                    window_end=end,
+                    last_post_id="",
+                    status="closed",
+                    error="fetch succeeded; no activity is not a gap",
+                )
+    payload["open_gaps"] = store.list_collection_gaps(status="open", limit=1000)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def kol_gap_recover(args: argparse.Namespace) -> None:
+    store = _post_store()
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=7)).isoformat() if args.scope == "recent" else "2026-01-01"
+    batch_id = f"gap-{args.scope}-{start}-{end}"
+    active = [
+        item for item in store.list_kols("active")
+        if str(item.get("availability_status") or "active") not in {"suspended", "deleted", "paused"}
+    ]
+    store.create_fetch_batch(
+        batch_id,
+        batch_kind="recent_recovery" if args.scope == "recent" else "historical_recovery",
+        platform="X+Zhihu",
+        window_start=start,
+        window_end=end,
+        strategy_version="kol-collection-v3",
+        total_kols=len(active),
+    )
+    aggregate: list[Any] = []
+    reset_items = 0
+    skipped_platforms: list[dict[str, Any]] = []
+    for platform in ("x", "zhihu"):
+        platform_key = platform.casefold()
+        fresh_key = f"{batch_id}:{platform_key}:fresh"
+        history_key = f"{batch_id}:{platform_key}:history"
+        platform_name = "X" if platform_key == "x" else "Zhihu"
+        platform_coverage = store.collection_coverage(
+            platform=platform_name,
+            window_start=start,
+            window_end=end,
+        )
+        if args.resume and platform_coverage.get("target", 0) and platform_coverage.get("coverage", 0.0) >= 0.9:
+            skipped_platforms.append({
+                "platform": platform_name,
+                "reason": "coverage_already_at_least_90_percent",
+                "coverage": platform_coverage,
+            })
+            continue
+        reset_items += store.reset_interrupted_fetch_queue(fresh_key)
+        reset_items += store.reset_interrupted_fetch_queue(history_key)
+        if args.scope == "historical":
+            reset_items += store.reopen_fetch_queue(fresh_key)
+        provider = (
+            _post_provider(
+                "auto",
+                timeout_seconds=90 if args.scope == "historical" else 20,
+                batch_key=fresh_key,
+                history_mode=args.scope == "historical",
+            )
+            if platform_key == "x"
+            else _post_provider("auto", timeout_seconds=20)
+        )
+        first = run_post_fetch(
+            store,
+            provider,
+            platform_providers={"zhihu": _zhihu_provider()},
+            platforms={platform_key},
+            max_count=20 if args.scope == "recent" else 500,
+            fresh_first_page=args.scope == "recent",
+            reconcile_zhihu=False,
+            sleep_seconds=1.0,
+            retry_delays=(1.0,),
+            batch_key=fresh_key,
+            classifier=RuleClassifier(_classification_aliases()),
+        )
+        aggregate.append(first)
+        if args.scope == "recent" and not first.rate_limit_paused and first.queue_pending == 0:
+            reset_items += store.reopen_fetch_queue(history_key)
+            provider = _post_provider(
+                "auto",
+                timeout_seconds=20,
+                batch_key=history_key,
+                history_mode=True,
+            ) if platform_key == "x" else provider
+            second = run_post_fetch(
+                store,
+                provider,
+                platform_providers={"zhihu": _zhihu_provider()},
+                platforms={platform_key},
+                max_count=100,
+                reconcile_zhihu=False,
+                sleep_seconds=1.0,
+                retry_delays=(1.0,),
+                batch_key=history_key,
+                classifier=RuleClassifier(_classification_aliases()),
+            )
+            aggregate.append(second)
+    successful = sum(item.successful_kols for item in aggregate)
+    failed = sum(item.failed_kols for item in aggregate)
+    new_posts = sum(item.new_posts for item in aggregate)
+    errors = [error for item in aggregate for error in item.errors]
+    pending_queue = sum(item.queue_pending for item in aggregate)
+    if pending_queue:
+        errors.append(f"{pending_queue} recovery queue items remain pending")
+    status = "completed" if not pending_queue and not errors else "degraded"
+    store.finish_fetch_batch(
+        batch_id,
+        status=status,
+        completed_kols=successful + failed,
+        successful_kols=successful,
+        failed_kols=failed,
+        new_posts=new_posts,
+        error="; ".join(errors[:5]),
+    )
+    print(json.dumps({
+        "ok": bool(successful),
+        "scope": args.scope,
+        "batch_id": batch_id,
+        "reset_interrupted_queue_items": reset_items,
+        "skipped_platforms": skipped_platforms,
+        "runs": [item.__dict__ for item in aggregate],
+        "coverage": {
+            "X": store.collection_coverage(platform="X", window_start=start, window_end=end),
+            "Zhihu": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
+        },
+    }, ensure_ascii=False, indent=2))
+    if not successful and failed:
+        raise SystemExit(2)
+
+
+def _twitter_xtf_payload(post: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    """Fetch one public X URL through the fixed x-tweet-fetcher binary."""
+    post_id = str(post.get("post_id") or "")
+    try:
+        if not XTF_COMMAND.is_file():
+            raise RuntimeError(f"x-tweet-fetcher not installed: {XTF_COMMAND}")
+        url = str(post.get("url") or f"https://x.com/{post.get('handle','')}/status/{post_id}")
+        completed = subprocess.run(
+            [str(XTF_COMMAND), "--url", url, "--backend", "auto", "--lang", "en"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}, check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "x-tweet-fetcher failed").strip())
+        payload = json.loads(completed.stdout or "{}")
+        tweet = payload.get("tweet") if isinstance(payload, dict) else None
+        if not isinstance(tweet, dict) or str(payload.get("tweet_id") or post_id) != post_id:
+            raise RuntimeError((completed.stderr or completed.stdout or "x-tweet-fetcher returned no matching tweet").strip())
+        created = str(tweet.get("created_at") or "")
+        created_at = parsedate_to_datetime(created).astimezone(timezone.utc).isoformat(timespec="seconds") if created else ""
+        media = list((tweet.get("media") or {}).get("images") or []) if isinstance(tweet.get("media"), dict) else []
+        return {
+            "id": post_id, "text": str(tweet.get("text") or ""),
+            "author": {"name": str(tweet.get("author") or post.get("author_name") or post.get("handle") or ""), "screenName": str(tweet.get("screen_name") or post.get("handle") or "")},
+            "createdAtISO": created_at, "url": url, "media": media,
+            "metrics": {"likes": tweet.get("likes", 0), "retweets": tweet.get("retweets", 0), "replies": tweet.get("replies_count", 0), "views": tweet.get("views", 0)},
+            "lang": str(tweet.get("lang") or ""),
+        }, "fxtwitter", (completed.stderr or "")[-500:]
+    except Exception as exc:
+        raise RuntimeError(str(exc)[-2000:]) from exc
+
+
+def _public_backup_allowed(post: dict[str, Any], detail: str) -> bool:
+    """Allow public fallback only for a known URL and non-auth failures."""
+    url = str(post.get("url") or "").strip()
+    post_id = str(post.get("post_id") or "").strip()
+    if not post_id or not re.fullmatch(r"https://(?:x|twitter)\.com/[A-Za-z0-9_]{1,15}/status/\d{5,25}/?", url):
+        return False
+    lowered = str(detail or "").casefold()
+    blocked = ("429", "rate", "limit", "auth", "login", "cookie", "captcha", "challenge", "forbidden", "401", "403", "suspend", "protected")
+    return not any(token in lowered for token in blocked)
+
+
+def _twitter_single_payload(
+    post: dict[str, Any],
+    *,
+    session_manager: XSessionManager | None = None,
+    batch_key: str = "",
+    slot_id: int | None = None,
+) -> tuple[dict[str, Any], str, str]:
+    """Fetch one X post; residual public links use XTF first after bulk account fetch."""
+    post_id = str(post.get("post_id") or "")
+    if session_manager is not None:
+        effective_batch_key = batch_key or f"post:{uuid.uuid4().hex}"
+        selected_slot = int(slot_id or session_manager.batch_slot(effective_batch_key, "history"))
+        request_id = session_manager.reserve_request(
+            selected_slot,
+            batch_key=effective_batch_key,
+            operation="single_post",
+            cost=3,
+        )
+        command = _resolve_twitter_command("twitter")
+        env = os.environ.copy()
+        env.update(session_manager.credentials_for(selected_slot))
+        env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        detail = "twitter-cli failed"
+        try:
+            completed = subprocess.run(
+                [command, "tweet", post_id, "--json"], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60, env=env,
+                cwd=str(session_manager.cli_config_dir()), check=False,
+            )
+            if completed.returncode == 0:
+                payload = json.loads(completed.stdout or "{}")
+                values = payload.get("tweets") or payload.get("data") or [] if isinstance(payload, dict) else []
+                if isinstance(values, dict):
+                    values = [values]
+                for value in values if isinstance(values, list) else []:
+                    if str(value.get("id") or "") == post_id:
+                        session_manager.finish_request(request_id, status="completed")
+                        session_manager.record_success(selected_slot)
+                        return dict(value), "twitter-cli", (completed.stderr or "")[-500:]
+            detail = (completed.stderr or completed.stdout or "twitter-cli failed").strip()
+        except subprocess.TimeoutExpired as exc:
+            detail = "twitter-cli single post request timed out"
+        except Exception as exc:
+            detail = str(exc)
+
+        lowered = detail.casefold()
+        rate_limited = "429" in lowered or "rate" in lowered and "limit" in lowered
+        auth_required = any(token in lowered for token in ("not_authenticated", "unauthorized", "login", "cookie"))
+        error_code = "rate_limited" if rate_limited else "auth_required" if auth_required else "provider_error"
+        session_manager.finish_request(request_id, status="failed", error_code=error_code, error="single post request failed")
+        if rate_limited:
+            session_manager.pause_global("X reader rate limit", seconds=7200)
+            session_manager.record_failure(selected_slot, error_code, "X reader rate limit")
+            raise TwitterRateLimitError("X reader rate limit; collection deferred")
+        if auth_required:
+            session_manager.record_failure(selected_slot, error_code, "X reader authentication required")
+            raise TwitterAuthenticationError("X reader authentication required")
+        if _public_backup_allowed(post, detail):
+            try:
+                public = FxTwitterPublicPostProvider(PublicBackupGate(session_manager.store))
+                return public.fetch_post(str(post.get("url") or ""), batch_key=effective_batch_key), "fxtwitter", "public_backup_v1"
+            except PublicBackupRateLimitError as exc:
+                raise TwitterRateLimitError("public X backup rate limited") from exc
+            except PublicBackupNotFoundError as exc:
+                raise TwitterProviderError("public X backup did not find the post") from exc
+            except Exception as exc:
+                raise TwitterProviderError(f"X primary and public backup failed: {type(exc).__name__}") from exc
+        raise TwitterProviderError("X reader single post request failed")
+
+    # Account-level recovery has already attempted the authenticated source for
+    # these rows.  Prefer the fixed XTF binary here so a 1,489-row residual
+    # queue is resumable without waiting 90 seconds on each CLI timeout.
+    prefer_xtf = str(post.get("canonical_provider") or "") == "public-dataset-recovery"
+    details: list[str] = []
+    if prefer_xtf:
+        try:
+            return _twitter_xtf_payload(post)
+        except Exception as exc:
+            xtf_detail = str(exc)
+            details.append(f"fxtwitter: {xtf_detail}")
+            # Do not spend another authenticated request on a URL that XTF
+            # already proved unavailable or rate limited.  The queue mapper
+            # will retain a terminal or cooldown state and can retry safely.
+            xtf_state, _xtf_code, _xtf_retry = _post_recovery_error_state(xtf_detail)
+            if xtf_state == "terminal" or _xtf_code == "rate_limited":
+                raise RuntimeError(xtf_detail[-2000:]) from exc
+
+    command = _resolve_twitter_command("twitter")
+    credentials = KeyringCredentialStore()
+    env = os.environ.copy()
+    env.update(credentials.load())
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        completed = subprocess.run(
+            [command, "tweet", post_id, "--json"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=(15 if prefer_xtf else 90), env=env, check=False,
+        )
+        if completed.returncode == 0:
+            payload = json.loads(completed.stdout or "{}")
+            values = payload.get("tweets") or payload.get("data") or [] if isinstance(payload, dict) else []
+            if isinstance(values, dict):
+                values = [values]
+            for value in values if isinstance(values, list) else []:
+                if str(value.get("id") or "") == post_id:
+                    return dict(value), "twitter-cli", (completed.stderr or "")[-500:]
+        details.append((completed.stderr or completed.stdout or "twitter-cli failed").strip())
+    except Exception as exc:
+        details.append(str(exc))
+
+    if not prefer_xtf:
+        try:
+            return _twitter_xtf_payload(post)
+        except Exception as exc:
+            details.append(f"fxtwitter: {exc}")
+    raise RuntimeError("; ".join(details)[-2000:])
+
+
+def _ensure_zhihu_browser_session() -> None:
+    browser = os.environ.get("ZHIHU_BROWSER_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    command = [
+        str(sys.executable),
+        str(ROOT / "_automation" / "hermes-capture" / "zhihu_profile_capture.py"),
+        "--handle", "binso18502020560", "--port", "9223", "--prepare-only",
+        "--browser-path", browser, "--profile-directory", "Default",
+        "--user-data-dir", str(ZHIHU_USER_DATA_DIR), "--wait", "30",
+    ]
+    # Use the trading venv so the same stdlib/encoding path is used by tasks.
+    command[0] = str(ROOT / "_runtime" / "venv-trading" / "Scripts" / "python.exe")
+    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False)
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Zhihu browser preflight returned invalid JSON: {exc}") from exc
+    if completed.returncode != 0 or not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or completed.stderr or "Zhihu browser preflight failed")[-2000:])
+
+
+def _zhihu_single_payload(post: dict[str, Any]) -> dict[str, Any]:
+    _ensure_zhihu_browser_session()
+    capture = ROOT / "_automation" / "hermes-capture" / "zhihu_local_capture.py"
+    browser = os.environ.get("ZHIHU_BROWSER_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    completed = subprocess.run(
+        [
+            str(ROOT / "_runtime" / "venv-trading" / "Scripts" / "python.exe"), str(capture),
+            "--url", str(post.get("url") or ""), "--json", "--port", "9223", "--no-launch",
+            "--browser-path", browser, "--profile-directory", "Default",
+            "--user-data-dir", str(ZHIHU_USER_DATA_DIR), "--wait", "30", "--max-answers", "1",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    try:
+        result = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Zhihu capture returned invalid JSON: {exc}") from exc
+    if completed.returncode != 0 or not result.get("ok"):
+        raise RuntimeError(str(result.get("error") or completed.stderr or "Zhihu capture failed")[-2000:])
+    answers = result.get("answers") or []
+    if not answers:
+        raise RuntimeError("Zhihu answer was not returned")
+    answer = dict(answers[0])
+    created_time = answer.get("created_time")
+    if created_time:
+        answer["createdAtISO"] = datetime.fromtimestamp(float(created_time), tz=timezone.utc).isoformat(timespec="seconds")
+    answer["id"] = str(answer.get("id") or post.get("post_id") or "")
+    answer["url"] = str(answer.get("url") or post.get("url") or "")
+    answer["author"] = {"name": str(answer.get("author") or post.get("author_name") or post.get("handle") or ""), "screenName": str(post.get("handle") or "")}
+    answer["metrics"] = {"likes": answer.get("voteup_count", 0), "comments": answer.get("comment_count", 0)}
+    answer["lang"] = "zh-CN"
+    return answer
+
+
+def _post_recovery_error_state(detail: str) -> tuple[str, str, int]:
+    lowered = detail.casefold()
+    if any(token in lowered for token in ("not found", "404", "deleted", "private", "不存在", "被删除", "找不到")):
+        return "terminal", "not_available", 0
+    if "rate" in lowered and "limit" in lowered or "429" in lowered or "too many" in lowered:
+        return "cooldown", "rate_limited", 900
+    if any(token in lowered for token in ("not_authenticated", "authentication", "登录", "auth_required")):
+        return "cooldown", "auth_required", 1800
+    if "devtools" in lowered or "cdp" in lowered or "browser" in lowered:
+        return "cooldown", "browser_unavailable", 300
+    return "cooldown", "provider_error", 300
+
+
+def kol_post_recovery(args: argparse.Namespace) -> None:
+    store = _post_store()
+    queued = store.enqueue_post_recovery(platform="" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu"))
+    reconciled = store.reconcile_post_recovery_queue()
+    summary_before = store.post_recovery_summary(platform="" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu"))
+    payload: dict[str, Any] = {
+        "ok": True,
+        "scope": args.scope,
+        "platform": args.platform,
+        "queued": queued,
+        "reconciled_bulk": reconciled,
+        "dry_run": not bool(args.apply),
+        "before": summary_before,
+        "processed": 0,
+        "hydrated": 0,
+        "terminal": 0,
+        "retryable": 0,
+        "errors": [],
+    }
+    if not args.apply:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    classifier = RuleClassifier(_classification_aliases())
+    platform_filter = "" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu")
+    x_sessions = XSessionManager(store) if args.platform in {"all", "x"} else None
+    x_batch_key = f"post-recovery:{uuid.uuid4().hex}"
+    x_slot_id: int | None = None
+    if args.platform in {"all", "zhihu"}:
+        # A single authenticated browser batch is shared by all per-answer
+        # requests. Failure here is reported once and remains retryable.
+        try:
+            _ensure_zhihu_browser_session()
+        except Exception as exc:
+            if args.platform == "zhihu":
+                payload["ok"] = False
+                payload["errors"].append(f"auth_or_browser_preflight: {exc}")
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                raise SystemExit(2)
+    # Process in bounded durable batches.  With no explicit limit the command
+    # drains the queue; an interruption leaves remaining rows queued/cooldown
+    # for the next --resume invocation.
+    budget = max(0, int(args.limit or 0))
+    processed_budget = 0
+    while True:
+        batch_limit = min(1000, budget - processed_budget) if budget else 1000
+        if batch_limit <= 0:
+            break
+        queue = store.list_post_recovery_queue(platform=platform_filter, limit=batch_limit, resume=args.resume)
+        if not queue:
+            break
+        for item in queue:
+            if budget and processed_budget >= budget:
+                break
+            if not store.mark_post_recovery_running(str(item["post_id"])):
+                # Another worker claimed this row between SELECT and UPDATE.
+                # This makes bounded parallel recovery safe and idempotent.
+                continue
+            processed_budget += 1
+            payload["processed"] += 1
+            try:
+                post_row = store.get_post(str(item["post_id"]))
+                if not post_row or (str(post_row.get("text") or "").strip() or str(post_row.get("article_text") or "").strip()):
+                    store.finish_post_recovery(str(item["post_id"]), state="hydrated", provider="existing")
+                    payload["hydrated"] += 1
+                    continue
+                kol = {"id": item["kol_id"], "handle": item["handle"], "display_name": post_row.get("display_name") or item["handle"], "tracking_mode": "direct_profile"}
+                if item["platform"] == "X":
+                    if x_sessions is not None and x_slot_id is None:
+                        x_slot_id = x_sessions.batch_slot(x_batch_key, "history")
+                    raw, provider_name, warning = _twitter_single_payload(
+                        post_row,
+                        session_manager=x_sessions,
+                        batch_key=x_batch_key,
+                        slot_id=x_slot_id,
+                    )
+                    record = normalise_twitter_post(raw, kol, provider=provider_name, provider_warning=warning)
+                else:
+                    raw = _zhihu_single_payload(post_row)
+                    record = normalise_zhihu_answer(raw, kol, provider="zhihu-local")
+                store.upsert_post(record)
+                store.save_rule_classification(record.post_id, classifier.classify(record))
+                store.finish_post_recovery(str(item["post_id"]), state="hydrated", provider=record.canonical_provider)
+                payload["hydrated"] += 1
+            except Exception as exc:
+                detail = str(exc)
+                state, error_code, retry_after = _post_recovery_error_state(detail)
+                store.finish_post_recovery(str(item["post_id"]), state=state, error_code=error_code, error=detail, retry_after_seconds=retry_after)
+                if state == "terminal":
+                    payload["terminal"] += 1
+                else:
+                    payload["retryable"] += 1
+                payload["errors"].append({"post_id": item["post_id"], "code": error_code, "error": detail[:500]})
+        if budget and processed_budget >= budget:
+            break
+    payload["after"] = store.post_recovery_summary(platform=platform_filter)
+    payload["ok"] = not bool(payload["errors"]) or payload["hydrated"] > 0
+    report_path = getattr(args, "report", None)
+    if report_path:
+        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(report_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not payload["ok"]:
+        raise SystemExit(2)
+
+
+def kol_fetch_queue_compact(args: argparse.Namespace) -> None:
+    store = _post_store()
+    cutoff = datetime.now(SHANGHAI) - timedelta(hours=max(1, args.older_than_hours))
+    keys = store.archive_legacy_fetch_batches(cutoff)
+    print(json.dumps({"ok": True, "archived_batches": len(keys), "batch_keys": keys}, ensure_ascii=False, indent=2))
+
+
+def kol_ai_resume(args: argparse.Namespace) -> None:
+    store = _post_store()
+    completed, failed = classify_pending_in_batches(
+        store,
+        build_batch_post_classifier(
+            KOL_BATCH_CLASSIFIER_SCHEMA,
+            ROOT,
+            deepseek_credentials=DeepSeekCredentialStore(),
+        ),
+        limit=args.limit,
+        daily_limit=args.daily_limit,
+    )
+    print(json.dumps({
+        "ok": failed == 0,
+        "completed": completed,
+        "failed": failed,
+        "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
+    }, ensure_ascii=False))
+
+
+def kol_ai_queue_maintain(args: argparse.Namespace) -> None:
+    store = _post_store()
+    before = store.model_queue_summary(daily_limit=args.daily_limit)
+    changed = store.prepare_model_queue() if args.apply else 0
+    after = store.model_queue_summary(daily_limit=args.daily_limit) if args.apply else before
+    print(json.dumps({
+        "ok": True,
+        "dry_run": not bool(args.apply),
+        "changed": changed,
+        "before": before,
+        "after": after,
+        "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
+    }, ensure_ascii=False, indent=2))
 
 
 def kol_import(args: argparse.Namespace) -> None:
@@ -997,24 +1670,28 @@ def kol_fallback_mode(args: argparse.Namespace) -> None:
 
 def kol_post_fetch(args: argparse.Namespace) -> None:
     store = _post_store()
-    if args.provider == "nitter" and _fallback_mode() != "enabled" and not args.dry_run:
-        raise SystemExit("Nitter is shadow-only until the rollout gate passes; use --dry-run for diagnostics")
     requested = args.backfill or 50
     handles = {
         value.strip().lstrip("@").casefold()
         for value in str(getattr(args, "handles", "") or "").split(",")
         if value.strip()
     }
+    batch_key = str(getattr(args, "batch_key", "") or f"scheduled:{args.as_of or date.today().isoformat()}:{args.platform}")
     result = run_post_fetch(
         store,
-        _post_provider(args.provider),
+        _post_provider(
+            args.provider,
+            batch_key=batch_key,
+            history_mode="history" in batch_key or "gap-" in batch_key,
+        ),
         platform_providers={"zhihu": _zhihu_provider()},
         platforms=None if args.platform == "all" else {args.platform},
         handles=handles or None,
         max_count=requested,
         classifier=RuleClassifier(_classification_aliases()),
         dry_run=args.dry_run,
-        batch_key=str(getattr(args, "batch_key", "") or ""),
+        batch_key=batch_key,
+        fresh_first_page=bool(getattr(args, "fresh_first_page", False)),
     )
     codex_completed = codex_failed = 0
     if not args.dry_run and not args.skip_classify:
@@ -1116,7 +1793,11 @@ def kol_fetch_resume(args: argparse.Namespace) -> None:
         return
     result = run_post_fetch(
         store,
-        _post_provider(args.provider),
+        _post_provider(
+            args.provider,
+            batch_key=batch_key,
+            history_mode="history" in batch_key or "gap-" in batch_key,
+        ),
         platform_providers={"zhihu": _zhihu_provider()},
         platforms=None if args.platform == "all" else {args.platform},
         max_count=args.fetch_count,
@@ -1188,10 +1869,15 @@ def kol_post_classify(args: argparse.Namespace) -> None:
         completed = failed = 0
     else:
         try:
-            completed, failed = classify_pending_with_codex(
+            completed, failed = classify_pending_in_batches(
                 store,
-                build_post_classifier(KOL_CLASSIFIER_SCHEMA, ROOT),
+                build_batch_post_classifier(
+                    KOL_BATCH_CLASSIFIER_SCHEMA,
+                    ROOT,
+                    deepseek_credentials=DeepSeekCredentialStore(),
+                ),
                 limit=args.limit,
+                daily_limit=args.daily_limit,
             )
         except ModelWorkerBusyError:
             print(json.dumps({"ok": True, "skipped": "model_worker_busy"}, ensure_ascii=False))
@@ -1207,6 +1893,7 @@ def kol_post_classify(args: argparse.Namespace) -> None:
                 "codex_completed": completed,
                 "codex_failed": failed,
                 "stock_leads": leads,
+                "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
             },
             ensure_ascii=False,
         )
@@ -1294,11 +1981,12 @@ def _run_recommendation_ai_repair(
     aliases = _classification_aliases()
     rule_classifier = RuleClassifier(aliases)
     repository = RecommendationDraftRepository(store)
-    classifier = DeepSeekPostClassifier(
+    classifier = build_post_classifier(
         KOL_CLASSIFIER_SCHEMA,
-        DeepSeekCredentialStore(),
-        timeout_seconds=min(45, max(10, max_runtime / 4)),
+        ROOT,
+        deepseek_credentials=DeepSeekCredentialStore(),
     )
+    classifier.timeout_seconds = min(45, max(10, max_runtime / 4))
     counters = Counter()
     errors: list[str] = []
     results: list[dict[str, Any]] = []
@@ -1553,26 +2241,34 @@ def kol_morning_pipeline(args: argparse.Namespace) -> None:
     review_date = date.fromisoformat(args.as_of) if args.as_of else date.today()
 
     def fetcher():
+        batch_key = f"morning:{review_date.isoformat()}:{args.platform}"
         return run_post_fetch(
             store,
-            _post_provider(args.provider),
+            _post_provider(args.provider, batch_key=batch_key),
             platform_providers={"zhihu": _zhihu_provider()},
             platforms=None if args.platform == "all" else {args.platform},
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
-            batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            batch_key=batch_key,
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
         store,
         market,
         rule_classifier=RuleClassifier(_classification_aliases()),
-        batch_classifier=DeepSeekBatchPostClassifier(
+        batch_classifier=build_batch_post_classifier(
             KOL_BATCH_CLASSIFIER_SCHEMA,
-            DeepSeekCredentialStore(),
+            ROOT,
+            deepseek_credentials=DeepSeekCredentialStore(),
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        market_writes_enabled=_market_writes_enabled(),
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     repository.interrupt_stale_runs()
@@ -1594,26 +2290,34 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
     review_date = date.today()
 
     def fetcher():
+        batch_key = f"morning:{review_date.isoformat()}:{args.platform}"
         return run_post_fetch(
             store,
-            _post_provider(args.provider),
+            _post_provider(args.provider, batch_key=batch_key),
             platform_providers={"zhihu": _zhihu_provider()},
             platforms=None if args.platform == "all" else {args.platform},
             max_count=args.fetch_count,
             classifier=RuleClassifier(_classification_aliases()),
-            batch_key=f"morning:{review_date.isoformat()}:{args.platform}",
+            batch_key=batch_key,
+            fresh_first_page=True,
         )
 
     pipeline = MorningPipeline(
         store,
         market,
         rule_classifier=RuleClassifier(_classification_aliases()),
-        batch_classifier=DeepSeekBatchPostClassifier(
+        batch_classifier=build_batch_post_classifier(
             KOL_BATCH_CLASSIFIER_SCHEMA,
-            DeepSeekCredentialStore(),
+            ROOT,
+            deepseek_credentials=DeepSeekCredentialStore(),
         ),
         ocr_classifier=_ocr_classifier(),
         fetcher=fetcher,
+        market_writes_enabled=_market_writes_enabled(),
+        active_kol_count=sum(
+            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
+            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
+        ),
     )
     repository = RecommendationDraftRepository(store)
     interrupted = repository.interrupt_stale_runs()
@@ -1621,7 +2325,7 @@ def kol_morning_orchestrate(args: argparse.Namespace) -> None:
     def run_phase(phase: str, runtime: float) -> dict[str, Any]:
         return pipeline.run(
             as_of=review_date,
-            fetch=True,
+            fetch=not args.skip_fetch,
             backlog_limit=0,
             max_runtime_minutes=runtime,
             phase=phase,
@@ -1681,8 +2385,264 @@ def kol_ui_doctor(_: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-def _market_store() -> MarketStore:
-    return MarketStore(MARKET_ROOT)
+def _market_store() -> MarketStore | FoundationBackedMarketStore:
+    local = MarketStore(MARKET_ROOT)
+    mode = _market_recovery_mode()
+    historical = (
+        str(mode.get("mode")) == "historical"
+        and not bool(mode.get("write_enabled", True))
+    )
+    if historical or not (FOUNDATION_ROOT / "current.json").is_file():
+        return local
+    return FoundationBackedMarketStore(local, FOUNDATION_ROOT)
+
+
+def _resolve_foundation_as_of(value: str | None) -> date:
+    """Resolve an operator date without ever treating an open session as complete."""
+    if value and value != "auto":
+        return date.fromisoformat(value)
+    now = datetime.now(SHANGHAI)
+    candidate = now.date()
+    if now.time() < datetime_time(16, 0):
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _foundation_status() -> dict[str, Any]:
+    reader = FoundationMarketReader(FOUNDATION_ROOT)
+    health = reader.health()
+    if not health.get("ok"):
+        return {**health, "status": "unavailable", "quality_status": "failed"}
+    release = reader.release()
+    required = {
+        "daily_raw",
+        "daily_adjusted",
+        "instruments",
+        "trading_calendar",
+    }
+    missing: list[str] = []
+    paths: dict[str, str] = {}
+    for dataset in sorted(required):
+        try:
+            path = reader.dataset_path(dataset, release)
+            paths[dataset] = str(path)
+        except (FileNotFoundError, KeyError, TypeError, ValueError) as error:
+            missing.append(f"{dataset}: {error}")
+    benchmark_available = False
+    benchmark_error = ""
+    try:
+        benchmark_available = not reader.read_daily("000300", adjustment="raw").empty
+    except Exception as error:
+        benchmark_error = str(error)
+    quality_status = "valid" if not missing else "failed"
+    if not benchmark_available and not missing:
+        quality_status = "partial"
+    coverage = reader.coverage(str(release.get("as_of") or ""))
+    if not coverage.get("complete") and not missing:
+        quality_status = "partial"
+    try:
+        disk = shutil.disk_usage(FOUNDATION_ROOT)
+        free_bytes = int(disk.free)
+    except OSError:
+        free_bytes = None
+    return {
+        **health,
+        "status": "ready" if quality_status == "valid" else quality_status,
+        "quality_status": quality_status,
+        "required_datasets": sorted(required),
+        "missing_required_datasets": missing,
+        "dataset_paths": paths,
+        "benchmark_available": benchmark_available,
+        "benchmark_error": benchmark_error,
+        "coverage": coverage,
+        "coverage_complete": bool(coverage.get("complete")),
+        "free_bytes": free_bytes,
+    }
+
+
+def data_foundation_doctor(_: argparse.Namespace) -> None:
+    payload = _foundation_status()
+    payload["ok"] = bool(payload.get("ok") and not payload.get("missing_required_datasets"))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not payload["ok"]:
+        raise SystemExit(2)
+
+
+def _run_foundation_refresh(target: date) -> dict[str, Any]:
+    """Run the foundation publisher with a hard timeout and no partial promotion."""
+    python = FOUNDATION_REPO / ".venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        return {"ok": False, "status": "environment_missing", "error": str(python)}
+    # A full BaoStock gap repair may cover the active universe sequentially.
+    # Keep the operator bounded, but allow the planned 30-minute window.
+    timeout = float(os.environ.get("ADF_REFRESH_TIMEOUT_SECONDS", "1800"))
+    command = [
+        str(python),
+        "-m",
+        "ashare_data_foundation.cli",
+        "--data-root",
+        str(FOUNDATION_ROOT),
+        "refresh",
+        "--as-of",
+        target.isoformat(),
+        "--primary",
+        os.environ.get("ADF_PRIMARY_PROVIDER", "baostock"),
+        "--workers",
+        os.environ.get("ADF_WORKERS", "8"),
+        "--resume",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(FOUNDATION_REPO),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "status": "timed_out",
+            "timeout_seconds": timeout,
+            "command": command[:6] + ["..."],
+        }
+    output = (completed.stdout or completed.stderr or "").strip()
+    return {
+        "ok": completed.returncode == 0,
+        "status": "published" if completed.returncode == 0 else "failed",
+        "returncode": completed.returncode,
+        "output_tail": output[-2000:],
+    }
+
+
+def kol_data_refresh(args: argparse.Namespace) -> None:
+    """Refresh the shared release, then update every KOL consumer from one pointer."""
+    lock_path = KOL_ROOT / "foundation-refresh.lock"
+    lock = FileLock(str(lock_path), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        print(json.dumps({"ok": True, "status": "already_running", "lock": str(lock_path)}))
+        return
+    try:
+        target = _resolve_foundation_as_of(args.as_of)
+        before = _foundation_status()
+        before_as_of = str(before.get("as_of") or "")
+        refresh = {"ok": True, "status": "not_needed"}
+        refresh_required = bool(
+            before_as_of
+            and (
+                date.fromisoformat(before_as_of) < target
+                or before.get("coverage_complete") is False
+            )
+        )
+        if refresh_required:
+            refresh = _run_foundation_refresh(target)
+        after = _foundation_status()
+        effective_text = str(after.get("as_of") or before_as_of)
+        steps: list[dict[str, Any]] = [{"step": "foundation_before", **before}, {"step": "foundation_refresh", **refresh}]
+        if effective_text:
+            effective = min(target, date.fromisoformat(effective_text))
+        else:
+            effective = target
+        update = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "foundation release unavailable",
+        }
+        if (
+            after.get("ok")
+            and effective_text
+            and (not refresh_required or refresh.get("ok"))
+        ):
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "kol-update",
+                "--as-of",
+                effective.isoformat(),
+            ]
+            if args.notify:
+                command.append("--notify")
+            if args.dry_run:
+                command.append("--dry-run")
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=float(os.environ.get("KOL_UPDATE_TIMEOUT_SECONDS", "1800")),
+                    check=False,
+                )
+                update = {
+                    "ok": completed.returncode == 0,
+                    "status": "updated" if completed.returncode == 0 else "failed",
+                    "effective_as_of": effective.isoformat(),
+                    "output_tail": (completed.stdout or completed.stderr or "")[-4000:],
+                }
+            except subprocess.TimeoutExpired:
+                update = {
+                    "ok": False,
+                    "status": "timed_out",
+                    "effective_as_of": effective.isoformat(),
+                }
+        technical = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "returns update did not complete",
+        }
+        if update.get("ok") and not args.dry_run:
+            context_result = _backfill_event_contexts(
+                _market_store(),
+                KolStore(KOL_ROOT),
+                stale_only=True,
+            )
+            technical = {
+                "ok": bool(context_result.get("ok")),
+                "status": "updated" if context_result.get("ok") else "failed",
+                "created": len(context_result.get("created", [])),
+                "updated": len(context_result.get("updated", [])),
+                "skipped": len(context_result.get("skipped", [])),
+                "pending": len(context_result.get("pending", [])),
+                "errors": context_result.get("errors", []),
+            }
+        elif args.dry_run:
+            technical = {"ok": True, "status": "dry_run"}
+        steps.extend([
+            {"step": "foundation_after", **after},
+            {"step": "kol_update", **update},
+            {"step": "technical_context", **technical},
+        ])
+        payload = {
+            "ok": bool(
+                after.get("ok")
+                and update.get("ok")
+                and technical.get("ok")
+                and (not refresh_required or refresh.get("ok"))
+            ),
+            "status": (
+                "completed"
+                if update.get("ok") and technical.get("ok") and (not refresh_required or refresh.get("ok"))
+                else "degraded"
+            ),
+            "requested_as_of": target.isoformat(),
+            "effective_as_of": effective.isoformat(),
+            "foundation_release_id": after.get("release_id") or before.get("release_id", ""),
+            "steps": steps,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if not payload["ok"]:
+            raise SystemExit(2)
+    finally:
+        lock.release()
 
 
 def _backfill_event_contexts(
@@ -1692,6 +2652,7 @@ def _backfill_event_contexts(
     event_ids: set[str] | None = None,
     symbols: set[str] | None = None,
     force: bool = False,
+    stale_only: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "feature_version": FEATURE_VERSION,
@@ -1708,11 +2669,26 @@ def _backfill_event_contexts(
         and (event_ids is None or event.event_id in event_ids)
         and (symbols is None or event.symbol in symbols)
     ]
+    foundation_release_id = ""
+    foundation = getattr(market_store, "foundation", None)
+    if foundation is not None:
+        try:
+            foundation_release_id = str(foundation.release().get("release_id", ""))
+        except Exception:
+            foundation_release_id = ""
     for event in events:
         expected_trade_date: date | None = None
         try:
             input_hash = event_context_input_hash(event.symbol, event.posted_at)
             existing = market_store.get_event_technical_context(event.event_id, input_hash=input_hash)
+            if (
+                stale_only
+                and existing is not None
+                and str(existing.get("foundation_release_id") or "") == foundation_release_id
+                and str(existing.get("status") or "") not in {"pending", "failed"}
+            ):
+                result["skipped"].append(event.event_id)
+                continue
             expected_trade_date = market_store.latest_open_date(event_context_cutoff(event.posted_at))
             frame = market_store.read_daily(event.symbol, adjustment="qfq")
             context = compute_event_technical_context(
@@ -1721,6 +2697,7 @@ def _backfill_event_contexts(
                 posted_at=event.posted_at,
                 qfq_prices=frame,
                 expected_trade_date=expected_trade_date,
+                foundation_release_id=foundation_release_id,
             )
             changed = market_store.save_event_technical_context(
                 context.to_record(),
@@ -1738,6 +2715,7 @@ def _backfill_event_contexts(
                     posted_at=event.posted_at,
                     expected_trade_date=expected_trade_date,
                     error=str(exc),
+                    foundation_release_id=foundation_release_id,
                 )
                 market_store.save_event_technical_context(failed.to_record())
             except Exception:
@@ -2305,38 +3283,39 @@ def _seed_market_instruments(store: MarketStore) -> int:
 def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str, Any]:
     posts = post_store or _post_store()
     market = _market_store()
-    _seed_market_instruments(market)
+    writes_enabled = _market_writes_enabled()
+    if writes_enabled:
+        _seed_market_instruments(market)
     result = extract_stock_leads(
         posts,
         instruments=market.instrument_map(),
         aliases=load_stock_aliases(WATCHLIST, KOL_ROOT / "events.csv"),
     )
     reconciled = reconcile_exact_stock_leads(posts, market.instrument_map())
-    confirmed_leads: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        batch = posts.list_stock_leads(status="confirmed", limit=500, offset=offset)
-        if not batch:
-            break
-        confirmed_leads.extend(batch)
-        offset += len(batch)
     confirmed_symbols = sorted(
         set(result.confirmed_symbols)
         | set(reconciled)
-        | {str(lead["symbol"]) for lead in confirmed_leads}
     )
     queued: list[str] = []
-    for symbol in confirmed_symbols:
-        leads = posts.list_stock_leads(status="confirmed", symbol=symbol, limit=1)
-        if not leads or market.get_instrument(symbol) is None:
-            continue
-        try:
-            mentioned = datetime.fromisoformat(str(leads[0]["posted_at"]).replace("Z", "+00:00")).date()
-        except ValueError:
-            mentioned = date.today()
-        market.touch_mention(symbol, mentioned)
-        market.enqueue_sync(symbol, reason=f"kol_lead:{leads[0]['post_id']}")
-        queued.append(symbol)
+    admission_symbols: list[str] = []
+    if writes_enabled:
+        for symbol in confirmed_symbols:
+            leads = posts.list_stock_leads(status="confirmed", symbol=symbol, limit=1)
+            if not leads or market.get_instrument(symbol) is None:
+                continue
+            try:
+                mentioned = datetime.fromisoformat(str(leads[0]["posted_at"]).replace("Z", "+00:00")).date()
+            except ValueError:
+                mentioned = date.today()
+            market.touch_mention(symbol, mentioned)
+            market.enqueue_sync(symbol, reason=f"kol_lead:{leads[0]['post_id']}")
+            queued.append(symbol)
+    else:
+        mode = _market_recovery_mode()
+        admission_symbols = MarketAdmissionRepository(posts).queue_confirmed_symbols(
+            confirmed_symbols,
+            as_of=str(mode.get("as_of") or ""),
+        )
     # Keep CLI output bounded. The full lead rows remain queryable in SQLite;
     # repair commands should report counts and affected symbols only.
     return {
@@ -2346,7 +3325,11 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
         "confirmed_symbols": result.confirmed_symbols,
         "failed": result.failed,
         "reconciled_symbols": reconciled,
-        "queued_symbols": sorted(set(queued)),
+        "queued_symbol_count": len(set(queued)),
+        "queued_symbols": sorted(set(queued))[:20],
+        "admission_symbol_count": len(set(admission_symbols)),
+        "admission_symbols": sorted(set(admission_symbols))[:20],
+        "market_write_mode": "live" if writes_enabled else "historical_admission_only",
     }
 
 
@@ -2355,6 +3338,7 @@ def kol_leads_extract(_: argparse.Namespace) -> None:
 
 
 def market_init(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-init")
     store = _market_store()
     seeded = _seed_market_instruments(store)
     imported: list[dict[str, Any]] = []
@@ -2484,6 +3468,8 @@ def _purchased_research_symbols() -> set[str]:
 
 
 def market_purchased_daily_import(args: argparse.Namespace) -> None:
+    if not args.dry_run:
+        _require_live_market_writes("market-purchased-daily-import")
     root = Path(args.root)
     expected = date.fromisoformat(args.expected_date) if args.expected_date else None
     audit = audit_purchased_daily_archive(root, expected_date=expected)
@@ -2586,8 +3572,461 @@ def market_purchased_daily_import(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+def _daily_restore_source_manifest(root: Path, *, include_hashes: bool = True) -> dict[str, Any]:
+    """Build a stable manifest for the dated CSV snapshot without modifying it."""
+    files = sorted(root.glob("*.csv")) if root.is_dir() else []
+    entries: list[dict[str, Any]] = []
+    for path in files:
+        entry: dict[str, Any] = {
+            "name": path.name,
+            "size": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        if include_hashes:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            entry["sha256"] = digest.hexdigest()
+        entries.append(entry)
+    root_digest = hashlib.sha256()
+    for entry in entries:
+        root_digest.update(
+            json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+    return {
+        "root": str(root),
+        "file_count": len(entries),
+        "files": entries,
+        "root_sha256": root_digest.hexdigest(),
+    }
+
+
+def _daily_restore_target_symbols(store: MarketStore) -> list[str]:
+    existing = {
+        str(item.get("symbol") or "")
+        for item in store.get_coverage()
+        if item.get("dataset") == "daily"
+    }
+    return sorted(value for value in existing | _purchased_research_symbols() if re.fullmatch(r"\d{6}", value))
+
+
+def _daily_restore_source_for(symbol: str, csv_root: Path) -> tuple[Any, str]:
+    kind = _instrument_type(symbol)
+    csv_path = csv_root / f"{symbol}.{_exchange(symbol, kind)}.csv"
+    if csv_path.exists():
+        return PurchasedDailyProvider(csv_root, provider_name="daily_snapshot_20260825"), "csv"
+    if symbol == "000300":
+        return BaoStockMarketProvider(), "baostock"
+    return FreeStockDBMarketProvider(base_url="http://127.0.0.1:7899", timeout_seconds=30), "freestockdb"
+
+
+def _ensure_market_instrument(store: MarketStore, symbol: str) -> None:
+    if store.get_instrument(symbol) is not None:
+        return
+    kind = _instrument_type(symbol)
+    store.upsert_instrument(
+        Instrument(
+            symbol,
+            symbol,
+            kind,
+            _exchange(symbol, kind),
+            lifecycle="tracking",
+            source="daily_restore_20260825",
+        )
+    )
+
+
+def _clear_candidate_daily_series(store: MarketStore, symbol: str, adjustment: str) -> None:
+    directory = store.warehouse_root / "daily" / symbol / adjustment
+    if directory.exists():
+        for path in directory.glob("*.parquet"):
+            path.unlink()
+
+
+def _market_daily_restore_report_path(value: str | None) -> Path:
+    if value:
+        return Path(value)
+    return MARKET_ROOT.parent / "restore-reports" / "market-daily-restore-20260825.json"
+
+
+def _read_active_symbols_read_only(root: Path) -> set[str]:
+    database = Path(root) / "market.duckdb"
+    if not database.is_file():
+        raise ValueError(f"market database does not exist: {database}")
+    duckdb = importlib.import_module("duckdb")
+    connection = duckdb.connect(str(database), read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT symbol FROM instruments WHERE lifecycle IN ('pinned','tracking')"
+        ).fetchall()
+    finally:
+        connection.close()
+    return {str(row[0]) for row in rows if row and re.fullmatch(r"\d{6}", str(row[0]))}
+
+
+def _daily_coverage_end_dates(store: MarketStore) -> tuple[dict[str, str], dict[str, str]]:
+    raw: dict[str, str] = {}
+    qfq: dict[str, str] = {}
+    for row in store.get_coverage():
+        if row.get("dataset") != "daily":
+            continue
+        target = raw if row.get("adjustment") == "raw" else qfq if row.get("adjustment") == "qfq" else None
+        if target is None:
+            continue
+        symbol = str(row.get("symbol") or "")
+        end_date = str(row.get("end_date") or "")
+        if end_date > target.get(symbol, ""):
+            target[symbol] = end_date
+    return raw, qfq
+
+
+def market_symbol_admissions(args: argparse.Namespace) -> None:
+    if args.action != "reconcile":
+        raise SystemExit("only the reconcile action is supported")
+    expected = date.fromisoformat(args.as_of)
+    live_store = MarketStore(MARKET_ROOT)
+    existing_manifest = read_published_manifest(MARKET_ROOT)
+    if existing_manifest.get("baseline_symbols"):
+        baseline_symbols = {
+            str(value) for value in existing_manifest.get("baseline_symbols", [])
+            if re.fullmatch(r"\d{6}", str(value))
+        }
+        baseline_source = "published_manifest"
+    else:
+        if not args.baseline_root:
+            raise SystemExit(
+                "--baseline-root is required for the first reconciliation because no published manifest exists"
+            )
+        baseline_root = Path(args.baseline_root).expanduser()
+        baseline_symbols = _read_active_symbols_read_only(baseline_root)
+        baseline_source = str(baseline_root)
+    if len(baseline_symbols) != 562:
+        raise SystemExit(f"historical baseline must contain 562 active symbols; found {len(baseline_symbols)}")
+
+    current_active = {
+        str(item["symbol"])
+        for item in live_store.list_instruments()
+        if item.get("lifecycle") in {"pinned", "tracking"}
+    }
+    raw_end_dates, qfq_end_dates = _daily_coverage_end_dates(live_store)
+    complete_symbols = {
+        symbol
+        for symbol in set(raw_end_dates) | set(qfq_end_dates)
+        if raw_end_dates.get(symbol) == expected.isoformat()
+        and qfq_end_dates.get(symbol) == expected.isoformat()
+    }
+    store = _post_store()
+    admissions = MarketAdmissionRepository(store, ensure_schema=bool(args.apply))
+    reconciliation = admissions.reconcile_confirmed(
+        as_of=expected.isoformat(),
+        baseline_symbols=baseline_symbols,
+        complete_symbols=complete_symbols,
+        raw_end_dates=raw_end_dates,
+        qfq_end_dates=qfq_end_dates,
+        apply=False,
+    )
+    existing_extensions = {
+        str(value) for value in existing_manifest.get("extension_symbols", [])
+        if re.fullmatch(r"\d{6}", str(value)) and str(value) in complete_symbols
+    }
+    confirmed_published = set(reconciliation["published_symbols"])
+    extension_symbols = (confirmed_published - baseline_symbols) | existing_extensions
+    published_symbols = baseline_symbols | extension_symbols
+    demote_symbols = current_active - published_symbols
+    promote_symbols = published_symbols - current_active
+    missing_published = published_symbols - complete_symbols
+    selected = {
+        value.strip() for value in str(args.symbols or "").split(",") if value.strip()
+    }
+    if selected:
+        invalid = sorted(value for value in selected if not re.fullmatch(r"\d{6}", value))
+        if invalid:
+            raise SystemExit("invalid symbols: " + ",".join(invalid))
+        demote_symbols &= selected
+        promote_symbols &= selected
+
+    payload: dict[str, Any] = {
+        "ok": not missing_published,
+        "command": "market-symbol-admissions reconcile",
+        "dry_run": not bool(args.apply),
+        "as_of": expected.isoformat(),
+        "baseline_source": baseline_source,
+        "baseline_count": len(baseline_symbols),
+        "current_active_count": len(current_active),
+        "complete_raw_qfq_count": len(complete_symbols),
+        "published_target_count": len(published_symbols),
+        "extension_count": len(extension_symbols),
+        "admissions": {
+            "confirmed_symbols": reconciliation["confirmed_symbols"],
+            "published": reconciliation["published"],
+            "pending": reconciliation["pending"],
+        },
+        "demote_count": len(demote_symbols),
+        "promote_count": len(promote_symbols),
+        "demote_sample": sorted(demote_symbols)[:20],
+        "promote_sample": sorted(promote_symbols)[:20],
+        "pending_sample": reconciliation["pending_symbols"][:20],
+        "missing_published": sorted(missing_published),
+        "published": False,
+    }
+    report_path = Path(args.report) if args.report else (
+        MARKET_ROOT.parent / "restore-reports" / "market-symbol-admissions.json"
+    )
+    if not payload["ok"]:
+        if args.report:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+    if not args.apply:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S")
+    candidate = MARKET_ROOT.parent / f"market-admission-candidate-{stamp}"
+    previous = MARKET_ROOT.parent / f"market-admission-previous-{stamp}"
+    if candidate.exists() or previous.exists():
+        raise SystemExit(f"candidate or rollback directory already exists: {candidate}")
+    shutil.copytree(MARKET_ROOT, candidate)
+    candidate_store = MarketStore(candidate)
+    for symbol in sorted(demote_symbols):
+        current = candidate_store.get_instrument(symbol)
+        if current is not None:
+            candidate_store.restore_research_state(
+                symbol,
+                lifecycle="archived",
+                last_mentioned_at=str(current.get("last_mentioned_at") or ""),
+            )
+    for symbol in sorted(promote_symbols):
+        current = candidate_store.get_instrument(symbol)
+        if current is None:
+            raise RuntimeError(f"published symbol is absent from instrument catalog: {symbol}")
+        candidate_store.restore_research_state(
+            symbol,
+            lifecycle="tracking",
+            last_mentioned_at=str(current.get("last_mentioned_at") or expected.isoformat()),
+        )
+    if demote_symbols:
+        with candidate_store.lock(timeout=30), candidate_store.connect(lock=False) as db:
+            placeholders = ",".join("?" for _ in demote_symbols)
+            db.execute(
+                f"UPDATE sync_queue SET status='cancelled',last_error='historical admission pending',updated_at=? "
+                f"WHERE symbol IN ({placeholders}) AND status IN ('pending','failed')",
+                [now_iso(), *sorted(demote_symbols)],
+            )
+    manifest = write_published_manifest(
+        candidate,
+        as_of=expected.isoformat(),
+        baseline_symbols=baseline_symbols,
+        extension_symbols=extension_symbols,
+        source="market-symbol-admissions",
+    )
+    candidate_active = {
+        str(item["symbol"])
+        for item in candidate_store.list_instruments()
+        if item.get("lifecycle") in {"pinned", "tracking"}
+    }
+    candidate_raw, candidate_qfq = _daily_coverage_end_dates(candidate_store)
+    candidate_incomplete = sorted(
+        symbol for symbol in candidate_active
+        if candidate_raw.get(symbol) != expected.isoformat()
+        or candidate_qfq.get(symbol) != expected.isoformat()
+    )
+    if candidate_active != published_symbols or candidate_incomplete:
+        payload["ok"] = False
+        payload["candidate_incomplete"] = candidate_incomplete
+        payload["candidate_active_count"] = len(candidate_active)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+
+    old_pid = KOL_ROOT / "ui" / "server.pid"
+    if old_pid.exists():
+        try:
+            pid = int(old_pid.read_text(encoding="ascii").strip())
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
+                check=False,
+                capture_output=True,
+            )
+            time.sleep(2)
+        except (OSError, ValueError):
+            pass
+    os.replace(MARKET_ROOT, previous)
+    try:
+        os.replace(candidate, MARKET_ROOT)
+        reconciliation = admissions.reconcile_confirmed(
+            as_of=expected.isoformat(),
+            baseline_symbols=baseline_symbols,
+            complete_symbols=complete_symbols,
+            raw_end_dates=raw_end_dates,
+            qfq_end_dates=qfq_end_dates,
+            apply=True,
+        )
+    except Exception:
+        if MARKET_ROOT.exists():
+            failed_root = MARKET_ROOT.parent / f"market-admission-failed-{stamp}"
+            os.replace(MARKET_ROOT, failed_root)
+        os.replace(previous, MARKET_ROOT)
+        raise
+    payload.update(
+        {
+            "published": True,
+            "published_target_count": manifest["published_count"],
+            "manifest_sha256": manifest["symbols_sha256"],
+            "rollback_root": str(previous),
+            "admissions": admissions.summary(),
+        }
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def market_daily_restore(args: argparse.Namespace) -> None:
+    """Build and optionally publish the 2026-08-25 tracked-market snapshot."""
+    csv_root = Path(args.csv_root).expanduser()
+    expected = date.fromisoformat(args.as_of)
+    report_path = _market_daily_restore_report_path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    audit = audit_purchased_daily_archive(csv_root, expected_date=expected)
+    payload: dict[str, Any] = {
+        "ok": bool(audit.get("ok")),
+        "command": "market-daily-restore",
+        "scope": args.scope,
+        "as_of": expected.isoformat(),
+        "adjustments": [item.strip() for item in args.adjustments.split(",") if item.strip()],
+        "audit": audit,
+        "dry_run": not bool(args.apply),
+        "source_manifest": {},
+        "target": {},
+        "results": [],
+        "errors": [],
+    }
+    if not audit.get("ok"):
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+    if args.scope != "tracked-union":
+        raise SystemExit("only --scope tracked-union is currently supported")
+    adjustments = tuple(payload["adjustments"])
+    if set(adjustments) != {"raw", "qfq"} or len(adjustments) != 2:
+        raise SystemExit("--adjustments must be raw,qfq for the tracked daily restore")
+
+    # Dry-run is deliberately metadata-only. The apply path hashes every source
+    # body and then rechecks file size/mtime before publication.
+    if not args.apply:
+        live_store = MarketStore(MARKET_ROOT)
+        targets = _daily_restore_target_symbols(live_store)
+        csv_targets = [s for s in targets if (csv_root / f"{s}.{_exchange(s, _instrument_type(s))}.csv").exists()]
+        fallback_targets = [s for s in targets if s not in csv_targets]
+        payload["target"] = {
+            "symbols": len(targets),
+            "csv_symbols": len(csv_targets),
+            "fallback_symbols": len(fallback_targets),
+            "fallback_list": fallback_targets,
+            "raw_series": sum(1 for row in live_store.get_coverage() if row.get("dataset") == "daily" and row.get("adjustment") == "raw" and row.get("symbol") in targets),
+            "qfq_series": sum(1 for row in live_store.get_coverage() if row.get("dataset") == "daily" and row.get("adjustment") == "qfq" and row.get("symbol") in targets),
+        }
+        payload["source_manifest"] = _daily_restore_source_manifest(csv_root, include_hashes=False)
+        payload["ok"] = not audit.get("errors")
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    payload["source_manifest"] = _daily_restore_source_manifest(csv_root, include_hashes=True)
+    stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S")
+    candidate = MARKET_ROOT.parent / f"market-candidate-{stamp}"
+    previous = MARKET_ROOT.parent / f"market-previous-{stamp}"
+    if candidate.exists() or previous.exists():
+        raise SystemExit(f"candidate or rollback directory already exists: {candidate}")
+    print(f"[market-daily-restore] copying candidate to {candidate}", file=sys.stderr, flush=True)
+    shutil.copytree(MARKET_ROOT, candidate)
+    candidate_store = MarketStore(candidate)
+    _seed_market_instruments(candidate_store)
+    targets = _daily_restore_target_symbols(candidate_store)
+    payload["target"] = {"symbols": len(targets), "adjustments": list(adjustments)}
+    start = date(1990, 1, 1)
+    failures: list[dict[str, Any]] = []
+    for index, symbol in enumerate(targets, start=1):
+        _ensure_market_instrument(candidate_store, symbol)
+        provider, source_kind = _daily_restore_source_for(symbol, csv_root)
+        for adjustment in adjustments:
+            _clear_candidate_daily_series(candidate_store, symbol, adjustment)
+            result = sync_daily_bars(
+                candidate_store,
+                provider,
+                symbol,
+                start,
+                expected,
+                adjustment=adjustment,
+                promote=True,
+                allow_source_anomalies=(source_kind == "csv"),
+            )
+            item = {"symbol": symbol, "adjustment": adjustment, "source": source_kind, **result.__dict__}
+            payload["results"].append(item)
+            if result.quality_status == "quarantined" or result.error:
+                failures.append(item)
+        if hasattr(provider, "close"):
+            provider.close()
+        if index == 1 or index % 10 == 0 or index == len(targets):
+            print(f"[market-daily-restore] {index}/{len(targets)} symbols", file=sys.stderr, flush=True)
+    payload["errors"] = failures[:100]
+    coverage = candidate_store.get_coverage()
+    raw = [row for row in coverage if row.get("dataset") == "daily" and row.get("adjustment") == "raw" and row.get("symbol") in targets]
+    qfq = [row for row in coverage if row.get("dataset") == "daily" and row.get("adjustment") == "qfq" and row.get("symbol") in targets]
+    payload["target"].update({
+        "raw_series": len(raw),
+        "qfq_series": len(qfq),
+        "raw_current": sum(str(row.get("end_date")) == expected.isoformat() for row in raw),
+        "qfq_current": sum(str(row.get("end_date")) == expected.isoformat() for row in qfq),
+        "candidate_root": str(candidate),
+    })
+    source_after = _daily_restore_source_manifest(csv_root, include_hashes=False)
+    source_before = payload["source_manifest"]
+    unchanged = source_before.get("root_sha256", "") == _daily_restore_source_manifest(csv_root, include_hashes=True).get("root_sha256", "")
+    payload["source_unchanged"] = bool(unchanged and source_after.get("file_count") == source_before.get("file_count"))
+    payload["ok"] = bool(
+        not failures
+        and payload["target"].get("raw_series") == len(targets)
+        and payload["target"].get("qfq_series") == len(targets)
+        and payload["target"].get("raw_current") == len(targets)
+        and payload["target"].get("qfq_current") == len(targets)
+        and payload["source_unchanged"]
+    )
+    if not payload["ok"]:
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+
+    # Publish only after all candidate checks pass. Keep the old directory as a
+    # verified rollback target; the UI is restarted by the same script after the
+    # rename so no process can hold the old DuckDB open during the swap.
+    old_pid = KOL_ROOT / "ui" / "server.pid"
+    if old_pid.exists():
+        try:
+            pid = int(old_pid.read_text(encoding="ascii").strip())
+            subprocess.run(["powershell.exe", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"], check=False, capture_output=True)
+            time.sleep(2)
+        except (OSError, ValueError):
+            pass
+    os.replace(MARKET_ROOT, previous)
+    os.replace(candidate, MARKET_ROOT)
+    mode_path = MARKET_ROOT / "recovery-mode.json"
+    mode_path.write_text(json.dumps({"mode": "historical", "as_of": expected.isoformat(), "write_enabled": False}, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload["published"] = True
+    payload["rollback_root"] = str(previous)
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def market_freestockdb_doctor(args: argparse.Namespace) -> None:
-    runtime = FreeStockDBRuntime()
+    runtime = FreeStockDBRuntime(
+        root=getattr(args, "root", None) or None,
+        data_root=getattr(args, "data_root", None) or None,
+    )
     expected = date.fromisoformat(args.expected_date) if args.expected_date else None
     result = runtime.doctor(expected_trade_date=expected)
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -2596,7 +4035,12 @@ def market_freestockdb_doctor(args: argparse.Namespace) -> None:
 
 
 def market_freestockdb_update(args: argparse.Namespace) -> None:
-    runtime = FreeStockDBRuntime()
+    if not args.dry_run:
+        _require_live_market_writes("market-freestockdb-update")
+    runtime = FreeStockDBRuntime(
+        root=getattr(args, "root", None) or None,
+        data_root=getattr(args, "data_root", None) or None,
+    )
     try:
         result = runtime.update(
             dry_run=bool(args.dry_run),
@@ -2616,6 +4060,7 @@ def market_freestockdb_update(args: argparse.Namespace) -> None:
 
 
 def market_freestockdb_repair(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-freestockdb-repair")
     runtime = FreeStockDBRuntime()
     try:
         result = runtime.repair(
@@ -2637,6 +4082,7 @@ def market_freestockdb_repair(args: argparse.Namespace) -> None:
 
 
 def market_indicators_rebuild(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-indicators")
     store = _market_store()
     requested = {
         value.strip()
@@ -2826,6 +4272,7 @@ def _completed_market_sync_date(store: MarketStore, requested: date) -> date:
 
 
 def market_backfill(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-backfill")
     store = _market_store()
     _seed_market_instruments(store)
     start = date.fromisoformat(args.start)
@@ -2856,6 +4303,7 @@ def market_backfill(args: argparse.Namespace) -> None:
 
 
 def market_minute_fetch(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-minute-fetch")
     store = _market_store()
     _seed_market_instruments(store)
     symbol = args.symbol.strip()
@@ -2931,9 +4379,43 @@ def kol_intraday_audit(_: argparse.Namespace) -> None:
 
 
 def market_sync(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-sync")
     store = _market_store()
     _seed_market_instruments(store)
     requested_as_of = date.fromisoformat(args.as_of or date.today().isoformat())
+    if isinstance(store, FoundationBackedMarketStore):
+        # The consumer task must never call BaoStock/AKShare or write a second
+        # daily warehouse.  The foundation publisher owns refresh and atomic
+        # release selection; this task only rebuilds derived KOL context.
+        as_of = store.latest_open_date(requested_as_of)
+        if as_of is None:
+            raise SystemExit("shared foundation has no completed trading date")
+        payload: dict[str, Any] = {
+            "read_only_consumer": True,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "results": [],
+            "foundation_release_id": str(store.foundation.release().get("release_id", "")),
+            "foundation_as_of": str(store.foundation.release().get("as_of", "")),
+            "foundation_status": _foundation_status(),
+        }
+        requested = {value.strip() for value in (args.symbols or "").split(",") if value.strip()}
+        payload["technical_context"] = _backfill_event_contexts(
+            store,
+            KolStore(KOL_ROOT),
+            symbols=requested or None,
+        )
+        payload["intraday_context"] = backfill_event_intraday(
+            store,
+            KolStore(KOL_ROOT),
+            event_ids=None,
+        )
+        payload["as_of"] = as_of.isoformat()
+        payload["requested_as_of"] = requested_as_of.isoformat()
+        payload["calendar_error"] = ""
+        print(json.dumps({"ok": True, **payload}, ensure_ascii=False))
+        return
     calendar_error = ""
     try:
         open_dates = BaoStockMarketProvider().fetch_calendar(
@@ -3027,6 +4509,7 @@ def market_audit(args: argparse.Namespace) -> None:
 
 
 def market_weekly(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-weekly")
     store = _market_store()
     _seed_market_instruments(store)
     as_of = date.fromisoformat(args.as_of or date.today().isoformat())
@@ -3079,11 +4562,17 @@ def market_weekly(args: argparse.Namespace) -> None:
         errors.append("akshare_etf_master: timed out after 45 seconds")
     lead_reconciliation = _extract_leads_to_market()
     snapshots = 0
+    auxiliary_circuit_open = False
+    auxiliary_failure_reported = False
+    auxiliary_skipped = 0
     if not args.master_only:
         for instrument in store.list_instruments():
             if instrument["lifecycle"] not in {"pinned", "tracking"} or instrument["instrument_type"] != "stock":
                 continue
             for dataset in ("valuation", "financial_summary", "announcements", "fund_flow"):
+                if auxiliary_circuit_open:
+                    auxiliary_skipped += 1
+                    continue
                 command = [
                     sys.executable,
                     str(Path(__file__).resolve()),
@@ -3108,11 +4597,21 @@ def market_weekly(args: argparse.Namespace) -> None:
                     if completed.returncode == 0:
                         snapshots += int(json.loads(completed.stdout.strip()).get("saved", False))
                     else:
-                        errors.append(
-                            f"{instrument['symbol']}:{dataset}: {(completed.stderr or completed.stdout)[-1000:]}"
-                        )
+                        if not auxiliary_failure_reported:
+                            errors.append(
+                                "akshare auxiliary provider circuit opened after "
+                                f"{instrument['symbol']}:{dataset}: "
+                                f"{(completed.stderr or completed.stdout)[-1000:]}"
+                            )
+                            auxiliary_failure_reported = True
+                        auxiliary_circuit_open = True
                 except subprocess.TimeoutExpired:
-                    errors.append(f"{instrument['symbol']}:{dataset}: timed out after 45 seconds")
+                    if not auxiliary_failure_reported:
+                        errors.append(
+                            f"akshare auxiliary provider circuit opened after {instrument['symbol']}:{dataset}: timed out after 45 seconds"
+                        )
+                        auxiliary_failure_reported = True
+                    auxiliary_circuit_open = True
     errors = [*master_errors, *errors]
     alert_sent = _send_transition_alert(
         "market_master_failed",
@@ -3127,6 +4626,8 @@ def market_weekly(args: argparse.Namespace) -> None:
                 "master_rows": imported,
                 "stock_leads": lead_reconciliation,
                 "snapshots": snapshots,
+                "auxiliary_circuit_open": auxiliary_circuit_open,
+                "auxiliary_skipped": auxiliary_skipped,
                 "errors": errors,
                 "alert_sent": alert_sent,
             },
@@ -3138,6 +4639,7 @@ def market_weekly(args: argparse.Namespace) -> None:
 
 
 def market_etf_master(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-etf-master")
     store = _market_store()
     instruments = AKShareMarketProvider().fetch_etf_instruments()
     snapshot_date = date.fromisoformat(args.as_of or date.today().isoformat())
@@ -3150,6 +4652,7 @@ def market_etf_master(args: argparse.Namespace) -> None:
 
 
 def market_baostock_master(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-baostock-master")
     store = _market_store()
     instruments = BaoStockMarketProvider().fetch_instruments()
     snapshot_date = date.fromisoformat(args.as_of or date.today().isoformat())
@@ -3162,6 +4665,7 @@ def market_baostock_master(args: argparse.Namespace) -> None:
 
 
 def market_aux_fetch(args: argparse.Namespace) -> None:
+    _require_live_market_writes("market-aux-fetch")
     store = _market_store()
     instrument = store.get_instrument(args.symbol)
     if instrument is None:
@@ -3184,129 +4688,6 @@ def market_aux_fetch(args: argparse.Namespace) -> None:
         print(json.dumps({"ok": False, "error": str(exc)[:2000]}, ensure_ascii=False))
         raise SystemExit(2)
     print(json.dumps({"ok": True, "saved": result.quality_status == "valid"}, ensure_ascii=False))
-
-
-def _board_store() -> BoardMainlineStore:
-    return BoardMainlineStore(_market_store())
-
-
-def market_board_doctor(_: argparse.Namespace) -> None:
-    store = _board_store()
-    provider = FallbackBoardProvider(
-        primary=EastmoneyBoardProvider(max_retries=1),
-    )
-    checks: dict[str, Any] = {
-        "ok": True,
-        "health": store.health(),
-        "provider": provider.name,
-        "catalog": {},
-    }
-    successes = 0
-    for board_type in ("industry", "concept"):
-        try:
-            frame = provider.fetch_catalog(board_type)
-            checks["catalog"][board_type] = {"ok": True, "rows": int(len(frame))}
-            successes += 1
-        except Exception as exc:
-            checks["catalog"][board_type] = {"ok": False, "error": str(exc)[:2000]}
-    checks["ok"] = successes > 0 or checks["health"]["status"] in {"ready", "backfilling"}
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
-
-
-def market_board_sync(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_board_snapshot(store, FallbackBoardProvider(), as_of=as_of)
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"}:
-        raise SystemExit(2)
-
-
-def market_board_backfill(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    provider = FallbackBoardProvider()
-    health = store.health()
-    catalog_total = sum(int(value) for value in health["catalog_counts"].values())
-    catalog_result: dict[str, Any] | None = None
-    if catalog_total == 0:
-        result = sync_board_snapshot(store, provider, as_of=as_of)
-        catalog_result = result.__dict__
-        if result.succeeded == 0:
-            print(
-                json.dumps(
-                    {"ok": False, "catalog": catalog_result, "health": store.health()},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            raise SystemExit(2)
-    result = backfill_boards(
-        store,
-        provider,
-        as_of=as_of,
-        days=args.days,
-        batch_size=args.batch_size,
-        board_type=None if args.board_type == "all" else args.board_type,
-    )
-    payload = {
-        "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-        "catalog": catalog_result,
-        "result": result.__dict__,
-        "health": store.health(),
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
-
-
-def market_board_rps(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of) if args.as_of else None
-    version = args.version if args.rebuild else "board-rps-v2"
-    if not re.fullmatch(r"board-rps-v\d+", version):
-        raise SystemExit("--version must look like board-rps-v2")
-    store = _board_store()
-    result = store.compute_rps(as_of=as_of, formula_version=version)
-    print(
-        json.dumps(
-            {"ok": bool(result.get("ok")), "result": result, "health": store.health()},
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if not result.get("ok"):
-        raise SystemExit(2)
-
-
-def market_board_memberships(args: argparse.Namespace) -> None:
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    store = _board_store()
-    result = sync_candidate_memberships(
-        store,
-        FallbackBoardProvider(),
-        as_of=as_of,
-        limit=args.limit,
-    )
-    print(
-        json.dumps(
-            {
-                "ok": result.status in {"completed", "completed_with_errors", "already_running"},
-                "result": result.__dict__,
-                "health": store.health(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if result.status in {"failed", "source_blocked"} and result.succeeded == 0:
-        raise SystemExit(2)
 
 
 def data_digest(args: argparse.Namespace) -> None:
@@ -3345,6 +4726,14 @@ def portfolio_import(args: argparse.Namespace) -> None:
     market = _market_store()
     summary = store.summary()
     queued: list[str] = []
+    if not _market_writes_enabled():
+        print(json.dumps({
+            **result,
+            "market_sync_queued": [],
+            "market_sync_status": "historical_read_only",
+            "summary": summary,
+        }, ensure_ascii=False, indent=2))
+        return
     catalog = market.instrument_map()
     for position in summary["positions"]:
         symbol = position["symbol"]
@@ -3393,6 +4782,17 @@ def public_dataset_validate_cmd(args: argparse.Namespace) -> None:
     result = validate_public_dataset(args.input)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["ok"]:
+        raise SystemExit(1)
+
+
+def public_dataset_restore_cmd(args: argparse.Namespace) -> None:
+    result = restore_public_dataset(
+        args.input,
+        args.target_runtime,
+        apply=bool(args.apply),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("ok"):
         raise SystemExit(1)
 
 
@@ -3446,6 +4846,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_kol_update.add_argument("--as-of", required=True)
     p_kol_update.add_argument("--notify", action="store_true")
     p_kol_update.add_argument("--dry-run", action="store_true")
+    p_kol_update.add_argument("--event-id", help="update one event only")
     p_kol_update.set_defaults(func=kol_update)
 
     p_kol_returns_backfill = sub.add_parser(
@@ -3572,6 +4973,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_post_backup = sub.add_parser("kol-post-db-backup", help="create a consistent SQLite backup")
     p_post_backup.set_defaults(func=kol_post_db_backup)
 
+    p_reader_migrate = sub.add_parser(
+        "kol-reader-migrate",
+        help="copy the isolated Nitter reader session into ai-hub/twitter-reader",
+    )
+    p_reader_migrate.set_defaults(func=kol_reader_migrate)
+
+    p_collection_doctor = sub.add_parser(
+        "kol-collection-doctor",
+        help="inspect reader credentials and platform collection coverage",
+    )
+    p_collection_doctor.set_defaults(func=kol_collection_doctor)
+
+    p_gap_audit = sub.add_parser("kol-gap-audit", help="audit recent KOL collection gaps")
+    p_gap_audit.add_argument("--from", dest="from_date", required=True)
+    p_gap_audit.add_argument("--to", dest="to_date", default="auto")
+    p_gap_audit.set_defaults(func=kol_gap_audit)
+
+    p_gap_recover = sub.add_parser("kol-gap-recover", help="resume recent or historical KOL collection recovery")
+    p_gap_recover.add_argument("--scope", choices=["recent", "historical"], required=True)
+    p_gap_recover.add_argument("--resume", action="store_true")
+    p_gap_recover.set_defaults(func=kol_gap_recover)
+
+    p_post_recovery = sub.add_parser(
+        "kol-post-recovery",
+        help="hydrate public link-only KOL posts and resume accessible history",
+    )
+    p_post_recovery.add_argument("--scope", choices=["all-accessible"], default="all-accessible")
+    p_post_recovery.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_post_recovery.add_argument("--resume", action="store_true")
+    p_post_recovery.add_argument("--limit", type=int, default=0, help="maximum posts; 0 drains the durable queue")
+    p_post_recovery.add_argument("--report")
+    p_post_recovery.add_argument("--apply", action="store_true")
+    p_post_recovery.set_defaults(func=kol_post_recovery)
+
+    p_queue_compact = sub.add_parser("kol-fetch-queue-compact", help="archive superseded legacy fetch batches")
+    p_queue_compact.add_argument("--older-than-hours", type=int, default=48)
+    p_queue_compact.set_defaults(func=kol_fetch_queue_compact)
+
+    p_ai_resume = sub.add_parser("kol-ai-resume", help="resume the durable AI review queue")
+    p_ai_resume.add_argument("--limit", type=int, default=0)
+    p_ai_resume.add_argument("--daily-limit", type=int, default=250)
+    p_ai_resume.set_defaults(func=kol_ai_resume)
+
+    p_ai_maintain = sub.add_parser(
+        "kol-ai-queue-maintain",
+        help="normalize non-candidates and report the resumable candidate model backlog",
+    )
+    p_ai_maintain.add_argument("--daily-limit", type=int, default=250)
+    p_ai_maintain.add_argument("--apply", action="store_true")
+    p_ai_maintain.set_defaults(func=kol_ai_queue_maintain)
+
     p_fallback_mode = sub.add_parser("kol-fallback-mode", help="inspect or enable Nitter fallback")
     p_fallback_mode.add_argument("--set", choices=["shadow", "enabled"])
     p_fallback_mode.set_defaults(func=kol_fallback_mode)
@@ -3599,6 +5051,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="persistent queue key used to resume an interrupted account batch",
     )
     p_post_fetch.add_argument("--dry-run", action="store_true")
+    p_post_fetch.add_argument(
+        "--fresh-first-page",
+        action="store_true",
+        help="limit a targeted smoke/freshness run to one provider page",
+    )
     p_post_fetch.set_defaults(func=kol_post_fetch)
 
     p_fetch_resume = sub.add_parser(
@@ -3630,6 +5087,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_post_classify.add_argument("--ocr-limit", type=int, default=50)
     p_post_classify.add_argument("--skip-codex", action="store_true")
     p_post_classify.add_argument("--limit", type=int, default=0, help="0 processes the durable queue until empty")
+    p_post_classify.add_argument("--daily-limit", type=int, default=250)
     p_post_classify.set_defaults(func=kol_post_classify)
 
     p_recommendation_repair = sub.add_parser(
@@ -3683,7 +5141,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
-    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=50)
+    p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
+    p_morning_orchestrate.add_argument("--skip-fetch", action="store_true")
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)
 
     p_morning_migrate = sub.add_parser(
@@ -3706,6 +5165,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_market_doctor = sub.add_parser("market-doctor", help="check market data dependencies and coverage")
     p_market_doctor.set_defaults(func=market_doctor)
+
+    p_foundation_doctor = sub.add_parser(
+        "data-foundation-doctor",
+        help="check the pinned shared A-share foundation release without network calls",
+    )
+    p_foundation_doctor.set_defaults(func=data_foundation_doctor)
+
+    p_foundation_refresh = sub.add_parser(
+        "kol-data-refresh",
+        help="refresh the shared A-share release and update KOL consumers from it",
+    )
+    p_foundation_refresh.add_argument(
+        "--as-of",
+        default="auto",
+        help="target completed trading date, or auto (never uses an open session)",
+    )
+    p_foundation_refresh.add_argument("--notify", action="store_true")
+    p_foundation_refresh.add_argument("--dry-run", action="store_true")
+    p_foundation_refresh.set_defaults(func=kol_data_refresh)
 
     p_purchased_daily_doctor = sub.add_parser(
         "market-purchased-daily-doctor",
@@ -3735,6 +5213,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_purchased_daily_import.add_argument("--dry-run", action="store_true")
     p_purchased_daily_import.set_defaults(func=market_purchased_daily_import)
 
+    p_market_daily_restore = sub.add_parser(
+        "market-daily-restore",
+        help="build and publish the dated tracked-market daily snapshot",
+    )
+    p_market_daily_restore.add_argument("--csv-root", required=True)
+    p_market_daily_restore.add_argument("--scope", choices=["tracked-union"], default="tracked-union")
+    p_market_daily_restore.add_argument("--as-of", required=True)
+    p_market_daily_restore.add_argument("--adjustments", default="raw,qfq")
+    p_market_daily_restore.add_argument("--apply", action="store_true")
+    p_market_daily_restore.add_argument("--report")
+    p_market_daily_restore.set_defaults(func=market_daily_restore)
+
+    p_market_admissions = sub.add_parser(
+        "market-symbol-admissions",
+        help="reconcile confirmed stock leads with the historical published market manifest",
+    )
+    p_market_admissions.add_argument("action", choices=["reconcile"])
+    p_market_admissions.add_argument("--as-of", required=True)
+    p_market_admissions.add_argument("--symbols")
+    p_market_admissions.add_argument(
+        "--baseline-root",
+        help="read the initial 562-symbol baseline from a previous market runtime",
+    )
+    p_market_admissions.add_argument("--apply", action="store_true")
+    p_market_admissions.add_argument("--report")
+    p_market_admissions.set_defaults(func=market_symbol_admissions)
+
     p_market_freestockdb_doctor = sub.add_parser(
         "market-freestockdb-doctor", help="check the optional local FreeStockDB service"
     )
@@ -3742,6 +5247,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-date",
         help="expected latest completed A-share trading date (YYYY-MM-DD)",
     )
+    p_market_freestockdb_doctor.add_argument("--root")
+    p_market_freestockdb_doctor.add_argument("--data-root")
     p_market_freestockdb_doctor.set_defaults(func=market_freestockdb_doctor)
 
     p_market_freestockdb_update = sub.add_parser(
@@ -3758,6 +5265,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-date",
         help="required latest A-share trading date after the update (YYYY-MM-DD)",
     )
+    p_market_freestockdb_update.add_argument("--root")
+    p_market_freestockdb_update.add_argument("--data-root")
     p_market_freestockdb_update.set_defaults(func=market_freestockdb_update)
 
     p_market_freestockdb_repair = sub.add_parser(
@@ -3840,42 +5349,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_market_aux.add_argument("--as-of", required=True)
     p_market_aux.set_defaults(func=market_aux_fetch)
 
-    p_board_doctor = sub.add_parser(
-        "market-board-doctor", help="check the local board RPS store and Eastmoney provider"
-    )
-    p_board_doctor.set_defaults(func=market_board_doctor)
-
-    p_board_backfill = sub.add_parser(
-        "market-board-backfill", help="resume throttled industry and concept board history backfill"
-    )
-    p_board_backfill.add_argument("--resume", action="store_true")
-    p_board_backfill.add_argument("--days", type=int, default=320)
-    p_board_backfill.add_argument("--batch-size", type=int, default=80)
-    p_board_backfill.add_argument(
-        "--board-type", choices=["all", "industry", "concept"], default="all"
-    )
-    p_board_backfill.add_argument("--as-of")
-    p_board_backfill.set_defaults(func=market_board_backfill)
-
-    p_board_sync = sub.add_parser(
-        "market-board-sync", help="update the latest board snapshot without fabricating missing data"
-    )
-    p_board_sync.add_argument("--as-of")
-    p_board_sync.set_defaults(func=market_board_sync)
-
-    p_board_rps = sub.add_parser(
-        "market-board-rps", help="recompute board RPS from normalized local history"
-    )
-    p_board_rps.add_argument("--as-of")
-    p_board_rps.add_argument("--rebuild", action="store_true")
-    p_board_rps.add_argument("--version", default="board-rps-v2")
-    p_board_rps.set_defaults(func=market_board_rps)
-
-    p_board_memberships = sub.add_parser("market-board-memberships", help=argparse.SUPPRESS)
-    p_board_memberships.add_argument("--as-of")
-    p_board_memberships.add_argument("--limit", type=int, default=20)
-    p_board_memberships.set_defaults(func=market_board_memberships)
-
     p_digest = sub.add_parser("data-digest", help="emit one combined KOL and market data summary")
     p_digest.add_argument("--notify", action="store_true")
     p_digest.set_defaults(func=data_digest)
@@ -3909,6 +5382,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_public_validate.add_argument("--input", required=True)
     p_public_validate.set_defaults(func=public_dataset_validate_cmd)
+
+    p_public_restore = sub.add_parser(
+        "public-dataset-restore",
+        help="merge recoverable public KOL records into a private runtime",
+    )
+    p_public_restore.add_argument("--input", required=True)
+    p_public_restore.add_argument("--target-runtime", required=True)
+    p_public_restore.add_argument("--apply", action="store_true")
+    p_public_restore.set_defaults(func=public_dataset_restore_cmd)
     return parser
 
 

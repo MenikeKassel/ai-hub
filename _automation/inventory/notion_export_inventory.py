@@ -1,4 +1,4 @@
-﻿"""Inventory a local Notion export and build a small review queue.
+"""Inventory a local Notion export and build a small review queue.
 
 This script treats the Notion export as raw evidence. It does not write to
 Notion and does not create source notes. Its only outputs are staging files
@@ -12,15 +12,17 @@ import collections
 import csv
 import datetime as dt
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 
-DEFAULT_NOTION_ROOT = r"F:\notion"
-DEFAULT_OUT_DIR = r"<AI_HUB_HOME>\ai-hub\_runtime\staging"
-DEFAULT_REPORT = r"<OBSIDIAN_VAULT>\06_Logs\2026-07-02-notion-export-inventory.md"
-INFO_COLLECTION_ID = "285526335cd6800e96b4c9d97bba2c58"
+# 本地路径/ID 不再硬编码: 通过环境变量提供(缺失时在 main/find_info_csv 给出清晰错误)
+DEFAULT_NOTION_ROOT = os.environ.get("NOTION_EXPORT_ROOT", "")
+DEFAULT_OUT_DIR = os.environ.get("STAGING_DIR", "")
+DEFAULT_REPORT = os.environ.get("OBSIDIAN_REPORT_PATH", "")
+INFO_COLLECTION_ID = os.environ.get("NOTION_INFO_COLLECTION_ID", "")
 
 CHINESE_KEYS = {
     "title": "\u65e5\u671f",
@@ -135,6 +137,10 @@ def repair_mojibake(value: str | None) -> str:
 
 
 def find_info_csv(root: Path) -> Path:
+    if not INFO_COLLECTION_ID:
+        raise ValueError(
+            "未配置 Notion 信息收集库 ID: 请设置环境变量 NOTION_INFO_COLLECTION_ID"
+        )
     matches = [
         path
         for path in root.rglob(f"*{INFO_COLLECTION_ID}*_all.csv")
@@ -290,6 +296,11 @@ def build_report(summary: dict, candidates: list[dict]) -> str:
 
 def main() -> None:
     args = parse_args()
+    if not (args.notion_root and args.out_dir and args.obsidian_report):
+        raise ValueError(
+            "缺少必要路径: 请设置环境变量 NOTION_EXPORT_ROOT / STAGING_DIR / "
+            "OBSIDIAN_REPORT_PATH, 或对应的 --* 命令行参数"
+        )
     root = Path(args.notion_root)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

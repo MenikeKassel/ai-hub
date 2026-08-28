@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [string]$AsOf = (Get-Date -Format "yyyy-MM-dd")
@@ -6,6 +6,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$workspaceRoot = Split-Path -Parent $RepoRoot
+$env:FREESTOCKDB_ROOT = Join-Path $workspaceRoot "freestock\stockdb"
+$env:FREESTOCKDB_DATA_ROOT = $env:FREESTOCKDB_ROOT
+$env:FREESTOCKDB_URL = "http://127.0.0.1:7899"
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
 $logDirectory = Join-Path $RepoRoot "_runtime\trading\market\logs"

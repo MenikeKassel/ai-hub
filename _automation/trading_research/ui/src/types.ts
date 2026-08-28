@@ -20,6 +20,10 @@ export interface Kol {
   backfill_result_count: number
   backfill_warning: string
   fetch_status: string
+  external_account_id: string
+  availability_status: 'active' | 'rate_limited' | 'provider_failed' | 'protected' | 'suspected_unavailable' | 'suspended' | 'deleted' | 'renamed' | 'paused'
+  availability_reason: string
+  availability_checked_at: string
 }
 
 export interface DigestAuthor {
@@ -57,6 +61,10 @@ export interface KolLeaderboardRow {
   score: number | null
   event_count: number
   executable_event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   horizons: Record<'1W' | '1M' | '3M' | '6M', KolHorizonMetrics>
 }
 
@@ -68,6 +76,10 @@ export interface KolLeaderboard {
 export interface KolPerformanceMetrics extends KolHorizonMetrics {
   batch_count: number
   event_count: number
+  long_event_count: number
+  short_event_count: number
+  executable_long_event_count: number
+  audit_event_count: number
   recommendation_days: number
   unique_symbols: number
   unmatured_batch_count: number
@@ -133,7 +145,7 @@ export interface KolPerformanceDetail {
   version: string
   as_of: string
   row: KolPerformanceRow
-  series: Record<string, Array<{ as_of: string; payload: KolPerformanceRow }>>
+  series: Record<string, Array<{ as_of: string; payload: KolPerformanceRow | KolPerformanceMetrics }>>
 }
 
 export interface LocalMedia {
@@ -247,6 +259,15 @@ export interface MorningReview {
     stage: string
     progress_current: number
     progress_total: number
+    platform_breakdown?: Record<string, {
+      target: number
+      success: number
+      failed: number
+      blocked: number
+      rate_limited: number
+      provider_failed: number
+      pending: number
+    }>
   }
   posts: Post[]
   drafts: RecommendationDraft[]
@@ -255,6 +276,29 @@ export interface MorningReview {
   history_page_size: number
   history_has_more: boolean
   approved_drafts: RecommendationDraft[]
+}
+
+export interface BulkApprovalPreview {
+  ok: boolean
+  snapshot_token: string
+  review_date: string
+  queue_scope: 'morning' | 'backlog'
+  status_filter: 'ready'
+  expires_at: string
+  count: number
+  drafts: RecommendationDraft[]
+  skipped: Record<string, number>
+}
+
+export interface BulkApprovalResult {
+  ok: boolean
+  snapshot_consumed: boolean
+  processed: number
+  approved: Array<{ draft_id: number; event_id: string; status: string; symbol: string }>
+  skipped: Array<{ draft_id: number; reason: string; status?: string; attention_reasons?: string[] }>
+  failed: Array<{ draft_id: number; error: string }>
+  queued_symbols: string[]
+  refresh_status: string
 }
 
 export type ReviewAgentDecisionKind = 'auto_approve' | 'auto_exclude' | 'auto_ignore' | 'needs_human' | 'failed'
@@ -490,10 +534,39 @@ export interface MarketHealth {
   runs?: MarketRun[]
   queue?: Array<{ queue_key: string; symbol: string; status: string; reason: string; last_error: string }>
   freestockdb?: FreeStockDBHealth
+  foundation?: {
+    ok?: boolean
+    release_id?: string
+    as_of?: string
+    root?: string
+    coverage?: {
+      trade_date?: string
+      active_catalog?: number
+      observed?: number
+      coverage_ratio?: number
+      threshold?: number
+      complete?: boolean
+    }
+    coverage_complete?: boolean
+  }
+}
+
+export interface FoundationRefreshState {
+  status: 'idle' | 'running' | 'completed' | 'degraded'
+  as_of?: string
+  started_at?: string
+  finished_at?: string
+  output_tail?: string
+  returncode?: number
 }
 
 export interface FreeStockDBHealth {
   ok: boolean
+  data_path?: string
+  url?: string
+  read_only?: boolean
+  recovery_mode?: string
+  as_of?: string
   service_ok?: boolean
   data_fresh?: boolean
   update_ready?: boolean
@@ -606,6 +679,7 @@ export interface EventTechnicalContext {
   source_hash: string
   error: string
   computed_at: string
+  foundation_release_id?: string
 }
 
 export interface MarketDailyBar {
@@ -647,150 +721,6 @@ export interface MarketIndicatorSeries {
   available_to: string
   row_count: number
   rows: MarketIndicatorBar[]
-}
-
-export type BoardType = 'industry' | 'concept'
-export type BoardMainlineStatus =
-  | 'persistent_candidate'
-  | 'mainline_candidate'
-  | 'strong_watch'
-  | 'rps_only'
-  | 'partial_universe'
-  | 'neutral'
-
-export interface BoardMainlineItem {
-  board_key: string
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  trade_date: string
-  close: number
-  turnover: number | null
-  up_count: number | null
-  down_count: number | null
-  leader_name: string
-  leader_change: number | null
-  return_50: number | null
-  return_120: number | null
-  return_250: number | null
-  rps_50: number | null
-  rps_120: number | null
-  rps_250: number | null
-  breadth: number | null
-  turnover_ratio_20: number | null
-  status: BoardMainlineStatus
-  coverage_ratio: number
-  warnings: string[]
-}
-
-export interface BoardMainlinePage {
-  items: BoardMainlineItem[]
-  total: number
-  page: number
-  page_size: number
-  total_pages: number
-}
-
-export interface BoardSeriesBar {
-  trade_date: string
-  open: number | null
-  high: number | null
-  low: number | null
-  close: number
-  volume: number | null
-  amount: number | null
-  turnover: number | null
-  up_count: number | null
-  down_count: number | null
-  source_kind: string
-  rps_50: number | null
-  rps_120: number | null
-  rps_250: number | null
-  breadth: number | null
-  turnover_ratio_20: number | null
-  status: BoardMainlineStatus | null
-  warnings: string[]
-  rank_50?: number | null
-  rank_120?: number | null
-  rank_250?: number | null
-  universe_size_50?: number | null
-  universe_size_120?: number | null
-  universe_size_250?: number | null
-}
-
-export interface BoardRankPoint {
-  trade_date: string
-  rank: number
-  universe_size: number
-  rps: number | null
-  period_return: number | null
-  status: BoardMainlineStatus | null
-  warnings: string[]
-}
-
-export interface BoardRankSeries {
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  window: 50 | 120 | 250
-  range?: '120' | '250' | 'all'
-  available_from: string
-  available_to: string
-  display_from: string
-  display_to: string
-  total_point_count: number
-  returned_point_count: number
-  point_count: number
-  truncated: boolean
-  points: BoardRankPoint[]
-}
-
-export interface BoardRelatedEvent {
-  event_id: string
-  kol_name: string
-  platform: string
-  posted_at: string
-  symbol: string
-  security_name: string
-  direction: 'long' | 'short'
-  status: string
-  source_url: string
-}
-
-export interface BoardMainlineDetail {
-  board_key: string
-  board_code: string
-  board_name: string
-  board_type: BoardType
-  status: string
-  provider: string
-  first_seen_at: string
-  last_seen_at: string
-  updated_at: string
-  latest: BoardMainlineItem | null
-  members: Array<{ symbol: string; security_name: string; snapshot_date: string }>
-  related_events: BoardRelatedEvent[]
-}
-
-export interface BoardMainlineHealth {
-  status: 'empty' | 'backfilling' | 'ready' | 'partial_coverage' | 'source_blocked' | 'failed'
-  formula_version: string
-  catalog_counts: Partial<Record<BoardType, number>>
-  rps_counts: Partial<Record<BoardType, number>>
-  coverage_ratios: Partial<Record<BoardType, number>>
-  latest_trade_dates: Partial<Record<BoardType, string>>
-  pending_backfill: number
-  latest_run: null | {
-    run_id: string
-    operation: string
-    status: string
-    processed: number
-    succeeded: number
-    failed: number
-    started_at: string
-    completed_at: string
-    error: string
-  }
 }
 
 export interface Event {
@@ -994,10 +924,67 @@ export interface FetchRun {
   fallback_kols: string[]
 }
 
+export type XSessionStatus = 'pending_verification' | 'ready' | 'cooldown' | 'auth_required' | 'disabled'
+
+export interface XSessionSlot {
+  slot_id: number
+  label: string
+  credential_service: string
+  user_id: string
+  screen_name: string
+  status: XSessionStatus | string
+  enabled: number
+  credential_configured: boolean
+  cooldown_active: boolean
+  duplicate_identity?: boolean
+  last_verified_at: string
+  last_success_at: string
+  cooldown_until: string
+  last_error_code: string
+  last_error: string
+  consecutive_rate_limits: number
+  used_24h?: number
+  remaining_24h?: number
+}
+
+export interface XSessionPolicy {
+  enabled: boolean
+  global_limit_24h: number
+  session_limit_24h: number
+  min_interval_seconds: number
+  global_used_24h: number
+  global_remaining_24h: number
+  paused_until: string
+  pause_reason: string
+  next_slot_id: number
+  slots: XSessionSlot[]
+  public_backup?: PublicBackupHealth
+}
+
+export interface PublicBackupHealth {
+  enabled: boolean
+  provider: string
+  adapter_version: string
+  global_limit_24h: number
+  public_limit_24h: number
+  global_used_24h: number
+  public_used_24h: number
+  global_remaining_24h: number
+  public_remaining_24h: number
+  paused_until: string
+  pause_reason: string
+}
+
 export interface Health {
   ok: boolean
+  lightweight?: boolean
+  diagnostics_cached?: boolean
+  recovery_mode?: 'historical' | 'live' | string
+  as_of?: string
+  write_enabled?: boolean
   twitter_cli: string
   twitter_credentials_configured: boolean
+  twitter_reader_credentials_configured?: boolean
   twitter_auth_status: string
   zhihu_capture_available: boolean
   zhihu_active_kols: number
@@ -1005,6 +992,45 @@ export interface Health {
   zhihu_failed_kols: number
   zhihu_failure_handles: string[]
   zhihu_fetch_status: string
+  zhihu_status?: 'ready' | 'auth_required' | 'browser_unavailable' | 'rate_limited' | string
+  zhihu_cdp_port?: number
+  x_sessions?: XSessionPolicy
+  x_collection_status?: string
+  public_backup?: PublicBackupHealth
+  model_daily_budget?: {
+    usage_date: string
+    daily_limit: number
+    attempted: number
+    completed: number
+    failed: number
+    remaining: number
+    updated_at: string
+  }
+  model_queue?: {
+    candidate_total: number
+    completed: number
+    not_requested: number
+    running: number
+    failed: number
+    not_needed: number
+    processable_remaining: number
+    awaiting_ocr: number
+    manual_attention: number
+    model_manual_attention: number
+    ocr_manual_attention: number
+    non_candidate_not_requested: number
+    daily_limit: number
+    ocr_daily_limit: number
+    estimated_days: number
+  }
+  market_admissions?: {
+    total: number
+    pending: number
+    staging: number
+    published: number
+    failed: number
+    updated_at: string
+  }
   codex_cli: string
   deepseek_credentials_configured: boolean
   deepseek_provider?: string
@@ -1059,6 +1085,7 @@ export interface Health {
   nitter_attempt_count: number
   fallback_mode: 'shadow' | 'enabled'
   market: MarketHealth
+  freestockdb?: FreeStockDBHealth
   pipeline_refresh: PipelineRefresh
   review_agent: ReviewAgentSummary
   component_status?: {
@@ -1085,6 +1112,7 @@ export interface PipelineRefresh {
   symbols: string[]
   as_of?: string
   error: string
+  reason?: string
 }
 
 export interface PipelineStatus {
@@ -1110,4 +1138,47 @@ export interface OperatorTasks {
   tasks: Array<{ id: 'morning' | 'fetch' | 'zhihu'; task: string; status: string }>
   fetch: FetchRun | null
   morning: NonNullable<Health['morning_runs']>[number] | null
+}
+
+export interface CollectionCoverageItem {
+  platform: 'X' | 'Zhihu'
+  target: number
+  successful: number
+  coverage: number
+  window_start: string
+  window_end: string
+  items: Array<{
+    display_name: string
+    handle: string
+    fetch_status: string
+    availability_status: string
+    last_success_at: string
+    window_posts: number
+  }>
+}
+
+export interface CollectionCoverageResponse {
+  platform: 'all'
+  items: CollectionCoverageItem[]
+}
+
+export interface CollectionRecoveryPreview {
+  ok: boolean
+  scope: 'recent'
+  window_start: string
+  window_end: string
+  coverage: CollectionCoverageItem[]
+  reader_configured: boolean
+  x_session_ready?: boolean
+  ai_is_optional: boolean
+}
+
+export interface CollectionRecoveryRun {
+  run_id: string
+  status: 'running' | 'completed' | 'cancelled'
+  pid: number
+  log: string
+  started_at: string
+  completed_at?: string
+  coverage?: Record<string, CollectionCoverageItem>
 }

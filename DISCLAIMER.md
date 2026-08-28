@@ -1,4 +1,4 @@
-﻿# Disclaimer
+# Disclaimer
 
 This project is a personal research and evidence-audit system. It is not
 investment advice, a solicitation, a guarantee of returns, or an automated

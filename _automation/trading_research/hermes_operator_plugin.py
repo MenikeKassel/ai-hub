@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -7,8 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-
-REPO_ROOT = Path(os.environ.get("AI_HUB_ROOT", r"<AI_HUB_HOME>\ai-hub"))
+REPO_ROOT = Path(
+    os.environ.get("AI_HUB_HOME")
+    or os.environ.get("AI_HUB_ROOT")
+    or Path(__file__).resolve().parents[2]
+)
 OPERATOR = REPO_ROOT / "scripts" / "hermes-kol-operator.ps1"
 ACTIONS = {
     "status",
@@ -18,9 +21,8 @@ ACTIONS = {
     "collect",
     "review",
     "market",
+    "data-refresh",
     "returns",
-    "board-status",
-    "board-sync",
     "import-zhihu",
     "onboard-zhihu",
     "list-kols",
@@ -31,6 +33,14 @@ ACTIONS = {
     "reject-draft",
     "list-events",
     "event-action",
+    "platform-status",
+    "discover-accounts",
+    "list-candidates",
+    "score-candidate",
+    "reject-candidate",
+    "retry-candidate",
+    "kol-profile",
+    "fetch-kol",
 }
 
 
@@ -40,7 +50,7 @@ KOL_OPERATOR_SCHEMA = {
         "Operate the local KOL audit workbench through its deterministic Windows "
         "operator. Use this tool, never terminal or raw Python, to start/open the "
         "console, collect posts, inspect status, manage KOLs, review explicit draft "
-        "IDs, sync market data, inspect board RPS, or update returns. This tool cannot edit source code."
+        "IDs, sync market data, or update returns. This tool cannot edit source code."
     ),
     "parameters": {
         "type": "object",
@@ -49,7 +59,37 @@ KOL_OPERATOR_SCHEMA = {
             "id": {"type": "integer", "minimum": 1},
             "handle": {"type": "string"},
             "display_name": {"type": "string"},
-            "platform": {"type": "string", "enum": ["X", "Zhihu"]},
+            "platform": {
+                "type": "string",
+                "enum": [
+                    "x",
+                    "zhihu",
+                    "xiaohongshu",
+                    "douyin",
+                    "bilibili",
+                    "weibo",
+                    "wechat_rss",
+                    "xueqiu",
+                    "taoguba",
+                    "X",
+                    "Zhihu",
+                ],
+            },
+            "candidate_id": {"type": "string", "pattern": "^cand_[a-f0-9]{24}$"},
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "candidate_state": {
+                "type": "string",
+                "enum": [
+                    "new",
+                    "reviewing",
+                    "accepted",
+                    "rejected",
+                    "duplicate",
+                    "unavailable",
+                ],
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "days": {"type": "integer", "minimum": 1, "maximum": 30},
             "profile_url": {"type": "string"},
             "domain": {"type": "string"},
             "batch_size": {"type": "integer", "minimum": 1, "maximum": 31},
@@ -58,6 +98,12 @@ KOL_OPERATOR_SCHEMA = {
                 "type": "string",
                 "description": "Review date in YYYY-MM-DD form.",
             },
+            "as_of": {
+                "type": "string",
+                "description": "Completed market date in YYYY-MM-DD form, or auto.",
+            },
+            "notify": {"type": "boolean", "default": False},
+            "dry_run": {"type": "boolean", "default": False},
             "note": {"type": "string"},
             "event_id": {"type": "string"},
             "event_action": {
@@ -115,6 +161,12 @@ def _build_command(args: dict[str, Any]) -> list[str]:
         "note": "-Note",
         "event_id": "-EventId",
         "event_action": "-EventAction",
+        "candidate_id": "-CandidateId",
+        "query": "-Query",
+        "candidate_state": "-CandidateState",
+        "limit": "-Limit",
+        "days": "-Days",
+        "as_of": "-AsOf",
     }
     for field, switch in switches.items():
         value = args.get(field)
@@ -122,6 +174,10 @@ def _build_command(args: dict[str, Any]) -> list[str]:
             command.extend((switch, str(value)))
     if args.get("force") is True:
         command.append("-Force")
+    if args.get("notify") is True:
+        command.append("-Notify")
+    if args.get("dry_run") is True:
+        command.append("-DryRun")
     return command
 
 
@@ -142,6 +198,7 @@ def _parse_operator_output(stdout: str) -> dict[str, Any] | list[Any]:
 def run_operator(args: dict[str, Any], **_: Any) -> str:
     try:
         command = _build_command(args)
+        timeout = 1800 if args.get("action") == "data-refresh" else 90
         completed = subprocess.run(
             command,
             cwd=str(REPO_ROOT),
@@ -149,7 +206,7 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=90,
+            timeout=timeout,
             check=False,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW
@@ -170,7 +227,15 @@ def run_operator(args: dict[str, Any], **_: Any) -> str:
             )
         return _json_result(_parse_operator_output(completed.stdout))
     except subprocess.TimeoutExpired:
-        return _json_result({"ok": False, "error": "KOL operator timed out after 90 seconds"})
+        return _json_result(
+            {
+                "ok": False,
+                "error": (
+                    "KOL operator timed out after "
+                    f"{1800 if args.get('action') == 'data-refresh' else 90} seconds"
+                ),
+            }
+        )
     except Exception as exc:
         return _json_result({"ok": False, "error": str(exc)})
 

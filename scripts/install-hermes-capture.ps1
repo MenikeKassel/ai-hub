@@ -1,8 +1,8 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$RepoRoot = "",
     [string]$HermesHome = "",
-    [string]$VaultPath = "<OBSIDIAN_VAULT>",
+    [string]$VaultPath = "",
     [switch]$RestartGateway
 )
 
@@ -10,6 +10,10 @@ $ErrorActionPreference = "Stop"
 
 if (-not $RepoRoot) {
     $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+
+if (-not $VaultPath) {
+    $VaultPath = if ($env:OBSIDIAN_VAULT) { $env:OBSIDIAN_VAULT } else { Join-Path $RepoRoot "_automation\_vault" }
 }
 
 if (-not $HermesHome) {

@@ -1,4 +1,4 @@
-﻿---
+---
 type: "{{type}}"
 status: "Inbox"
 source_url: "{{source_url}}"

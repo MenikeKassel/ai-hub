@@ -1,11 +1,12 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateSet(
-        "status", "doctor", "start", "open", "collect", "review", "market", "returns",
-        "board-status", "board-sync",
+        "status", "doctor", "start", "open", "collect", "review", "market", "data-refresh", "returns",
         "import-zhihu", "onboard-zhihu",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
-        "reject-draft", "list-events", "event-action"
+        "reject-draft", "list-events", "event-action",
+        "platform-status", "discover-accounts", "list-candidates", "score-candidate",
+        "reject-candidate", "retry-candidate", "kol-profile", "fetch-kol"
     )]
     [string]$Action = "status",
     [string]$RepoRoot = "",
@@ -13,7 +14,10 @@ param(
     [int]$Id = 0,
     [string]$Handle = "",
     [string]$DisplayName = "",
-    [ValidateSet("X", "Zhihu")]
+    [ValidateSet(
+        "X", "Zhihu", "x", "zhihu", "xiaohongshu", "douyin", "bilibili",
+        "weibo", "wechat_rss", "xueqiu", "taoguba"
+    )]
     [string]$Platform = "X",
     [string]$ProfileUrl = "",
     [string]$Domain = "",
@@ -21,11 +25,22 @@ param(
     [ValidateSet("", "active", "paused")]
     [string]$Status = "",
     [string]$ReviewDate = (Get-Date -Format "yyyy-MM-dd"),
+    [string]$AsOf = "auto",
     [string]$Note = "",
     [string]$EventId = "",
+    [string]$CandidateId = "",
+    [string]$Query = "",
+    [ValidateSet("", "new", "reviewing", "accepted", "rejected", "duplicate", "unavailable")]
+    [string]$CandidateState = "",
+    [ValidateRange(1, 200)]
+    [int]$Limit = 50,
+    [ValidateRange(1, 30)]
+    [int]$Days = 30,
     [ValidateSet("", "activate", "exclude", "restore", "archive")]
     [string]$EventAction = "",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Notify,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,7 +97,11 @@ function Get-PipelineStatus {
     try {
         return Invoke-Utf8Json "GET" "$url/api/pipeline/status" $null 10
     } catch {
-        return $null
+        try {
+            return Invoke-Utf8Json "GET" "$url/api/v1/pipeline/status" $null 10
+        } catch {
+            return $null
+        }
     }
 }
 
@@ -93,6 +112,29 @@ function Get-ListenerProcess {
     } catch {
         return @()
     }
+}
+
+function Get-ProcessRecord {
+    param([int]$ProcessId)
+    try { return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" } catch { return $null }
+}
+
+function Test-ManagedListener {
+    param(
+        [int[]]$Listeners,
+        [string]$Python
+    )
+    foreach ($listenerId in $Listeners) {
+        $listener = Get-ProcessRecord $listenerId
+        if (-not $listener -or $listener.CommandLine -notmatch "kol_api:app" -or
+            $listener.CommandLine -notmatch "--port\s+$Port") { continue }
+        if ($Python -and $listener.CommandLine -match [regex]::Escape($Python)) { return $true }
+        if ($listener.ParentProcessId) {
+            $parent = Get-ProcessRecord $listener.ParentProcessId
+            if ($parent -and $Python -and $parent.CommandLine -match [regex]::Escape($Python)) { return $true }
+        }
+    }
+    return $false
 }
 
 function Get-ServerProcessInfo {
@@ -115,6 +157,8 @@ function Get-ServerProcessInfo {
         python = if ($metadata) { [string]$metadata.python } else { "" }
         python_version = if ($metadata) { [string]$metadata.python_version } else { "" }
         started_at = if ($metadata) { [string]$metadata.started_at } else { "" }
+        supervisor_pid = if ($metadata -and $metadata.supervisor_pid) { [int]$metadata.supervisor_pid } else { 0 }
+        listener_pid = if ($metadata -and $metadata.listener_pid) { [int]$metadata.listener_pid } elseif ($metadata -and $metadata.pid) { [int]$metadata.pid } else { $serverPid }
     }
 }
 
@@ -122,11 +166,12 @@ function Get-ServerProbe {
     $status = Get-PipelineStatus
     $listeners = @(Get-ListenerProcess)
     $process = Get-ServerProcessInfo
-    if ($status) {
+    $managed = Test-ManagedListener -Listeners $listeners -Python ([string]$process.python)
+    if ($status -and $managed) {
         return @{ state = "ready"; listeners = $listeners; process = $process; status = $status }
     }
-    if ($listeners.Count -gt 0) {
-        return @{ state = "unhealthy"; listeners = $listeners; process = $process; status = $null }
+    if ($listeners.Count -gt 0 -or $status) {
+        return @{ state = "unhealthy"; listeners = $listeners; process = $process; status = $status; managed = $managed }
     }
     return @{ state = "stopped"; listeners = @(); process = $process; status = $null }
 }
@@ -155,6 +200,25 @@ function Invoke-KolApi {
     )
     Require-Server | Out-Null
     return Invoke-Utf8Json $Method "$url$Path" $Body 60
+}
+
+function Get-DiscoveryStatus {
+    return Get-PipelineStatus
+}
+
+function Require-DiscoveryServer {
+    return Require-Server
+}
+
+function Invoke-KolDiscoveryApi {
+    param(
+        [ValidateSet("GET", "POST", "PATCH")]
+        [string]$Method,
+        [string]$Path,
+        $Body = $null
+    )
+    Require-DiscoveryServer | Out-Null
+    return Invoke-KolApi $Method $Path $Body
 }
 
 function Start-KolTask {
@@ -191,15 +255,16 @@ function Test-CodexBlocked {
 
 function Select-PipelineStatus {
     param($PipelineStatus)
-    if (-not $PipelineStatus) {
+    $probe = Get-ServerProbe
+    if (-not $PipelineStatus -or $probe.state -ne "ready") {
         $listeners = @(Get-ListenerProcess)
         $process = Get-ServerProcessInfo
         return @{
             ok = $false
             running = $false
             url = $url
-            state = if ($listeners.Count -gt 0) { "unhealthy" } else { "stopped" }
-            error = if ($listeners.Count -gt 0) {
+            state = if ($listeners.Count -gt 0 -or $PipelineStatus) { "unhealthy" } else { "stopped" }
+            error = if ($listeners.Count -gt 0 -or $PipelineStatus) {
                 "KOL research console has a listener but its health endpoint is not ready"
             } else { "KOL research console is not reachable" }
             listener_processes = $listeners
@@ -256,7 +321,6 @@ switch ($Action) {
                     morning = $health.morning_pipeline_task
                     market = $health.market_sync_task
                     returns = $health.return_task
-                    boards = if (Get-ScheduledTask -TaskName "Market_Board_Mainline_Daily" -ErrorAction SilentlyContinue) { "installed" } else { "missing" }
                 }
             } else { @{} }
         }
@@ -380,13 +444,29 @@ switch ($Action) {
         Write-Result (Start-KolTask "KOL_Morning_Pipeline")
     }
     "market" { Write-Result (Start-KolTask "Market_Data_Sync_Daily") }
+    "data-refresh" {
+        $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
+        $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
+        $arguments = @($cli, "kol-data-refresh", "--as-of", $AsOf)
+        if ($Notify) { $arguments += "--notify" }
+        if ($DryRun) { $arguments += "--dry-run" }
+        $output = & $python @arguments 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
+        $text = $output.Trim()
+        $first = $text.IndexOf('{')
+        $last = $text.LastIndexOf('}')
+        if ($first -lt 0 -or $last -le $first) {
+            throw "data-refresh returned no structured JSON: $text"
+        }
+        $jsonText = $text.Substring($first, $last - $first + 1)
+        try {
+            $json = $jsonText | ConvertFrom-Json
+        } catch {
+            throw "data-refresh returned invalid JSON: $($_.Exception.Message); output=$text"
+        }
+        $json | ConvertTo-Json -Depth 30 -Compress
+    }
     "returns" { Write-Result (Start-KolTask "KOL_Return_Tracker_Daily") }
-    "board-status" {
-        Write-Result (Invoke-KolApi "GET" "/api/board-mainline/health")
-    }
-    "board-sync" {
-        Write-Result (Start-KolTask "Market_Board_Mainline_Daily")
-    }
     "import-zhihu" {
         $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
         $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
@@ -454,5 +534,48 @@ switch ($Action) {
             $body.exclusion_reason = $Note
         }
         Write-Result (Invoke-KolApi "PATCH" "/api/events/$EventId" $body)
+    }
+    "platform-status" {
+        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/discovery/platforms")
+    }
+    "discover-accounts" {
+        if (-not $Query) { throw "discover-accounts requires -Query" }
+        $slug = $Platform.ToLowerInvariant()
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/runs" @{
+            platform = $slug
+            query = $Query
+            limit = $Limit
+        })
+    }
+    "list-candidates" {
+        $parameters = @()
+        if ($Platform -and $Platform -notin @("X", "Zhihu")) {
+            $parameters += "platform=$([Uri]::EscapeDataString($Platform.ToLowerInvariant()))"
+        }
+        if ($CandidateState) {
+            $parameters += "state=$([Uri]::EscapeDataString($CandidateState))"
+        }
+        $parameters += "limit=$Limit"
+        Write-Result (Invoke-KolDiscoveryApi "GET" ("/api/discovery/candidates?" + ($parameters -join "&")))
+    }
+    "score-candidate" {
+        if (-not $CandidateId) { throw "score-candidate requires -CandidateId" }
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/score" @{})
+    }
+    "reject-candidate" {
+        if (-not $CandidateId -or -not $Note) { throw "reject-candidate requires -CandidateId and -Note" }
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/reject" @{ note = $Note })
+    }
+    "retry-candidate" {
+        if (-not $CandidateId) { throw "retry-candidate requires -CandidateId" }
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/candidates/$CandidateId/retry" @{})
+    }
+    "kol-profile" {
+        if ($Id -le 0) { throw "kol-profile requires -Id" }
+        Write-Result (Invoke-KolDiscoveryApi "GET" "/api/discovery/kols/$Id/profile")
+    }
+    "fetch-kol" {
+        if ($Id -le 0) { throw "fetch-kol requires -Id" }
+        Write-Result (Invoke-KolDiscoveryApi "POST" "/api/discovery/kols/$Id/fetch" @{ count = [Math]::Min($Limit, 100) })
     }
 }

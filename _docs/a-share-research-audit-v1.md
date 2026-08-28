@@ -1,4 +1,4 @@
-﻿# A-Share Research Audit v1
+# A-Share Research Audit v1
 
 Updated: 2026-07-10
 
@@ -95,7 +95,7 @@ The local truth source is:
 Recommended runtime layout:
 
 ```text
-<AI_HUB_HOME>\ai-hub\_runtime\trading
+E:\aiworkspace\ai-hub\_runtime\trading
 ├─ raw
 │  ├─ akshare
 │  └─ baostock
@@ -185,13 +185,13 @@ Rules:
 ## Obsidian v1 Pages
 
 ```text
-<OBSIDIAN_VAULT>\04_Projects\A股防亏与研究审计系统.md
-<OBSIDIAN_VAULT>\04_Projects\股票线索池.md
-<OBSIDIAN_VAULT>\04_Projects\候选观察池.md
-<OBSIDIAN_VAULT>\04_Projects\深度研究池.md
-<OBSIDIAN_VAULT>\04_Projects\买入冲动记录.md
-<OBSIDIAN_VAULT>\04_Projects\KOL推荐事件审计.md
-<OBSIDIAN_VAULT>\06_Logs\投资研究复盘\
+F:\research\04_Projects\A股防亏与研究审计系统.md
+F:\research\04_Projects\股票线索池.md
+F:\research\04_Projects\候选观察池.md
+F:\research\04_Projects\深度研究池.md
+F:\research\04_Projects\买入冲动记录.md
+F:\research\04_Projects\KOL推荐事件审计.md
+F:\research\06_Logs\投资研究复盘\
 ```
 
 Stock audit cards are created only for deep research items.

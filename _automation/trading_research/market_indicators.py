@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import pandas as pd
 
@@ -93,5 +93,26 @@ def compute_daily_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     value["volume_ratio_5"] = volume / volume.shift(1).rolling(5, min_periods=5).mean()
     value["return_20d"] = closes / closes.shift(20) - 1.0
     value["distance_60d_high"] = closes / closes.rolling(60, min_periods=60).max() - 1.0
+    # Division by a zero or missing denominator (suspended days, zero-close
+    # data) yields inf/-inf; downstream consumers treat NaN as "no data", so
+    # normalise all non-finite indicator values to NaN.
+    indicator_columns = [
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma60",
+        "macd_dif",
+        "macd_dea",
+        "macd_hist",
+        "rsi14",
+        "atr14",
+        "atr14_pct",
+        "volume_ratio_5",
+        "return_20d",
+        "distance_60d_high",
+    ]
+    value.loc[:, indicator_columns] = value[indicator_columns].replace(
+        [float("inf"), float("-inf")], float("nan")
+    )
     value["indicator_version"] = INDICATOR_VERSION
     return value

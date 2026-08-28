@@ -1,4 +1,4 @@
-﻿# Data Sources
+# Data Sources
 
 The private runtime can use multiple public and licensed research providers.
 The public system mirror contains adapters and schemas only; it does not

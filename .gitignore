@@ -1,12 +1,19 @@
 .env
 *.env
+.env.*
+!.env.example
 *.key
 *.pem
 *.p12
 *.pfx
 secrets/
+credentials.json
+*_credentials.json
+cookies.json
+auth.json
 config.local.yaml
 config.private.yaml
+_automation/hermes-capture/config.yaml
 
 __pycache__/
 *.py[cod]
@@ -27,9 +34,21 @@ external/
 third_party/
 _runtime/
 _data/
+*.db
+*.db-*
+*.duckdb
+*.duckdb.*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.parquet
+*.pid
+*.jsonl
 
 *.log
 logs/
+coverage/
+.coverage
 tmp/
 temp/
 

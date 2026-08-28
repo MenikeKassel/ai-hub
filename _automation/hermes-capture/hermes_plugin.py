@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -164,65 +164,6 @@ def handle_capture(command: str, raw_args: str) -> str:
     return format_capture_response(run_pipeline(command, raw_args))
 
 
-ENGINE_CLI = Path(r"<AI_HUB_HOME>\second-brain-engine\src\cli.py")
-
-
-def run_engine(*args: str, timeout: int = 300) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, str(ENGINE_CLI), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
-    stdout = completed.stdout.strip()
-    try:
-        data = json.loads(stdout) if stdout else {}
-    except json.JSONDecodeError:
-        data = {}
-    if not data:
-        if stdout:
-            # 非 JSON 输出(如 status 文本)原样返回
-            return {"ok": True, "stdout": stdout, "_exit_code": completed.returncode}
-        return {"ok": False, "error": completed.stderr.strip() or f"engine exited with {completed.returncode}"}
-    data["_exit_code"] = completed.returncode
-    return data
-
-
-def handle_wiki(raw_args: str) -> str:
-    result = run_engine("wiki", (raw_args or "").strip())
-    if result.get("idempotent"):
-        return f"已存在(幂等命中)\nObsidian: {result.get('vault_path')}\n状态: {result.get('status')}"
-    if not result.get("ok"):
-        if result.get("blocked"):
-            return "阻断: 检测到敏感内容,不送编译。\n命中规则: " + ", ".join(result.get("rules", {}).keys())
-        return f"编译未发布: {result.get('decision', '失败')}\n原因: {result.get('reasons') or result.get('error')}"
-    lines = ["已提升", f"Obsidian: {result.get('vault_path')}"]
-    if result.get("commit"):
-        lines.append(f"Git: {result.get('commit')}")
-    lines.append(f"Notion 回填: {'成功' if result.get('notion_synced') else '待重试(notion_sync_pending)'}")
-    return "\n".join(lines)
-
-
-def handle_kb_status(raw_args: str) -> str:
-    result = run_engine("status", timeout=60)
-    if not result.get("ok"):
-        return f"状态查询失败: {result.get('error')}"
-    return f"引擎状态:\n{result.get('stdout', '')}"
-
-
-def handle_kb_compile(raw_args: str) -> str:
-    limit = (raw_args or "").strip()
-    if not limit.isdigit():
-        limit = "20"
-    result = run_engine("compile", "--limit", limit, "--source", "queue", "--budget", "50", timeout=600)
-    if not result.get("ok"):
-        return f"编译批次失败: {result.get('error')}"
-    return f"编译批次完成\n{json.dumps(result.get('batch_stats', {}), ensure_ascii=False)}"
-
-
 def register(ctx) -> None:
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_capture)
     ctx.register_command(
@@ -278,24 +219,6 @@ def register(ctx) -> None:
         handler=lambda raw_args: handle_capture("holding", raw_args),
         description="Capture a real holding or position audit note.",
         args_hint="<text>",
-    )
-    ctx.register_command(
-        "wiki",
-        handler=handle_wiki,
-        description="Compile a Notion/source item into a knowledge note (second-brain-engine).",
-        args_hint="<Notion URL | page_id | source URL>",
-    )
-    ctx.register_command(
-        "kb-status",
-        handler=handle_kb_status,
-        description="Show second-brain-engine queue/index/failure status.",
-        args_hint="",
-    )
-    ctx.register_command(
-        "kb-compile",
-        handler=handle_kb_compile,
-        description="Run a batch of automatic compilations from the history queue.",
-        args_hint="[limit]",
     )
     ctx.register_command(
         "day",

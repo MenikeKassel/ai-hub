@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -446,11 +447,16 @@ class RecommendationDraftRepository:
             "active_kols",
             "successful_kols",
             "failed_kols",
+            "platform_breakdown",
         )
         assignments = ["stage=?", "progress_current=?", "progress_total=?"]
         params: list[Any] = [stage, max(0, progress_current), max(0, progress_total)]
         for column in allowed:
             if column not in values:
+                continue
+            if column == "platform_breakdown":
+                assignments.append("platform_breakdown_json=?")
+                params.append(_json(values[column]))
                 continue
             assignments.append(f"{column}=?")
             params.append(max(0, int(values[column])))
@@ -476,7 +482,7 @@ class RecommendationDraftRepository:
                     progress_current=CASE WHEN progress_total>0 THEN progress_total ELSE progress_current END,
                     fetched_posts=?,reviewed_posts=?,
                     ready_drafts=?,attention_drafts=?,failed_posts=?,active_kols=?,successful_kols=?,
-                    failed_kols=?,errors_json=? WHERE run_id=?
+                    failed_kols=?,platform_breakdown_json=?,errors_json=? WHERE run_id=?
                 """,
                 (
                     status,
@@ -489,6 +495,7 @@ class RecommendationDraftRepository:
                     int(stages.get("active_kols", 0)),
                     int(stages.get("successful_kols", 0)),
                     int(stages.get("failed_kols", 0)),
+                    _json(stages.get("platform_breakdown", {})),
                     _json(errors),
                     run_id,
                 ),
@@ -504,6 +511,7 @@ class RecommendationDraftRepository:
         for row in rows:
             value = dict(row)
             value["errors"] = _loads(value.pop("errors_json", "[]"), [])
+            value["platform_breakdown"] = _loads(value.pop("platform_breakdown_json", "{}"), {})
             values.append(value)
         return values
 
@@ -534,10 +542,38 @@ class RecommendationDraftRepository:
                 """,
                 (review_date,),
             ).fetchone()
+            current_platform_rows = db.execute(
+                """
+                SELECT lower(platform) platform,COUNT(*) count
+                FROM kols
+                WHERE status='active'
+                  AND COALESCE(availability_status,'active') NOT IN
+                      ('suspended','deleted','protected','paused')
+                GROUP BY lower(platform)
+                """
+            ).fetchall()
+        current_platform_breakdown = {
+            str(item["platform"]): {
+                "target": int(item["count"]),
+                "success": 0,
+                "failed": 0,
+                "blocked": 0,
+                "rate_limited": 0,
+                "provider_failed": 0,
+                "pending": int(item["count"]),
+            }
+            for item in current_platform_rows
+        }
         if row is None:
             progress = dict(latest) if latest is not None else {}
             active_kols = int(progress.get("active_kols") or 0)
             successful_kols = int(progress.get("successful_kols") or 0)
+            platform_breakdown = _loads(
+                progress.get("platform_breakdown_json", "{}"), {}
+            )
+            if not platform_breakdown and successful_kols == 0:
+                active_kols = sum(item["target"] for item in current_platform_breakdown.values())
+                platform_breakdown = current_platform_breakdown
             return {
                 "status": "pending" if current <= deadline else "missed",
                 "deadline": deadline.isoformat(),
@@ -553,14 +589,19 @@ class RecommendationDraftRepository:
                 "stage": str(progress.get("stage") or "waiting"),
                 "progress_current": int(progress.get("progress_current") or 0),
                 "progress_total": int(progress.get("progress_total") or 0),
+                "platform_breakdown": platform_breakdown,
             }
         value = dict(row)
         completed_at = datetime.fromisoformat(str(value.get("completed_at") or value["started_at"]))
         errors = _loads(value.get("errors_json", "[]"), [])
+        platform_breakdown = _loads(value.get("platform_breakdown_json", "{}"), {})
         attempted_kols = int(value.get("successful_kols") or 0) + int(value.get("failed_kols") or 0)
         active_kols = attempted_kols or int(value.get("active_kols") or 0)
         successful_kols = int(value.get("successful_kols") or 0)
         failed_kols = int(value.get("failed_kols") or 0)
+        if not platform_breakdown and attempted_kols == 0:
+            active_kols = sum(item["target"] for item in current_platform_breakdown.values())
+            platform_breakdown = current_platform_breakdown
         if attempted_kols == 0 and coverage_row is not None:
             successful_kols = int(coverage_row["successful_kols"] or 0)
             failed_kols = int(coverage_row["failed_kols"] or 0)
@@ -586,6 +627,7 @@ class RecommendationDraftRepository:
             "stage": str(value.get("stage") or "completed"),
             "progress_current": int(value.get("progress_current") or 0),
             "progress_total": int(value.get("progress_total") or 0),
+            "platform_breakdown": platform_breakdown,
         }
 
     def migrate_legacy_review_queue(self) -> dict[str, int]:
@@ -661,6 +703,92 @@ class RecommendationDraftRepository:
                 params,
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def create_bulk_snapshot(
+        self,
+        *,
+        review_date: str,
+        queue_scope: str,
+        status_filter: str = "ready",
+        ttl_seconds: int = 300,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if queue_scope not in {"morning", "backlog"}:
+            raise ValueError("invalid queue scope")
+        if status_filter != "ready":
+            raise ValueError("bulk approval only supports ready drafts")
+        drafts = self.list_drafts(
+            review_date=review_date,
+            queue_scope=queue_scope,
+            status=None,
+            limit=max(1, min(limit, 200)),
+        )
+        approvable: list[dict[str, Any]] = []
+        skipped: dict[str, int] = {}
+        for draft in drafts:
+            if draft.get("status") not in ACTIVE_DRAFT_STATUSES:
+                continue
+            reasons = list(draft.get("attention_reasons") or [])
+            if reasons:
+                for reason in reasons:
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                continue
+            approvable.append(draft)
+        token = secrets.token_urlsafe(24)
+        created = datetime.now(timezone.utc)
+        expires = created + timedelta(seconds=max(30, min(ttl_seconds, 900)))
+        with self.post_store.connect() as db:
+            db.execute(
+                """
+                INSERT INTO recommendation_bulk_snapshots(
+                    token,review_date,queue_scope,status_filter,draft_ids_json,created_at,expires_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    token,
+                    review_date,
+                    queue_scope,
+                    status_filter,
+                    _json([int(item["id"]) for item in approvable]),
+                    created.isoformat(timespec="seconds"),
+                    expires.isoformat(timespec="seconds"),
+                ),
+            )
+            db.execute(
+                "DELETE FROM recommendation_bulk_snapshots WHERE expires_at<? OR used_at<>''",
+                (created.isoformat(timespec="seconds"),),
+            )
+        return {
+            "snapshot_token": token,
+            "review_date": review_date,
+            "queue_scope": queue_scope,
+            "status_filter": status_filter,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "drafts": approvable,
+            "count": len(approvable),
+            "skipped": skipped,
+        }
+
+    def consume_bulk_snapshot(self, token: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self.post_store.connect() as db:
+            row = db.execute(
+                "SELECT * FROM recommendation_bulk_snapshots WHERE token=?",
+                (token,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("bulk approval snapshot not found or expired")
+            if str(row["used_at"] or ""):
+                raise ValueError("bulk approval snapshot has already been used")
+            if str(row["expires_at"]) < now:
+                raise ValueError("bulk approval snapshot has expired")
+            db.execute(
+                "UPDATE recommendation_bulk_snapshots SET used_at=? WHERE token=? AND used_at=''",
+                (now, token),
+            )
+        value = dict(row)
+        value["draft_ids"] = _loads(value.pop("draft_ids_json", "[]"), [])
+        return value
 
     def get_draft(self, draft_id: int) -> dict[str, Any]:
         with self.post_store.connect() as db:

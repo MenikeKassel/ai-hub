@@ -1,21 +1,30 @@
-﻿notion_database_id: "REPLACE_WITH_NOTION_DATABASE_ID"
+# ai-hub 公开版 capture 配置示例。
+# 复制为 _automation/hermes-capture/config.yaml 后按需修改。
+# 权威键集合见 _automation/hermes-capture/capture_pipeline.py 的 load_config 默认值;
+# 未列出的键不会被读取(已移除过时的 max_notion_block_chars、field_* 系列)。
+notion_database_id: "REPLACE_WITH_NOTION_DATABASE_ID"
 notion_version: "2022-06-28"
-vault_path: "<OBSIDIAN_VAULT>"
+# vault_path 已废弃(第二大脑项目终止,2026-08-06;Obsidian 写入停用),保留仅为兼容旧配置
+vault_path: ""
 obsidian_inbox_dir: "00_Inbox"
-notion_env_files: "C:\\Users\\YOUR_USER\\AppData\\Local\\hermes\\.env;C:\\Users\\YOUR_USER\\.hermes\\.env"
+obsidian_project_allowlist: ""
+notion_env_files: "C:/Users/YOUR_USER/.hermes/.env;C:/Users/YOUR_USER/AppData/Local/hermes/.env"
 max_content_chars: 8000
-max_notion_block_chars: 1800
-
-field_title: "日期"
-field_url: "URL"
-field_content: "text"
-field_author: "作者"
-field_author_username: "作者用户名"
-field_tags: "Tags"
-field_info_type: "信息类别"
-field_notion_date: "Notion日期"
-field_status: "状态"
-field_source_type: "来源类型"
-field_project: "项目归属"
-field_value_score: "价值评分"
-field_obsidian_path: "Obsidian路径"
+enable_zhihu_local_browser: "true"
+zhihu_local_browser: "edge"
+zhihu_local_browser_path: "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+zhihu_local_browser_profile: "Default"
+zhihu_local_user_data_dir: "C:/Users/YOUR_USER/AppData/Local/hermes/browser-profiles/zhihu-edge"
+zhihu_local_cdp_port: 9222
+zhihu_local_chrome_profile: "Profile 2"
+zhihu_local_strict: "true"
+zhihu_local_max_answers: 12
+zhihu_local_max_scrolls: 10
+zhihu_local_timeout: 90
+enable_mediacrawler_queue: "true"
+mediacrawler_queue_sources: "小红书;知乎;抖音;B站"
+mediacrawler_max_comments: 20
+mediacrawler_max_notes: 5
+mediacrawler_comments: "true"
+mediacrawler_sub_comments: "false"
+mediacrawler_headless: "false"

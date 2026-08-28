@@ -1,4 +1,4 @@
-﻿"""Deterministic, privacy-preserving export for the public KOL audit dataset.
+"""Deterministic, privacy-preserving export for the public KOL audit dataset.
 
 The exporter deliberately reads the private runtime as a source of facts only. It
 never writes to SQLite/DuckDB and never copies provider payloads, media or full
@@ -41,7 +41,7 @@ _CONTACT_RE = re.compile(
 _FORBIDDEN_EXPORT_RE = re.compile(
     r"(?i)(?:auth_token|\bct0\b|appsecret|api[_ -]?key\s*[:=]|bearer\s+[a-z0-9._-]{16,}|"
     r"raw_json|local_media_json|notion_url|cookie|password|private_key|C:\\Users\\|"
-    r"<AI_HUB_HOME>|<OBSIDIAN_VAULT>|<MARKET_DATA_HOME>|<PURCHASED_DATA_HOME>)"
+    r"E:\\aiworkspace|F:\\research|D:\\ai-data|D:\\a_data)"
 )
 _DROP_KEYS = {
     "text", "article_text", "quoted_text", "raw", "raw_json", "media", "media_json",
@@ -484,10 +484,18 @@ class PublicDatasetExporter:
         import duckdb
         con = duckdb.connect(str(self.market_db), read_only=True)
         try:
+            available = {
+                str(row[0])
+                for row in con.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_name='event_technical_context'"
+                ).fetchall()
+            }
+            release_column = ",foundation_release_id" if "foundation_release_id" in available else ""
             cursor = con.execute(
                 "select event_id,symbol,posted_at,as_of_trade_date,adjustment,rsi14,macd_dif,macd_dea,macd_hist,macd_hist_pct,"
                 "atr14,atr14_pct,volume_ratio_5,return_20d,distance_60d_high,history_bars,status,warnings_json,feature_version,"
-                "source_hash,computed_at from event_technical_context"
+                f"source_hash,computed_at{release_column} from event_technical_context"
             )
             fields = [item[0] for item in cursor.description]
             rows = [dict(zip(fields, row)) for row in cursor.fetchall()]

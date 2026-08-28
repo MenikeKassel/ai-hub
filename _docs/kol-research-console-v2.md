@@ -1,4 +1,4 @@
-﻿# KOL Research Console v2
+# KOL Research Console v2
 
 ## Runtime
 
@@ -94,8 +94,8 @@ is retained.
 If authentication fails, refresh the two values and run:
 
 ```powershell
-& '<AI_HUB_HOME>\ai-hub\_runtime\venv-trading\Scripts\python.exe' `
-  '<AI_HUB_HOME>\ai-hub\_automation\trading_research\trading_cli.py' `
+& 'E:\aiworkspace\ai-hub\_runtime\venv-trading\Scripts\python.exe' `
+  'E:\aiworkspace\ai-hub\_automation\trading_research\trading_cli.py' `
   kol-post-doctor
 ```
 

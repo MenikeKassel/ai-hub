@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import tempfile
 import unittest
+import json
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +25,10 @@ from kol_posts import (  # noqa: E402
     TwitterCliProvider,
     TwitterProviderError,
     TwitterRateLimitError,
+    XSessionManager,
+    FxTwitterPublicPostProvider,
+    PublicBackupGate,
+    PublicBackupNotFoundError,
     extract_zhihu_digest_attributions,
     initialize_seed_kols,
     load_stock_aliases,
@@ -64,6 +70,105 @@ def tweet_payload(**overrides: object) -> dict[str, object]:
 
 
 class StoreTests(unittest.TestCase):
+    def test_public_backup_is_cookie_free_and_preserves_rich_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            response = {
+                "code": 200,
+                "tweet_id": "2076000000000000001",
+                "tweet": {
+                    "id": "2076000000000000001",
+                    "text": "public text",
+                    "author": {"name": "Alice", "screen_name": "alice"},
+                    "created_at": "Sat Jul 04 12:00:00 +0000 2026",
+                    "media": {"all": [{"type": "photo", "url": "https://example.test/a.jpg"}]},
+                    "quote": {"id": "2076000000000000002", "text": "quoted", "author": {"name": "Bob", "screen_name": "bob"}},
+                },
+            }
+
+            class FakeResponse:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+                def read(self, _limit): return json.dumps(response).encode("utf-8")
+
+            gate = PublicBackupGate(store)
+            provider = FxTwitterPublicPostProvider(gate)
+            with patch("kol_posts.urllib.request.urlopen", return_value=FakeResponse()):
+                payload = provider.fetch_post("https://x.com/alice/status/2076000000000000001", batch_key="public-test")
+            self.assertEqual("2076000000000000001", payload["id"])
+            self.assertEqual("public text", payload["text"])
+            self.assertEqual("quoted", payload["quotedTweet"]["text"])
+            self.assertEqual("photo", payload["media"][0]["type"])
+            self.assertEqual(1, gate.status()["public_used_24h"])
+
+    def test_public_backup_rejects_nonstandard_url_and_404_is_retry_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            provider = FxTwitterPublicPostProvider(PublicBackupGate(store))
+            with self.assertRaises(ValueError):
+                provider.fetch_post("https://example.com/alice/status/2076000000000000001", batch_key="bad")
+            with patch("kol_posts.urllib.request.urlopen", side_effect=urllib.error.HTTPError("https://api.fxtwitter.com", 404, "not found", {}, None)):
+                with self.assertRaises(PublicBackupNotFoundError):
+                    provider.fetch_post("https://x.com/alice/status/2076000000000000001", batch_key="not-found")
+            with store.connect() as db:
+                self.assertEqual(1, db.execute("select count(*) from x_request_budget where source='public' and status='failed'").fetchone()[0])
+
+    def test_x_session_pool_rotates_and_shares_duplicate_identity_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            payload = {"auth_token": "a" * 20, "ct0": "b" * 20}
+            with patch.object(XSessionManager, "_read_payload", classmethod(lambda cls, slot: payload if int(slot) in {1, 2} else None)):
+                manager = XSessionManager(store)
+                manager.mark_verified(1, "1001", "reader-one")
+                manager.mark_verified(2, "1001", "reader-one-duplicate")
+                first = manager.batch_slot("batch-1", "freshness")
+                request_id = manager.reserve_request(first, batch_key="batch-1", operation="test", cost=2)
+                manager.finish_request(request_id)
+                usage_one = manager.policy_status()["slots"][0]["used_24h"]
+                usage_two = manager.policy_status()["slots"][1]["used_24h"]
+                self.assertEqual(2, usage_one)
+                self.assertEqual(2, usage_two)
+                self.assertTrue(manager.policy_status()["slots"][1]["duplicate_identity"])
+
+    def test_x_fetch_is_blocked_once_without_account_failures_when_no_session_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            store.add_kol("X one", "x_one")
+            store.add_kol("X two", "x_two")
+            with patch.object(
+                XSessionManager,
+                "_read_payload",
+                classmethod(lambda cls, slot: None),
+            ):
+                manager = XSessionManager(store)
+
+                class GuardedProvider:
+                    name = "twitter-cli"
+                    session_manager = manager
+                    calls = 0
+
+                    def fetch_user_posts(self, handle, max_count):
+                        self.calls += 1
+                        raise AssertionError("provider should not be called")
+
+                provider = GuardedProvider()
+                result = run_post_fetch(
+                    store,
+                    provider,
+                    platforms={"x"},
+                    sleep_seconds=0,
+                    retry_delays=(),
+                    download_media=False,
+                )
+
+            self.assertEqual(0, provider.calls)
+            self.assertEqual(0, result.failed_kols)
+            self.assertEqual(["x"], result.blocked_platforms)
+            self.assertEqual("blocked", store.recent_fetch_runs(1)[0]["status"])
+            with store.connect() as db:
+                self.assertEqual(0, db.execute("SELECT COUNT(*) FROM x_request_budget").fetchone()[0])
+
     def test_fetch_run_progress_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
@@ -97,17 +202,17 @@ class StoreTests(unittest.TestCase):
 
     def test_zhihu_digest_is_secondhand_and_keeps_attributed_authors(self) -> None:
         text = (
-            "Public KOL 32\n本周主题：看好能源。\n本周操作\n买入某能源股。\n"
-            "Public KOL 50\n无\nPublic KOL 20\n本周主题：半导体对冲。\n本周观点\n控制风险。"
+            "奥特之父\n本周主题：看好能源。\n本周操作\n买入某能源股。\n"
+            "龙开\n无\nDeep Van\n本周主题：半导体对冲。\n本周观点\n控制风险。"
         )
         attributions = extract_zhihu_digest_attributions(text)
-        self.assertEqual(["Public KOL 32", "Public KOL 20", "Public KOL 50"], [item["author_name"] for item in attributions])
+        self.assertEqual(["奥特之父", "Deep Van", "龙开"], [item["author_name"] for item in attributions])
 
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "Public KOL 9",
-                "public_kol_9",
+                "NEVEN",
+                "seven-38-40-58",
                 platform="Zhihu",
                 tracking_mode="aggregation",
             )
@@ -119,7 +224,7 @@ class StoreTests(unittest.TestCase):
                     "text": text,
                     "articleTitle": "如何评价今日A股行情？",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2062243986040001481",
-                    "author": {"name": "Public KOL 9", "screenName": "public_kol_9"},
+                    "author": {"name": "NEVEN", "screenName": "seven-38-40-58"},
                     "createdAtISO": "2026-07-20T01:00:00Z",
                     "metrics": {"likes": 12},
                 },
@@ -130,9 +235,9 @@ class StoreTests(unittest.TestCase):
             store.replace_digest_attributions(
                 post.post_id,
                 post.raw_payload["attributions"] + [
-                    {"author_name": "public_kol_32", "section_text": "旧摘要使用主页 handle。"},
+                    {"author_name": "xu-ze-qiu", "section_text": "旧摘要使用主页 handle。"},
                     {
-                        "author_name": "Public KOL 20的一周操作总结",
+                        "author_name": "Deep Van的一周操作总结",
                         "section_text": "旧摘要使用固定标题后缀。",
                     },
                 ],
@@ -144,29 +249,29 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(5, len(store.list_digest_authors()))
             updated = store.upsert_digest_author_profiles([
                 {
-                    "display_name": "Public KOL 32",
-                    "profile_url": "https://www.zhihu.com/people/public_kol_32",
+                    "display_name": "奥特之父",
+                    "profile_url": "https://www.zhihu.com/people/xu-ze-qiu",
                 },
                 {
-                    "display_name": "Public KOL 20",
-                    "profile_url": "https://www.zhihu.com/people/public_kol_20",
+                    "display_name": "Deep Van",
+                    "profile_url": "https://www.zhihu.com/people/yang-lei-96-72",
                 },
             ])
             authors = {item["author_name"]: item for item in store.list_digest_authors()}
             self.assertEqual(2, len(updated))
             self.assertEqual(3, len(authors))
-            self.assertEqual("public_kol_32", authors["Public KOL 32"]["profile_handle"])
-            self.assertEqual(2, authors["Public KOL 32"]["summary_count"])
-            self.assertEqual("linked_only", authors["Public KOL 20"]["tracking_status"])
-            self.assertEqual(2, authors["Public KOL 20"]["summary_count"])
-            self.assertEqual("", authors["Public KOL 50"]["profile_url"])
+            self.assertEqual("xu-ze-qiu", authors["奥特之父"]["profile_handle"])
+            self.assertEqual(2, authors["奥特之父"]["summary_count"])
+            self.assertEqual("linked_only", authors["Deep Van"]["tracking_status"])
+            self.assertEqual(2, authors["Deep Van"]["summary_count"])
+            self.assertEqual("", authors["龙开"]["profile_url"])
 
     def test_zhihu_direct_profile_answer_can_be_a_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "Public KOL 20",
-                "public_kol_20",
+                "Deep Van",
+                "yang-lei-96-72",
                 platform="Zhihu",
                 tracking_mode="direct_profile",
             )
@@ -178,7 +283,7 @@ class StoreTests(unittest.TestCase):
                     "text": str(tweet_payload()["text"]),
                     "articleTitle": "A share morning plan",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2063202890978693514",
-                    "author": {"name": "Public KOL 20", "screenName": "public_kol_20"},
+                    "author": {"name": "Deep Van", "screenName": "yang-lei-96-72"},
                     "createdAtISO": "2026-07-22T02:05:01Z",
                     "updatedAtISO": "2026-07-22T02:05:01Z",
                 },
@@ -196,8 +301,8 @@ class StoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             kol_id, _ = store.add_kol(
-                "Public KOL 20",
-                "public_kol_20",
+                "Deep Van",
+                "yang-lei-96-72",
                 platform="Zhihu",
                 tracking_mode="direct_profile",
             )
@@ -209,7 +314,7 @@ class StoreTests(unittest.TestCase):
                     "text": str(tweet_payload()["text"]),
                     "articleTitle": "Historical answer",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2063202890978693514",
-                    "author": {"name": "Public KOL 20", "screenName": "public_kol_20"},
+                    "author": {"name": "Deep Van", "screenName": "yang-lei-96-72"},
                     "createdAtISO": "2026-07-01T02:05:01Z",
                     "updatedAtISO": "2026-07-01T02:05:01Z",
                 },
@@ -238,6 +343,32 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(x_id, store.get_kol_by_handle("same", "X")["id"])
             self.assertEqual(z_id, store.get_kol_by_handle("same", "Zhihu")["id"])
 
+    def test_account_availability_is_independent_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Fixture KOL", "fixture")
+            before = store.get_kol(kol_id)
+            assert before is not None
+            changed = store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            self.assertEqual("rate_limited", changed["availability_status"])
+            self.assertEqual(before["fetch_status"], changed["fetch_status"])
+            store.set_account_availability(
+                kol_id,
+                "rate_limited",
+                reason="provider returned 429",
+                source="fixture",
+            )
+            history = store.account_availability_history(kol_id)
+            self.assertEqual(1, len(history))
+            restored = store.set_account_availability(kol_id, "active", source="fixture")
+            self.assertEqual("active", restored["availability_status"])
+            self.assertEqual(2, len(store.account_availability_history(kol_id)))
+
     def test_x_auth_failure_does_not_block_zhihu_provider(self) -> None:
         class BrokenX:
             name = "twitter-cli"
@@ -251,10 +382,10 @@ class StoreTests(unittest.TestCase):
             def fetch_user_posts(self, handle, max_count):
                 return [{
                     "id": "2062243986040001481",
-                    "text": "Public KOL 32\n本周主题：能源。",
+                    "text": "奥特之父\n本周主题：能源。",
                     "articleTitle": "A股行情",
                     "url": "https://www.zhihu.com/question/2060450831401497712/answer/2062243986040001481",
-                    "author": {"name": "Public KOL 9"},
+                    "author": {"name": "NEVEN"},
                     "createdAtISO": "2026-07-20T01:00:00Z",
                 }]
 
@@ -262,7 +393,7 @@ class StoreTests(unittest.TestCase):
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             store.add_kol("X one", "x_one")
             store.add_kol("X two", "x_two")
-            store.add_kol("Public KOL 9", "public_kol_9", platform="Zhihu", tracking_mode="aggregation")
+            store.add_kol("NEVEN", "seven-38-40-58", platform="Zhihu", tracking_mode="aggregation")
             result = run_post_fetch(
                 store,
                 BrokenX(),
@@ -276,6 +407,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(2, result.failed_kols)
         self.assertEqual(1, result.new_posts)
         self.assertEqual("failed", result.auth_status)
+        self.assertEqual(2, result.platform_breakdown["x"]["target"])
+        self.assertEqual(2, result.platform_breakdown["x"]["failed"])
+        self.assertEqual(1, result.platform_breakdown["zhihu"]["success"])
 
     def test_stale_fetch_run_is_closed_without_touching_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,7 +491,7 @@ Path(a.output).write_text(json.dumps({items[0]['post_id']:{'text':'002414 高德
 
             self.assertEqual(6, created)
             self.assertEqual(
-                {"public_kol_1", "public_kol_2", "public_kol_3", "public_kol_4", "public_kol_5", "Public KOL 6"},
+                {"agudianjinshou", "WwQQ129146", "sszcw", "bafeite1234", "Mimiwftt", "Hoyooyoo"},
                 handles,
             )
             self.assertNotIn("aleabitoreddit", handles)
@@ -367,7 +501,7 @@ Path(a.output).write_text(json.dumps({items[0]['post_id']:{'text':'002414 高德
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             assert kol is not None
             post = normalise_twitter_post(tweet_payload(), kol)
 
@@ -496,6 +630,32 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("long", result.direction)
         self.assertIn("stock_code", result.reasons)
 
+    def test_rule_classifier_neutral_risk_text_has_no_direction(self) -> None:
+        # "风险" is a neutral word; it must not flip a post to short, and a
+        # bare "关注" without bullish context must not force long.
+        for text in ("注意风险", "关注该股风险", "该股值得关注"):
+            result = RuleClassifier().classify(
+                {"text": text, "post_type": "original", "media": []}
+            )
+            self.assertEqual("", result.direction, f"neutral text misclassified: {text}")
+
+    def test_rule_classifier_tie_between_directional_words_yields_no_direction(self) -> None:
+        # One bullish and one bearish token is a tie -> no direction.
+        result = RuleClassifier().classify(
+            {"text": "有机会但建议卖出", "post_type": "original", "media": []}
+        )
+        self.assertEqual("", result.direction)
+
+    def test_rule_classifier_clear_long_and_short_directions(self) -> None:
+        long_result = RuleClassifier().classify(
+            {"text": "推荐买入，布局机会很大", "post_type": "original", "media": []}
+        )
+        self.assertEqual("long", long_result.direction)
+        short_result = RuleClassifier().classify(
+            {"text": "该股风险很大，建议回避离场", "post_type": "original", "media": []}
+        )
+        self.assertEqual("short", short_result.direction)
+
     def test_retweet_cannot_become_direct_candidate(self) -> None:
         kol = {"id": 1, "handle": "example", "display_name": "示例KOL"}
         post = normalise_twitter_post(
@@ -572,7 +732,7 @@ class ClassificationTests(unittest.TestCase):
             root = Path(tmp)
             store = KolPostStore(root / "posts.db", root / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(tweet_payload(text=""), kol)
             store.upsert_post(post)
             image = root / "media" / post.post_id / "1.jpg"
@@ -617,7 +777,7 @@ class ClassificationTests(unittest.TestCase):
             root = Path(tmp)
             store = KolPostStore(root / "posts.db", root / "media")
             initialize_seed_kols(store)
-            kol = store.get_kol_by_handle("public_kol_2")
+            kol = store.get_kol_by_handle("WwQQ129146")
             post = normalise_twitter_post(tweet_payload(text="普通闲聊"), kol)
             store.upsert_post(post)
             image = root / "media" / post.post_id / "1.jpg"
@@ -965,7 +1125,7 @@ class ProviderAndFetchTests(unittest.TestCase):
 
         self.assertEqual([100, 50], requested)
 
-    def test_rate_limit_uses_finite_retry(self) -> None:
+    def test_rate_limit_opens_cooldown_without_repeating_the_provider_call(self) -> None:
         calls = 0
 
         class Provider:
@@ -989,9 +1149,9 @@ class ProviderAndFetchTests(unittest.TestCase):
                 retry_delays=(0, 0),
             )
 
-        self.assertEqual(3, calls)
-        self.assertEqual(1, result.successful_kols)
-        self.assertEqual(0, result.failed_kols)
+        self.assertEqual(1, calls)
+        self.assertEqual(0, result.successful_kols)
+        self.assertEqual(1, result.failed_kols)
 
     def test_authentication_failure_counts_all_unfetched_accounts(self) -> None:
         calls = 0

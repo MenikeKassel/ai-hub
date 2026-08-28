@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -71,6 +71,10 @@ def _enrich_daily(frame: pd.DataFrame) -> pd.DataFrame:
     value["amplitude_pct"] = (high - low) / preclose
     volume = pd.to_numeric(value.get("volume"), errors="coerce")
     value["volume_ratio_5"] = volume / volume.shift(1).rolling(5, min_periods=5).mean()
+    # Zero preclose or zero trailing volume yields inf/-inf; downstream
+    # consumers expect NaN for missing values.
+    for column in ("change_pct", "amplitude_pct", "volume_ratio_5"):
+        value[column] = value[column].replace([float("inf"), float("-inf")], float("nan"))
     return value
 
 

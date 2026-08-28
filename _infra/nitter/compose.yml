@@ -1,4 +1,4 @@
-﻿services:
+services:
   nitter:
     image: zedeus/nitter@sha256:e5a51a51e783acb3646ea71b95f190cb23a9ec4de78483c9815f4052a1723bd9
     container_name: nitter

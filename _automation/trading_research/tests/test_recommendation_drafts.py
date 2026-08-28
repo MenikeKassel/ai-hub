@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import tempfile
@@ -266,7 +266,12 @@ class RecommendationDraftRepositoryTests(unittest.TestCase):
             repository.finish_morning_run(
                 run_id,
                 status="completed",
-                stages={"active_kols": 12, "successful_kols": 12, "failed_kols": 0},
+                stages={
+                    "active_kols": 12,
+                    "successful_kols": 12,
+                    "failed_kols": 0,
+                    "platform_breakdown": {"x": {"target": 12, "success": 12}},
+                },
                 errors=[],
             )
             with store.connect() as db:
@@ -283,6 +288,7 @@ class RecommendationDraftRepositoryTests(unittest.TestCase):
             self.assertEqual("ready", result["status"])
             self.assertEqual(1.0, result["coverage"])
             self.assertEqual(12, result["successful_kols"])
+            self.assertEqual(12, result["platform_breakdown"]["x"]["success"])
 
     def test_recovery_run_reuses_prior_fetch_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 
@@ -42,6 +43,7 @@ class EventTechnicalContext:
     source_hash: str
     error: str
     computed_at: str
+    foundation_release_id: str = ""
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -67,6 +69,7 @@ def event_context_snapshot_id(
     status: str,
     warnings: list[str],
     error: str = "",
+    foundation_release_id: str = "",
 ) -> str:
     payload = json.dumps(
         {
@@ -77,6 +80,7 @@ def event_context_snapshot_id(
             "status": status,
             "warnings": warnings,
             "error": error,
+            "foundation_release_id": foundation_release_id,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -170,6 +174,7 @@ def compute_event_technical_context(
     qfq_prices: pd.DataFrame,
     expected_trade_date: date | str | None = None,
     computed_at: str | None = None,
+    foundation_release_id: str = "",
 ) -> EventTechnicalContext:
     cutoff = event_context_cutoff(posted_at)
     expected = date.fromisoformat(expected_trade_date) if isinstance(expected_trade_date, str) else expected_trade_date
@@ -187,11 +192,13 @@ def compute_event_technical_context(
             source_hash="",
             status=status,
             warnings=warnings,
+            foundation_release_id=foundation_release_id,
         )
         return EventTechnicalContext(
             snapshot_id, event_id, FEATURE_VERSION, input_hash, symbol, posted_at, expected_value, "", ADJUSTMENT,
             None, None, None, None, None, None, None, None, None, None,
             0, status, warnings, "", "", timestamp,
+            foundation_release_id,
         )
 
     warnings: list[str] = []
@@ -220,12 +227,18 @@ def compute_event_technical_context(
     else:
         warnings.append("insufficient_volume_ratio_5")
 
-    return_20d = float(closes.iloc[-1] / closes.iloc[-21] - 1.0) if len(history) >= 21 else None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return_20d = float(closes.iloc[-1] / closes.iloc[-21] - 1.0) if len(history) >= 21 else None
+    if return_20d is None or not np.isfinite(return_20d):
+        return_20d = None
     if return_20d is None:
         warnings.append("insufficient_return_20d")
-    distance_60d_high = (
-        float(latest_close / closes.iloc[-60:].max() - 1.0) if len(history) >= 60 else None
-    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        distance_60d_high = (
+            float(latest_close / closes.iloc[-60:].max() - 1.0) if len(history) >= 60 else None
+        )
+    if distance_60d_high is None or not np.isfinite(distance_60d_high):
+        distance_60d_high = None
     if distance_60d_high is None:
         warnings.append("insufficient_distance_60d_high")
 
@@ -241,6 +254,7 @@ def compute_event_technical_context(
         source_hash=source_hash,
         status=status,
         warnings=warnings,
+        foundation_release_id=foundation_release_id,
     )
     return EventTechnicalContext(
         snapshot_id=snapshot_id,
@@ -268,6 +282,7 @@ def compute_event_technical_context(
         source_hash=source_hash,
         error="",
         computed_at=timestamp,
+        foundation_release_id=foundation_release_id,
     )
 
 
@@ -279,6 +294,7 @@ def failed_event_technical_context(
     error: str,
     expected_trade_date: date | str | None = None,
     computed_at: str | None = None,
+    foundation_release_id: str = "",
 ) -> EventTechnicalContext:
     expected = date.fromisoformat(expected_trade_date) if isinstance(expected_trade_date, str) else expected_trade_date
     expected_value = expected.isoformat() if expected else ""
@@ -292,10 +308,12 @@ def failed_event_technical_context(
         status="failed",
         warnings=warnings,
         error=clean_error,
+        foundation_release_id=foundation_release_id,
     )
     return EventTechnicalContext(
         snapshot_id, event_id, FEATURE_VERSION, input_hash, symbol, posted_at, expected_value,
         "", ADJUSTMENT, None, None, None, None, None, None, None, None, None,
         None, 0, "failed", warnings, "", clean_error,
         computed_at or datetime.now().astimezone().isoformat(timespec="seconds"),
+        foundation_release_id,
     )

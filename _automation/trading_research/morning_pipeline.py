@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 from datetime import date, datetime, time as clock_time, timedelta
@@ -13,6 +13,7 @@ from kol_posts import (
 )
 from recommendation_processing import materialize_recommendation_drafts
 from recommendation_drafts import RecommendationDraftRepository
+from model_budget import ModelDailyBudget
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -30,6 +31,9 @@ class MorningPipeline:
         ocr_classifier: Any | None = None,
         fetcher: Callable[[], Any] | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        active_kol_count: int | None = None,
+        market_writes_enabled: bool = True,
+        model_daily_limit: int = 250,
     ):
         self.post_store = post_store
         self.market_store = market_store
@@ -38,6 +42,9 @@ class MorningPipeline:
         self.ocr_classifier = ocr_classifier
         self.fetcher = fetcher
         self.now_provider = now_provider or (lambda: datetime.now(SHANGHAI))
+        self.active_kol_count = active_kol_count
+        self.market_writes_enabled = market_writes_enabled
+        self.model_budget = ModelDailyBudget(post_store, daily_limit=model_daily_limit)
         self.drafts = RecommendationDraftRepository(post_store)
 
     def run(
@@ -73,10 +80,20 @@ class MorningPipeline:
             "failed_posts": 0,
             "ocr_completed": 0,
             "ocr_failed": 0,
-            "active_kols": len(self.post_store.list_kols("active")),
+            "active_kols": (
+                self.active_kol_count
+                if self.active_kol_count is not None
+                else len(self.post_store.list_kols("active"))
+            ),
             "successful_kols": 0,
             "failed_kols": 0,
+            "platform_breakdown": {},
+            "configured_disabled_platforms": [],
         }
+        budget_status = self.model_budget.status()
+        stages["model_daily_limit"] = int(budget_status["daily_limit"])
+        stages["model_daily_used"] = int(budget_status["attempted"])
+        stages["model_daily_remaining"] = int(budget_status["remaining"])
         errors: list[str] = []
         try:
             self.drafts.update_morning_run(
@@ -108,6 +125,42 @@ class MorningPipeline:
                         getattr(fetched, "failed_kols", 0)
                         if not isinstance(fetched, dict)
                             else fetched.get("failed_kols", 0)
+                    )
+                    stages["platform_breakdown"] = (
+                        getattr(fetched, "platform_breakdown", {})
+                        if not isinstance(fetched, dict)
+                        else fetched.get("platform_breakdown", {})
+                    ) or {}
+                    fetch_errors = (
+                        getattr(fetched, "errors", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("errors", [])
+                    ) or []
+                    blocked_platforms = (
+                        getattr(fetched, "blocked_platforms", [])
+                        if not isinstance(fetched, dict)
+                        else fetched.get("blocked_platforms", [])
+                    ) or []
+                    benign_markers = (
+                        "no verified x session",
+                        "x collection is manually paused",
+                        "x collection is cooling down",
+                    )
+                    benign_blocked = [
+                        str(error) for error in fetch_errors
+                        if any(marker in str(error).casefold() for marker in benign_markers)
+                    ]
+                    stages["configured_disabled_platforms"] = list(blocked_platforms) if benign_blocked else []
+                    errors.extend(
+                        f"fetch: {str(error)[:1000]}"
+                        for error in fetch_errors
+                        if str(error) not in benign_blocked
+                    )
+                    errors.extend(
+                        f"fetch: {platform} provider circuit is blocked"
+                        for platform in blocked_platforms
+                        if platform not in stages["configured_disabled_platforms"]
+                        if not any(str(platform) in str(error) for error in errors)
                     )
                     queue_total = int(
                         getattr(fetched, "queue_total", 0)
@@ -171,10 +224,13 @@ class MorningPipeline:
             prefetch_symbols = sorted(
                 {item["symbol"] for item in visible if item["status"] in {"ready", "needs_attention"}}
             )
-            for symbol in prefetch_symbols:
-                if self.market_store.get_instrument(symbol):
-                    self.market_store.enqueue_sync(symbol, reason=f"morning_review:{as_of.isoformat()}")
-            stages["prefetched_symbols"] = len(prefetch_symbols)
+            if self.market_writes_enabled:
+                for symbol in prefetch_symbols:
+                    if self.market_store.get_instrument(symbol):
+                        self.market_store.enqueue_sync(symbol, reason=f"morning_review:{as_of.isoformat()}")
+                stages["prefetched_symbols"] = len(prefetch_symbols)
+            else:
+                stages["prefetched_symbols"] = 0
             morning_failures = sum(
                 self.post_store.get_post(post["post_id"]).get("model_status") == "failed"
                 for post in morning
@@ -271,6 +327,7 @@ class MorningPipeline:
         selected = [
             post for post in posts
             if post.get("local_media")
+            and str(post.get("model_status") or "") in {"not_requested", "failed", ""}
             and post.get("ocr_status") in {"not_requested", "failed"}
             and int(post.get("ocr_attempts") or 0) < 3
         ][:8]
@@ -334,12 +391,23 @@ class MorningPipeline:
             for index in range(0, len(posts), 10):
                 if deadline - time.monotonic() < MIN_MODEL_ATTEMPT_SECONDS:
                     break
-                original = posts[index:index + 10]
+                remaining_budget = int(self.model_budget.status()["remaining"])
+                if remaining_budget <= 0:
+                    break
+                original = posts[index:index + min(10, remaining_budget)]
                 claimed = []
                 for post in original:
-                    claimed.extend(
-                        self.post_store.claim_posts_for_model(1, post_id=post["post_id"], force=True)
+                    values = self.post_store.claim_posts_for_model(
+                        1,
+                        post_id=post["post_id"],
+                        force=True,
                     )
+                    if not values:
+                        continue
+                    if not self.model_budget.reserve():
+                        self.post_store.release_model_claim(post["post_id"])
+                        break
+                    claimed.extend(values)
                 if not claimed:
                     continue
                 remaining = claimed
@@ -368,6 +436,7 @@ class MorningPipeline:
                                 model_name=str(getattr(self.batch_classifier, "model_name", "ai-batch")),
                                 prompt_version=self.batch_classifier.prompt_version,
                             )
+                            self.model_budget.finish(success=True)
                             item_errors.pop(post["post_id"], None)
                         remaining = retry
                     except ModelProviderUnavailableError as exc:
@@ -380,6 +449,7 @@ class MorningPipeline:
                                 prompt_version=self.batch_classifier.prompt_version,
                                 error=error,
                             )
+                            self.model_budget.finish(success=False)
                         errors.append(f"ai unavailable: {error}")
                         return
                     except Exception as exc:
@@ -398,6 +468,7 @@ class MorningPipeline:
                             prompt_version=self.batch_classifier.prompt_version,
                             error=error,
                         )
+                        self.model_budget.finish(success=False)
                     errors.append(
                         "ai batch: "
                         + "; ".join(
@@ -405,6 +476,9 @@ class MorningPipeline:
                             for post in remaining
                         )[:1000]
                     )
+        budget_status = self.model_budget.status()
+        stages["model_daily_used"] = int(budget_status["attempted"])
+        stages["model_daily_remaining"] = int(budget_status["remaining"])
 
     def _pending_candidates(self) -> list[dict[str, Any]]:
         with self.post_store.connect() as db:

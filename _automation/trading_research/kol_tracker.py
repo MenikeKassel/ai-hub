@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -23,6 +24,18 @@ EVENT_STATUSES = {"candidate", "active", "completed", "excluded", "archived"}
 NON_EXECUTABLE_WARNINGS = {
     "one_price_limit_suspected",
     "conditional_intraday_entry_unverified",
+}
+# Primary execution warnings: events carrying any of these tokens are excluded
+# from the primary (executable) long-only return universe, but remain in audit
+# counts.  Shared by kol_performance and kol_leaderboard so the two pipelines
+# count the executable long universe with the same caliber.
+PRIMARY_WARNINGS = {
+    "conditional_intraday_entry_unverified",
+    "one_price_limit_suspected",
+    "data_conflict",
+    "source_conflict",
+    "secondhand",
+    "retrospective",
 }
 
 EVENT_FIELDS = [
@@ -70,6 +83,12 @@ MARK_FIELDS = [
     "data_status",
     "run_id",
     "updated_at",
+    "market_open",
+    "suspended",
+    "valuation_close",
+    "last_trade_date",
+    "foundation_release_id",
+    "foundation_release_stage",
 ]
 
 CHECKPOINT_FIELDS = [
@@ -90,6 +109,13 @@ CHECKPOINT_FIELDS = [
     "secondary_close",
     "verification_status",
     "finalized_at",
+    "market_open",
+    "suspended_at_checkpoint",
+    "executable",
+    "valuation_close",
+    "last_trade_date",
+    "foundation_release_id",
+    "foundation_release_stage",
 ]
 
 
@@ -179,6 +205,10 @@ def is_executable_event(event: EventRecord) -> bool:
     return not (set(event.execution_warning.split(";")) & NON_EXECUTABLE_WARNINGS)
 
 
+def is_long_event(event: EventRecord) -> bool:
+    return event.direction.strip().lower() == "long"
+
+
 def validate_event(event: EventRecord) -> list[str]:
     if event.status not in EVENT_STATUSES:
         return ["status"]
@@ -223,9 +253,11 @@ class KolStore:
         self.checkpoints_path = self.root / "checkpoints.csv"
         self.runs_path = self.root / "runs.jsonl"
         self.event_revisions_path = self.root / "event_revisions.jsonl"
+        self.checkpoint_revisions_path = self.root / "checkpoint_revisions.jsonl"
         self.backups_dir = self.root / "backups"
         self.logs_dir = self.root / "logs"
         self.returns_lock_path = self.root / "returns.lock"
+        self._events_backup_created = False
         self.root.mkdir(parents=True, exist_ok=True)
         self._migrate_derived_return_fields()
 
@@ -237,13 +269,29 @@ class KolStore:
             return list(csv.DictReader(handle).fieldnames or [])
 
     def _migrate_derived_return_fields(self) -> None:
-        marks_need_migration = bool(self._csv_fields(self.marks_path)) and "max_favorable_return" not in self._csv_fields(self.marks_path)
-        checkpoints_need_migration = bool(self._csv_fields(self.checkpoints_path)) and "max_favorable_return" not in self._csv_fields(self.checkpoints_path)
+        mark_fields = self._csv_fields(self.marks_path)
+        checkpoint_fields = self._csv_fields(self.checkpoints_path)
+        marks_need_migration = bool(mark_fields) and (
+            "max_favorable_return" not in mark_fields
+            or any(field not in mark_fields for field in MARK_FIELDS)
+        )
+        checkpoints_need_migration = bool(checkpoint_fields) and (
+            "max_favorable_return" not in checkpoint_fields
+            or any(field not in checkpoint_fields for field in CHECKPOINT_FIELDS)
+        )
         if not marks_need_migration and not checkpoints_need_migration:
             return
         with FileLock(str(self.returns_lock_path), timeout=60):
-            marks_need_migration = bool(self._csv_fields(self.marks_path)) and "max_favorable_return" not in self._csv_fields(self.marks_path)
-            checkpoints_need_migration = bool(self._csv_fields(self.checkpoints_path)) and "max_favorable_return" not in self._csv_fields(self.checkpoints_path)
+            current_mark_fields = self._csv_fields(self.marks_path)
+            current_checkpoint_fields = self._csv_fields(self.checkpoints_path)
+            marks_need_migration = bool(current_mark_fields) and (
+                "max_favorable_return" not in current_mark_fields
+                or any(field not in current_mark_fields for field in MARK_FIELDS)
+            )
+            checkpoints_need_migration = bool(current_checkpoint_fields) and (
+                "max_favorable_return" not in current_checkpoint_fields
+                or any(field not in current_checkpoint_fields for field in CHECKPOINT_FIELDS)
+            )
             if not marks_need_migration and not checkpoints_need_migration:
                 return
             marks = self._read_csv(self.marks_path)
@@ -317,11 +365,38 @@ class KolStore:
                 os.unlink(temp_name)
 
     def _backup_events(self) -> None:
-        if not self.events_path.exists():
+        if self._events_backup_created or not self.events_path.exists():
             return
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S-%f")
         shutil.copy2(self.events_path, self.backups_dir / f"{stamp}_events.csv")
+        self._events_backup_created = True
+        self._prune_backups()
+
+    def _prune_backups(self) -> None:
+        """Keep a small rolling set: 3 immediate, 7 daily and 4 weekly."""
+        if not self.backups_dir.is_dir():
+            return
+        files = [path for path in self.backups_dir.iterdir() if path.is_file()]
+        if len(files) <= 20:
+            return
+        ordered = sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)
+        keep = set(ordered[:3])
+        daily: dict[str, Path] = {}
+        weekly: dict[str, Path] = {}
+        for path in ordered:
+            moment = datetime.fromtimestamp(path.stat().st_mtime, tz=SHANGHAI)
+            daily.setdefault(moment.date().isoformat(), path)
+            year, week, _ = moment.isocalendar()
+            weekly.setdefault(f"{year}-W{week:02d}", path)
+        keep.update(list(daily.values())[:7])
+        keep.update(list(weekly.values())[:4])
+        for path in files:
+            if path not in keep:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def _backup_dataset(self, path: Path) -> None:
         if not path.exists():
@@ -329,6 +404,7 @@ class KolStore:
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S-%f")
         shutil.copy2(path, self.backups_dir / f"{stamp}_{path.name}")
+        self._prune_backups()
 
     def load_events(self) -> list[EventRecord]:
         return [EventRecord.from_row(row) for row in self._read_csv(self.events_path)]
@@ -555,7 +631,27 @@ class KolStore:
             added: list[dict[str, str]] = []
             for row in rows:
                 key = (row.get("event_id", ""), row.get("horizon", ""))
-                if key in existing or row.get("verification_status", "") != "verified":
+                if row.get("verification_status", "") not in {"verified", "verified_suspended"}:
+                    continue
+                if key in existing:
+                    previous = existing[key]
+                    comparable_fields = {
+                        field: row.get(field, "")
+                        for field in CHECKPOINT_FIELDS
+                        if field not in {"finalized_at", "foundation_release_id"}
+                    }
+                    previous_comparable = {
+                        field: previous.get(field, "")
+                        for field in comparable_fields
+                    }
+                    if comparable_fields != previous_comparable or row.get("foundation_release_id", "") != previous.get("foundation_release_id", ""):
+                        self._append_checkpoint_revision(
+                            event_id=key[0],
+                            horizon=key[1],
+                            previous=previous,
+                            proposed=row,
+                            reason="foundation_release_refresh",
+                        )
                     continue
                 existing[key] = row
                 added.append(row)
@@ -565,6 +661,48 @@ class KolStore:
                 CHECKPOINT_FIELDS,
             )
         return added
+
+    def _append_checkpoint_revision(
+        self,
+        *,
+        event_id: str,
+        horizon: str,
+        previous: dict[str, str],
+        proposed: dict[str, str],
+        reason: str,
+    ) -> None:
+        self.checkpoint_revisions_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "revision_id": f"{event_id}:{horizon}:{datetime.now(SHANGHAI).strftime('%Y%m%dT%H%M%S%z')}",
+            "event_id": event_id,
+            "horizon": horizon,
+            "reason": reason,
+            "created_at": now_iso(),
+            "previous": previous,
+            "proposed": proposed,
+        }
+        def comparable(value: dict[str, str]) -> dict[str, str]:
+            return {key: item for key, item in value.items() if key != "finalized_at"}
+
+        previous_key = comparable(previous)
+        proposed_key = comparable(proposed)
+        if self.checkpoint_revisions_path.exists():
+            with self.checkpoint_revisions_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        prior = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        prior.get("event_id") == event_id
+                        and prior.get("horizon") == horizon
+                        and prior.get("reason") == reason
+                        and comparable(prior.get("previous") or {}) == previous_key
+                        and comparable(prior.get("proposed") or {}) == proposed_key
+                    ):
+                        return
+        with self.checkpoint_revisions_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     def log_run(self, event: str, payload: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -632,15 +770,36 @@ def _normalise_prices(frame: pd.DataFrame) -> pd.DataFrame:
     for field in ["open", "high", "low", "close", "volume"]:
         if field in data.columns:
             data[field] = pd.to_numeric(data[field], errors="coerce")
+    if "trade_status" in data.columns:
+        data["trade_status"] = pd.to_numeric(data["trade_status"], errors="coerce")
+    if "suspended" not in data.columns:
+        data["suspended"] = False
+    data["suspended"] = data["suspended"].fillna(False).astype(bool)
+    if "trade_status" in data.columns:
+        data["suspended"] = data["suspended"] | data["trade_status"].eq(0)
+    data["market_open"] = ~data["suspended"]
     data = data.dropna(subset=["date", "open", "close"])
     data = data[(data["open"] > 0) & (data["close"] > 0)]
     return data.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
 
 
+def _row_is_open(row: pd.Series) -> bool:
+    if "market_open" in row.index:
+        return bool(row["market_open"])
+    if "suspended" in row.index:
+        return not bool(row["suspended"])
+    return True
+
+
 def _format_number(value: float | int | str) -> str:
     if value == "" or pd.isna(value):
         return ""
-    return f"{float(value):.8f}"
+    number = float(value)
+    if not math.isfinite(number):
+        # inf/-inf (zero baseline, bad data) must never reach CSV/JSON as
+        # the literal "inf"; downstream treats empty as missing.
+        return ""
+    return f"{number:.8f}"
 
 
 def _select_baseline(event: EventRecord, raw: pd.DataFrame) -> tuple[int, str, str, str]:
@@ -651,10 +810,16 @@ def _select_baseline(event: EventRecord, raw: pd.DataFrame) -> tuple[int, str, s
     post_date = pd.Timestamp(local.date())
     date_matches = raw.index[raw["date"] == post_date].tolist()
 
+    if date_matches and not _row_is_open(raw.iloc[date_matches[0]]):
+        future = [index for index in raw.index if raw.loc[index, "date"] > post_date and _row_is_open(raw.loc[index])]
+        if not future:
+            raise ValueError("no tradable price after posted_at")
+        return future[0], "open", "next_open", "delayed_baseline;suspended_baseline"
+
     if date_matches and local.time() <= time(15, 0):
         return date_matches[0], "close", "same_day_close", ""
 
-    future = raw.index[raw["date"] > post_date].tolist()
+    future = [index for index in raw.index if raw.loc[index, "date"] > post_date and _row_is_open(raw.loc[index])]
     if not future:
         raise ValueError("no tradable price after posted_at")
     delayed = "" if date_matches else "delayed_baseline"
@@ -725,12 +890,20 @@ def calculate_event_history(
     max_favorable = 0.0
     corporate_action_seen = False
     tracking = raw.iloc[baseline_index:].reset_index(drop=True)
+    last_valid_close = baseline_price
+    last_trade_date = baseline_date
     for elapsed, (_, row) in enumerate(tracking.iterrows()):
         trade_date = row["date"]
         benchmark_row = _row_for_date(benchmark, trade_date)
         adjusted_row = _row_for_date(adjusted, trade_date)
+        market_open = _row_is_open(row)
+        suspended = not market_open
         close_raw = float(row["close"])
-        raw_return = close_raw / baseline_price - 1.0
+        if market_open:
+            last_valid_close = close_raw
+            last_trade_date = trade_date
+        valuation_close = last_valid_close
+        raw_return = valuation_close / baseline_price - 1.0
         directional_return = sign * raw_return
         max_adverse = min(max_adverse, directional_return)
         max_favorable = max(max_favorable, directional_return)
@@ -751,12 +924,17 @@ def calculate_event_history(
             if abs(float(adjusted_return) - raw_return) > 0.005:
                 corporate_action_seen = True
 
-        status = "corporate_action_warning" if corporate_action_seen else "ok"
+        status_parts = []
+        if suspended:
+            status_parts.append("suspended")
+        if corporate_action_seen:
+            status_parts.append("corporate_action_warning")
+        status = ";".join(status_parts) or "ok"
         marks.append(
             {
                 "event_id": event.event_id,
                 "trade_date": trade_date.strftime("%Y-%m-%d"),
-                "close_raw": _format_number(close_raw),
+                "close_raw": _format_number(valuation_close),
                 "close_adjusted": _format_number(adjusted_close),
                 "raw_return": _format_number(raw_return),
                 "adjusted_return": _format_number(adjusted_return),
@@ -771,6 +949,12 @@ def calculate_event_history(
                 "data_status": status,
                 "run_id": run_id,
                 "updated_at": now_iso(),
+                "market_open": "1" if market_open else "0",
+                "suspended": "1" if suspended else "0",
+                "valuation_close": _format_number(valuation_close),
+                "last_trade_date": last_trade_date.strftime("%Y-%m-%d"),
+                "foundation_release_id": str(row.get("foundation_release_id", "")),
+                "foundation_release_stage": str(row.get("foundation_release_stage", "")),
             }
         )
 
@@ -802,6 +986,13 @@ def calculate_event_history(
                 "secondary_close": "",
                 "verification_status": "verified",
                 "finalized_at": now_iso(),
+                "market_open": mark.get("market_open", "1"),
+                "suspended_at_checkpoint": mark.get("suspended", "0"),
+                "executable": "0" if mark.get("suspended") == "1" else "1",
+                "valuation_close": mark.get("valuation_close", mark.get("close_raw", "")),
+                "last_trade_date": mark.get("last_trade_date", mark.get("trade_date", "")),
+                "foundation_release_id": mark.get("foundation_release_id", ""),
+                "foundation_release_stage": mark.get("foundation_release_stage", ""),
             }
         )
 
@@ -1092,6 +1283,112 @@ class AKShareProvider:
         return frame.reset_index(drop=True)
 
 
+class AKShareSinaProvider:
+    """Use AKShare's Sina-backed daily endpoints for checkpoint verification."""
+
+    name = "akshare-sina"
+
+    @staticmethod
+    def _configure_direct_hosts() -> None:
+        hosts = {"hq.sinajs.cn", "quotes.sina.cn", "finance.sina.com.cn"}
+        for key in ("NO_PROXY", "no_proxy"):
+            current = {
+                item.strip()
+                for item in os.environ.get(key, "").split(",")
+                if item.strip()
+            }
+            current.update(hosts)
+            os.environ[key] = ",".join(sorted(current))
+
+    @staticmethod
+    def _symbol(symbol: str) -> str:
+        prefix = "sh" if str(symbol).startswith(("6", "9")) else "sz"
+        return prefix + str(symbol).zfill(6)
+
+    def __init__(self) -> None:
+        self._configure_direct_hosts()
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        import akshare as ak  # type: ignore
+
+        frame = ak.stock_zh_a_daily(
+            symbol=self._symbol(symbol),
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="qfq" if adjusted else "",
+        )
+        if frame.empty:
+            raise RuntimeError(f"AKShare Sina returned no data for {symbol}")
+        return _provider_frame(frame)
+
+    def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
+        import akshare as ak  # type: ignore
+
+        frame = ak.stock_zh_index_daily(symbol="sh000300")
+        frame = _provider_frame(frame)
+        selected = frame[
+            (frame["date"] >= pd.Timestamp(start))
+            & (frame["date"] <= pd.Timestamp(end))
+        ]
+        if selected.empty:
+            raise RuntimeError("AKShare Sina returned no CSI 300 data")
+        return selected.reset_index(drop=True)
+
+
+class AKShareCheckpointProvider:
+    """Sina first, Eastmoney only as a bounded fallback."""
+
+    def __init__(self) -> None:
+        self.sina = AKShareSinaProvider()
+        self.eastmoney = AKShareProvider()
+        self._used_sources: set[str] = set()
+        self._stock_cache: dict[tuple[str, date, date, bool], pd.DataFrame] = {}
+        self._benchmark_cache: dict[tuple[date, date], pd.DataFrame] = {}
+
+    @property
+    def name(self) -> str:
+        return "+".join(sorted(self._used_sources)) or self.sina.name
+
+    def _call(self, method: str, *args: object, **kwargs: object) -> pd.DataFrame:
+        errors: list[str] = []
+        for provider in (self.sina, self.eastmoney):
+            try:
+                frame = getattr(provider, method)(*args, **kwargs)
+                self._used_sources.add(provider.name)
+                return frame
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+        raise RuntimeError("; ".join(errors))
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        key = (str(symbol), start, end, bool(adjusted))
+        if key not in self._stock_cache:
+            self._stock_cache[key] = self._call(
+                "fetch_stock", symbol, start, end, adjusted=adjusted
+            )
+        return self._stock_cache[key].copy()
+
+    def fetch_benchmark(self, start: date, end: date) -> pd.DataFrame:
+        key = (start, end)
+        if key not in self._benchmark_cache:
+            self._benchmark_cache[key] = self._call("fetch_benchmark", start, end)
+        return self._benchmark_cache[key].copy()
+
+
 def _notification(kind: str, key: str, message: str, event_id: str = "") -> dict[str, str]:
     return {"kind": kind, "key": key, "message": message, "event_id": event_id}
 
@@ -1113,6 +1410,14 @@ def _secondary_checkpoint(
     secondary_benchmark_baseline_row = _row_for_date(benchmark, baseline_date)
     verified = dict(checkpoint)
     verified["secondary_source"] = secondary_name
+    checkpoint_is_suspended = checkpoint.get("suspended_at_checkpoint") == "1"
+    verification_mode = "verified"
+    if secondary_row is None and checkpoint_is_suspended:
+        prior = raw[raw["date"] < trade_date]
+        if not prior.empty:
+            secondary_row = prior.iloc[-1]
+            verification_mode = "verified_suspended"
+
     if any(
         row is None
         for row in [
@@ -1169,7 +1474,7 @@ def _secondary_checkpoint(
             ),
             checkpoint["event_id"],
         )
-    verified["verification_status"] = "verified"
+    verified["verification_status"] = verification_mode
     return verified, None
 
 
@@ -1181,11 +1486,16 @@ def update_kol_tracking(
     as_of: date,
     dashboard_path: Path,
     dry_run: bool = False,
+    event_ids: set[str] | None = None,
 ) -> UpdateResult:
     run_id = datetime.now(SHANGHAI).strftime("%Y%m%dT%H%M%S%z")
     events = store.load_events()
     existing_checkpoints = {
         (row.get("event_id", ""), row.get("horizon", ""))
+        for row in store.load_checkpoints()
+    }
+    existing_checkpoint_rows = {
+        (row.get("event_id", ""), row.get("horizon", "")): row
         for row in store.load_checkpoints()
     }
     updated: list[EventRecord] = []
@@ -1194,11 +1504,46 @@ def update_kol_tracking(
     awaiting_market_data: list[str] = []
     all_marks: list[dict[str, str]] = []
     checkpoints_to_freeze: list[dict[str, str]] = []
+    checkpoint_source_failures: set[str] = set()
+    checkpoint_verifier_open = False
+    foundation_stage = ""
+    foundation = getattr(primary, "foundation", None)
+    if foundation is not None:
+        try:
+            foundation_stage = str(foundation.release().get("release_stage") or "legacy")
+        except Exception:
+            foundation_stage = "legacy"
+    checkpoint_freeze_allowed = foundation is None or foundation_stage == "verified"
+
+    # The shared foundation stores all instruments in a small number of large
+    # Parquet files. Prefetch once per release so a 500-event replay does not
+    # rescan the same file for every event.
+    prefetch = getattr(primary, "prefetch_daily", None)
+    if callable(prefetch):
+        symbols = {
+            event.symbol
+            for event in events
+            if event.status in {"active", "completed"}
+            and (event_ids is None or event.event_id in event_ids)
+            and event.symbol
+        }
+        symbols.add("000300")
+        try:
+            prefetch(symbols, adjustments=("raw", "qfq"))
+        except Exception:
+            # Keep per-event fallback and its existing error reporting. A
+            # failed optimization must not change the calculation contract.
+            pass
 
     tracked_event_count = sum(
-        event.status in {"active", "completed"} for event in events
+        event.status in {"active", "completed"}
+        and (event_ids is None or event.event_id in event_ids)
+        for event in events
     )
     for event in events:
+        if event_ids is not None and event.event_id not in event_ids:
+            updated.append(event)
+            continue
         if event.status not in {"active", "completed"}:
             updated.append(event)
             continue
@@ -1273,9 +1618,17 @@ def update_kol_tracking(
         event_checkpoints = [
             row
             for row in result.checkpoints
-            if (row["event_id"], row["horizon"]) not in existing_checkpoints
+            if (
+                (row["event_id"], row["horizon"]) not in existing_checkpoints
+                or existing_checkpoint_rows.get((row["event_id"], row["horizon"]), {}).get(
+                    "foundation_release_id", ""
+                )
+                != row.get("foundation_release_id", "")
+            )
         ]
-        if event_checkpoints and verifier is not None:
+        if event_checkpoints and not checkpoint_freeze_allowed:
+            event_checkpoints = []
+        if event_checkpoints and verifier is not None and not checkpoint_verifier_open:
             try:
                 secondary_raw = verifier.fetch_stock(event.symbol, start, as_of, adjusted=False)
                 secondary_benchmark = verifier.fetch_benchmark(start, as_of)
@@ -1293,14 +1646,17 @@ def update_kol_tracking(
                         notifications.append(conflict)
                 event_checkpoints = verified_rows
             except Exception as exc:
-                notifications.append(
-                    _notification(
-                        "source_failure",
-                        f"checkpoint_source_failure:{as_of.isoformat()}:{event.event_id}:{verifier.name}",
-                        f"{event.event_id} 节点交叉验证源 {verifier.name} 失败：{exc}，节点暂不冻结。",
-                        event.event_id,
+                checkpoint_verifier_open = True
+                source_key = f"checkpoint_source_failure:{verifier.name}"
+                if source_key not in checkpoint_source_failures:
+                    checkpoint_source_failures.add(source_key)
+                    notifications.append(
+                        _notification(
+                            "source_failure",
+                            source_key,
+                            f"节点交叉验证源 {verifier.name} 失败：{exc}，本轮节点暂不冻结。",
+                        )
                     )
-                )
                 event_checkpoints = [
                     {**row, "secondary_source": verifier.name, "verification_status": "secondary_unavailable"}
                     for row in event_checkpoints
@@ -1325,7 +1681,9 @@ def update_kol_tracking(
         updated.append(result.event)
 
     verified_candidates = [
-        row for row in checkpoints_to_freeze if row.get("verification_status") == "verified"
+        row
+        for row in checkpoints_to_freeze
+        if row.get("verification_status") in {"verified", "verified_suspended"}
     ]
     if dry_run:
         new_checkpoints = verified_candidates
@@ -1335,6 +1693,11 @@ def update_kol_tracking(
         new_checkpoints = store.freeze_checkpoints(verified_candidates)
 
     for checkpoint in new_checkpoints:
+        suspension_note = (
+            " suspension valuation; excluded from executable-event statistics."
+            if checkpoint.get("verification_status") == "verified_suspended"
+            else ""
+        )
         notifications.append(
             _notification(
                 "checkpoint",
@@ -1342,7 +1705,7 @@ def update_kol_tracking(
                 (
                     f"{checkpoint['event_id']} 到达 {checkpoint['horizon']} 节点："
                     f"方向收益 {_percent(checkpoint['directional_return'])}，"
-                    f"超额 {_percent(checkpoint['directional_excess_return'])}。"
+                    f"超额 {_percent(checkpoint['directional_excess_return'])}。{suspension_note}"
                 ),
                 checkpoint["event_id"],
             )
@@ -1402,7 +1765,7 @@ def _seed_events() -> list[EventRecord]:
             kol_name="Serenity 白毛",
             platform="X",
             source_url="https://twitter.com/artinmemes/status/2062737603007480183",
-            source_note="source-note-placeholder.md",
+            source_note="01_Sources/2026-06-05__X-白毛绿的谐波688017二手推荐.md",
             posted_at="",
             symbol="688017",
             security_name="绿的谐波",
@@ -1413,10 +1776,10 @@ def _seed_events() -> list[EventRecord]:
         ),
         EventRecord(
             event_id="KOL-0002",
-            kol_name="Public KOL 1",
+            kol_name="A股点金手",
             platform="X",
-            source_url="https://x.com/public_kol_1/status/0000000000000000000",
-            source_note="source-note-placeholder.md",
+            source_url="https://x.com/agudianjinshou/status/2075222049170333870",
+            source_note="01_Sources/2026-07-10__X-A股点金手-(@agudianjinshou).md",
             posted_at="2026-07-09T22:14:26+08:00",
             symbol="",
             security_name="AI算力硬件瓶颈链",
@@ -1427,10 +1790,10 @@ def _seed_events() -> list[EventRecord]:
         ),
         EventRecord(
             event_id="KOL-0003",
-            kol_name="Public KOL 1",
+            kol_name="A股点金手",
             platform="X",
-            source_url="https://x.com/public_kol_1/status/0000000000000000000",
-            source_note="source-note-placeholder.md",
+            source_url="https://x.com/agudianjinshou/status/2075097945163309070",
+            source_note="01_Sources/2026-07-10__X-A股点金手-(@agudianjinshou)-2.md",
             posted_at="2026-07-09T14:01:18+08:00",
             symbol="",
             security_name="东山精密等五只股票",
@@ -1441,10 +1804,10 @@ def _seed_events() -> list[EventRecord]:
         ),
         EventRecord(
             event_id="KOL-0004",
-            kol_name="Public KOL 2",
+            kol_name="林哥-深研A股",
             platform="X",
-            source_url="https://x.com/public_kol_2/status/0000000000000000000",
-            source_note="source-note-placeholder.md",
+            source_url="https://x.com/WwQQ129146/status/2074819740686795088",
+            source_note="01_Sources/2026-07-10__X-林哥-深研A股-(@WwQQ129146).md",
             posted_at="2026-07-08T19:35:49+08:00",
             symbol="002414",
             security_name="高德红外",
@@ -1455,10 +1818,10 @@ def _seed_events() -> list[EventRecord]:
         ),
         EventRecord(
             event_id="KOL-0005",
-            kol_name="Public KOL 3",
+            kol_name="擒龙捉妖-泰戈",
             platform="X",
-            source_url="https://x.com/public_kol_3/status/0000000000000000000",
-            source_note="source-note-placeholder.md",
+            source_url="https://x.com/sszcw/status/2075437983680090113",
+            source_note="01_Sources/2026-07-10__X-擒龙捉妖.泰戈👊🏻📈🐂🔥-(@sszcw).md",
             posted_at="2026-07-10T12:32:29+08:00",
             symbol="601888",
             security_name="中国中免",

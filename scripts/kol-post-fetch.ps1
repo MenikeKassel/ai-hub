@@ -13,6 +13,8 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 . (Join-Path $PSScriptRoot "lib\hermes-notify.ps1")
+$userToolBin = Join-Path $env:USERPROFILE ".local\bin"
+if (Test-Path -LiteralPath $userToolBin) { $env:PATH = "$userToolBin;$env:PATH" }
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
@@ -27,6 +29,11 @@ $hasLock = $false
 $env:PYTHON_KEYRING_BACKEND = "keyring.backends.Windows.WinVaultKeyring"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+$zhihuChrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+if (Test-Path -LiteralPath $zhihuChrome) { $env:ZHIHU_BROWSER_PATH = $zhihuChrome }
+$env:ZHIHU_PROFILE_DIRECTORY = "Default"
+$env:ZHIHU_USER_DATA_DIR = Join-Path $env:LOCALAPPDATA "hermes\browser-profiles\zhihu-edge"
+$env:ZHIHU_CDP_PORT = "9223"
 
 function Write-FetchLog([string]$Message) {
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -45,6 +52,8 @@ try {
     if (-not (Test-Path -LiteralPath $cli)) { throw "Trading CLI not found: $cli" }
 
     $batchKey = "manual:$AsOf`:$Platform`:$((Get-Date).ToString('yyyyMMddHH'))"
+    # Automated collection selects a verified slot from the guarded X session
+    # pool. Nitter remains shadow-only and cannot bypass a primary pause.
     $arguments = @($cli, "kol-post-fetch", "--provider", "auto", "--platform", $Platform, "--backfill", $FetchCount, "--as-of", $AsOf, "--batch-key", $batchKey, "--skip-classify")
     & $python $cli kol-post-db-backup *> $null
     if ($LASTEXITCODE -ne 0) { throw "Unable to back up posts.db before fetch." }

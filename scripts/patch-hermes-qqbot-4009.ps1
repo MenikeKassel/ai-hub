@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$HermesRoot = "$env:LOCALAPPDATA\hermes\hermes-agent"
 )

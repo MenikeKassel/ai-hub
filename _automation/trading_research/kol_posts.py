@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import hashlib
@@ -16,6 +16,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -23,6 +24,7 @@ import httpx
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from kol_tracker import SHANGHAI, now_iso
+from model_budget import ModelDailyBudget
 from opencode_go import (
     OPENCODE_GO_API_URL,
     OPENCODE_GO_MODEL,
@@ -31,12 +33,12 @@ from opencode_go import (
 
 
 SEED_KOLS = [
-    ("Public KOL 1", "public_kol_1", "A股、AI硬件、半导体主题"),
-    ("Public KOL 2", "public_kol_2", "A股深研、业绩预告、事件驱动"),
-    ("Public KOL 3", "public_kol_3", "个股推荐"),
-    ("Public KOL 4", "public_kol_4", "市场周期、流动性、市场情绪"),
-    ("Mistery / public_kol_5", "public_kol_5", "交易心理、市场人性"),
-    ("Public KOL 6", "Public KOL 6", "待补"),
+    ("A股点金手", "agudianjinshou", "A股、AI硬件、半导体主题"),
+    ("林哥-深研A股", "WwQQ129146", "A股深研、业绩预告、事件驱动"),
+    ("擒龙捉妖-泰戈", "sszcw", "个股推荐"),
+    ("大道无形我有型", "bafeite1234", "市场周期、流动性、市场情绪"),
+    ("Mistery / Mimiwftt", "Mimiwftt", "交易心理、市场人性"),
+    ("Hoyooyoo", "Hoyooyoo", "待补"),
 ]
 
 LONG_WORDS = {
@@ -44,7 +46,6 @@ LONG_WORDS = {
     "买入",
     "建仓",
     "低吸",
-    "关注",
     "推荐",
     "布局",
     "机会",
@@ -54,7 +55,7 @@ LONG_WORDS = {
     "马前炮",
     "个股分享",
 }
-SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "风险", "见顶", "离场"}
+SHORT_WORDS = {"看空", "卖出", "减仓", "清仓", "回避", "见顶", "离场"}
 RETROSPECTIVE_WORDS = {"昨天推荐", "此前推荐", "已经涨停", "成功涨停", "回顾", "复盘"}
 FINANCE_WORDS = {"A股", "股票", "个股", "板块", "涨停", "跌停", "K线", "指数", "业绩", "估值", "资金", "成交量", "主力"}
 STRUCTURED_REVIEW_VERSION = "structured-text-v2"
@@ -136,6 +137,14 @@ class TwitterRateLimitError(TwitterProviderError):
     pass
 
 
+class XSessionUnavailableError(TwitterProviderError):
+    """The guarded X session pool cannot issue a request right now."""
+
+
+class XBudgetDeferredError(TwitterRateLimitError):
+    """A request was deferred by the local global/session budget gate."""
+
+
 class ZhihuProviderError(TwitterProviderError):
     pass
 
@@ -198,6 +207,8 @@ class FetchSummary:
     queue_completed: int = 0
     queue_pending: int = 0
     rate_limit_paused: bool = False
+    blocked_platforms: list[str] = field(default_factory=list)
+    platform_breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -217,6 +228,9 @@ class ProviderFetchResult:
     attempts: list[ProviderAttempt]
     warnings: list[str]
     comparisons: list[dict[str, Any]] = field(default_factory=list)
+    next_cursor: str = ""
+    user_id: str = ""
+    exhausted: bool = False
 
 
 class XPostProvider(Protocol):
@@ -345,8 +359,8 @@ def extract_zhihu_digest_attributions(text: str) -> list[dict[str, Any]]:
     for index, match in enumerate(matches):
         name = re.sub(r"\s+", " ", match.group("name")).strip(" ：:。；;")
         names = [name]
-        if name == "Public KOL 50无Public KOL 38":
-            names = ["Public KOL 50", "Public KOL 38"]
+        if name == "龙开无水又三人禾":
+            names = ["龙开", "水又三人禾"]
         section_end = matches[index + 1].start() if index + 1 < len(matches) else len(clean)
         section = clean[match.start():section_end].strip()[:20000]
         for attributed_name in names:
@@ -357,7 +371,7 @@ def extract_zhihu_digest_attributions(text: str) -> list[dict[str, Any]]:
             values.append(
                 {
                     "author_name": attributed_name,
-                    "section_text": "无" if attributed_name == "Public KOL 50" else section,
+                    "section_text": "无" if attributed_name == "龙开" else section,
                     "symbols": sorted(set(re.findall(r"(?<!\d)\d{6}(?!\d)", section))),
                     "status": "secondhand_aggregation",
                 }
@@ -478,7 +492,19 @@ class RuleClassifier:
         finance_hits = sorted(word for word in FINANCE_WORDS if word in content)
         if finance_hits:
             reasons.append("finance_language")
-        direction = "long" if len(long_hits) > len(short_hits) else "short" if short_hits else ""
+        # Direction needs a strict majority of directional words; a tie
+        # (e.g. one bullish and one bearish token) yields no direction
+        # rather than defaulting to short.
+        if long_hits and not short_hits:
+            direction = "long"
+        elif short_hits and not long_hits:
+            direction = "short"
+        elif long_hits and len(long_hits) > len(short_hits):
+            direction = "long"
+        elif short_hits and len(short_hits) > len(long_hits):
+            direction = "short"
+        else:
+            direction = ""
         retrospective = any(word in content for word in RETROSPECTIVE_WORDS)
         evidence_type = "retrospective" if retrospective else "original_pre_event"
         if value("post_type") in {"retweet", "aggregation"}:
@@ -682,7 +708,6 @@ class RuleClassifier:
 
 def validate_event_draft(draft: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    rate_limit_paused = False
     symbol = str(draft.get("symbol") or "")
     if not re.fullmatch(r"\d{6}", symbol):
         errors.append("one_symbol_per_event")
@@ -818,6 +843,16 @@ class KolPostStore:
                     updated_at TEXT NOT NULL,
                     UNIQUE(platform,handle)
                 );
+                CREATE TABLE IF NOT EXISTS kol_account_status_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'system',
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kol_account_status_history
+                    ON kol_account_status_history(kol_id, observed_at DESC);
                 CREATE TABLE IF NOT EXISTS posts (
                     post_id TEXT PRIMARY KEY,
                     kol_id INTEGER NOT NULL REFERENCES kols(id),
@@ -940,7 +975,8 @@ class KolPostStore:
                     gap_kols_json TEXT NOT NULL DEFAULT '[]',
                     fallback_kols_json TEXT NOT NULL DEFAULT '[]',
                     shadow_failed_kols_json TEXT NOT NULL DEFAULT '[]',
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS fetch_queue (
                     batch_key TEXT NOT NULL,
@@ -963,6 +999,155 @@ class KolPostStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_fetch_queue_pending
                     ON fetch_queue(batch_key,state,not_before,position);
+                CREATE TABLE IF NOT EXISTS post_recovery_queue (
+                    post_id TEXT PRIMARY KEY REFERENCES posts(post_id) ON DELETE CASCADE,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    platform TEXT NOT NULL,
+                    handle TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'queued'
+                        CHECK(state IN ('queued','running','cooldown','hydrated','terminal')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT NOT NULL DEFAULT '',
+                    last_error_code TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL DEFAULT '',
+                    queued_at TEXT NOT NULL,
+                    hydrated_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_post_recovery_pending
+                    ON post_recovery_queue(platform,state,next_attempt_at,updated_at);
+                CREATE TABLE IF NOT EXISTS post_recovery_runs (
+                    run_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    queued INTEGER NOT NULL DEFAULT 0,
+                    hydrated INTEGER NOT NULL DEFAULT 0,
+                    terminal INTEGER NOT NULL DEFAULT 0,
+                    pending INTEGER NOT NULL DEFAULT 0,
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS x_session_slots (
+                    slot_id INTEGER PRIMARY KEY CHECK(slot_id BETWEEN 1 AND 3),
+                    label TEXT NOT NULL DEFAULT '',
+                    credential_service TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL DEFAULT '',
+                    screen_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending_verification'
+                        CHECK(status IN ('pending_verification','ready','cooldown','auth_required','disabled')),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    last_verified_at TEXT NOT NULL DEFAULT '',
+                    last_success_at TEXT NOT NULL DEFAULT '',
+                    cooldown_until TEXT NOT NULL DEFAULT '',
+                    last_error_code TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS x_collection_policy (
+                    policy_id INTEGER PRIMARY KEY CHECK(policy_id=1),
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    global_limit_24h INTEGER NOT NULL DEFAULT 180,
+                    session_limit_24h INTEGER NOT NULL DEFAULT 90,
+                    min_interval_seconds INTEGER NOT NULL DEFAULT 60,
+                    public_enabled INTEGER NOT NULL DEFAULT 1,
+                    public_limit_24h INTEGER NOT NULL DEFAULT 30,
+                    next_slot_id INTEGER NOT NULL DEFAULT 1 CHECK(next_slot_id BETWEEN 1 AND 3),
+                    paused_until TEXT NOT NULL DEFAULT '',
+                    pause_reason TEXT NOT NULL DEFAULT '',
+                    public_paused_until TEXT NOT NULL DEFAULT '',
+                    public_pause_reason TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS x_request_budget (
+                    request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot_id INTEGER REFERENCES x_session_slots(slot_id),
+                    source TEXT NOT NULL DEFAULT 'primary'
+                        CHECK(source IN ('primary','public')),
+                    batch_key TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    estimated_requests INTEGER NOT NULL DEFAULT 1,
+                    reserved_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'reserved'
+                        CHECK(status IN ('reserved','completed','failed','cancelled')),
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_x_request_budget_time
+                    ON x_request_budget(reserved_at,slot_id,status);
+                CREATE TABLE IF NOT EXISTS x_batch_leases (
+                    batch_key TEXT PRIMARY KEY,
+                    slot_id INTEGER NOT NULL REFERENCES x_session_slots(slot_id),
+                    operation TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','completed','paused','failed')),
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    pause_reason TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS x_page_checkpoints (
+                    kol_id INTEGER PRIMARY KEY REFERENCES kols(id) ON DELETE CASCADE,
+                    slot_id INTEGER NOT NULL REFERENCES x_session_slots(slot_id),
+                    user_id TEXT NOT NULL DEFAULT '',
+                    phase TEXT NOT NULL DEFAULT 'freshness'
+                        CHECK(phase IN ('freshness','history','completed','paused')),
+                    latest_seen_post_id TEXT NOT NULL DEFAULT '',
+                    contiguous_post_id TEXT NOT NULL DEFAULT '',
+                    cursor TEXT NOT NULL DEFAULT '',
+                    pages_completed INTEGER NOT NULL DEFAULT 0,
+                    last_page_new_ids INTEGER NOT NULL DEFAULT 0,
+                    stop_reason TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fetch_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    batch_kind TEXT NOT NULL CHECK(batch_kind IN ('freshness','recent_recovery','historical_recovery')),
+                    platform TEXT NOT NULL,
+                    window_start TEXT NOT NULL DEFAULT '',
+                    window_end TEXT NOT NULL DEFAULT '',
+                    strategy_version TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    total_kols INTEGER NOT NULL DEFAULT 0,
+                    completed_kols INTEGER NOT NULL DEFAULT 0,
+                    successful_kols INTEGER NOT NULL DEFAULT 0,
+                    failed_kols INTEGER NOT NULL DEFAULT 0,
+                    new_posts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_fetch_batches_status
+                    ON fetch_batches(platform,status,updated_at DESC);
+                CREATE TABLE IF NOT EXISTS fetch_batch_archive (
+                    batch_key TEXT PRIMARY KEY,
+                    reason TEXT NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS collection_gaps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kol_id INTEGER NOT NULL REFERENCES kols(id) ON DELETE CASCADE,
+                    platform TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    last_post_id TEXT NOT NULL DEFAULT '',
+                    recovery_depth INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    error TEXT NOT NULL DEFAULT '',
+                    last_verified_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(kol_id,window_start,window_end)
+                );
+                CREATE INDEX IF NOT EXISTS idx_collection_gaps_open
+                    ON collection_gaps(platform,status,updated_at);
                 CREATE TABLE IF NOT EXISTS post_sources (
                     post_id TEXT NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
                     provider TEXT NOT NULL,
@@ -1148,6 +1333,16 @@ class KolPostStore:
                     actor TEXT NOT NULL DEFAULT 'human',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS recommendation_bulk_snapshots (
+                    token TEXT PRIMARY KEY,
+                    review_date TEXT NOT NULL,
+                    queue_scope TEXT NOT NULL,
+                    status_filter TEXT NOT NULL,
+                    draft_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS morning_runs (
                     run_id TEXT PRIMARY KEY,
                     review_date TEXT NOT NULL,
@@ -1168,7 +1363,8 @@ class KolPostStore:
                     stage TEXT NOT NULL DEFAULT 'queued',
                     progress_current INTEGER NOT NULL DEFAULT 0,
                     progress_total INTEGER NOT NULL DEFAULT 0,
-                    errors_json TEXT NOT NULL DEFAULT '[]'
+                    errors_json TEXT NOT NULL DEFAULT '[]',
+                    platform_breakdown_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS idx_fetch_attempts_run ON fetch_attempts(run_id,id);
                 CREATE INDEX IF NOT EXISTS idx_provider_comparisons_run ON provider_comparisons(run_id,id);
@@ -1184,6 +1380,14 @@ class KolPostStore:
                     ON recommendation_drafts(post_id,status,id);
                 CREATE INDEX IF NOT EXISTS idx_draft_revisions_draft
                     ON draft_revisions(draft_id,created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_posts_review_posted
+                    ON posts(review_status,posted_at_utc DESC,post_id);
+                CREATE INDEX IF NOT EXISTS idx_classifications_model_queue
+                    ON classifications(is_candidate,model_status,model_next_retry_at,updated_at);
+                CREATE INDEX IF NOT EXISTS idx_fetch_queue_batch_state
+                    ON fetch_queue(batch_key,state,position,kol_id);
+                CREATE INDEX IF NOT EXISTS idx_kols_platform_runtime
+                    ON kols(platform,status,updated_at DESC);
                 """
             )
             table_sql = str(
@@ -1279,6 +1483,7 @@ class KolPostStore:
                     "total_kols": "INTEGER NOT NULL DEFAULT 0",
                     "processed_kols": "INTEGER NOT NULL DEFAULT 0",
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
                 "kols": {
                     "last_success_at": "TEXT NOT NULL DEFAULT ''",
@@ -1289,6 +1494,10 @@ class KolPostStore:
                     "backfill_completed_depth": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_result_count": "INTEGER NOT NULL DEFAULT 0",
                     "backfill_warning": "TEXT NOT NULL DEFAULT ''",
+                    "external_account_id": "TEXT NOT NULL DEFAULT ''",
+                    "availability_status": "TEXT NOT NULL DEFAULT 'active'",
+                    "availability_reason": "TEXT NOT NULL DEFAULT ''",
+                    "availability_checked_at": "TEXT NOT NULL DEFAULT ''",
                 },
                 "classifications": {
                     "model_summary": "TEXT NOT NULL DEFAULT ''",
@@ -1327,6 +1536,16 @@ class KolPostStore:
                     "stage": "TEXT NOT NULL DEFAULT 'queued'",
                     "progress_current": "INTEGER NOT NULL DEFAULT 0",
                     "progress_total": "INTEGER NOT NULL DEFAULT 0",
+                    "platform_breakdown_json": "TEXT NOT NULL DEFAULT '{}'",
+                },
+                "x_page_checkpoints": {
+                    "user_id": "TEXT NOT NULL DEFAULT ''",
+                },
+                "x_collection_policy": {
+                    "public_enabled": "INTEGER NOT NULL DEFAULT 1",
+                    "public_limit_24h": "INTEGER NOT NULL DEFAULT 30",
+                    "public_paused_until": "TEXT NOT NULL DEFAULT ''",
+                    "public_pause_reason": "TEXT NOT NULL DEFAULT ''",
                 },
             }
             for table, columns in migrations.items():
@@ -1334,6 +1553,39 @@ class KolPostStore:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            budget_columns = db.execute("PRAGMA table_info(x_request_budget)").fetchall()
+            budget_names = {row[1] for row in budget_columns}
+            budget_slot_required = any(row[1] == "slot_id" and int(row[3]) == 1 for row in budget_columns)
+            if "source" not in budget_names or budget_slot_required:
+                # Early builds made slot_id mandatory. Rebuild this small
+                # append-only audit table so public (cookie-free) requests can
+                # use a NULL slot without inventing a personal account.
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS x_request_budget_v2 (
+                        request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        slot_id INTEGER REFERENCES x_session_slots(slot_id),
+                        source TEXT NOT NULL DEFAULT 'primary' CHECK(source IN ('primary','public')),
+                        batch_key TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        estimated_requests INTEGER NOT NULL DEFAULT 1,
+                        reserved_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'reserved' CHECK(status IN ('reserved','completed','failed','cancelled')),
+                        error_code TEXT NOT NULL DEFAULT '',
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+                    INSERT INTO x_request_budget_v2(request_id,slot_id,source,batch_key,operation,estimated_requests,reserved_at,completed_at,status,error_code,error)
+                    SELECT request_id,slot_id,'primary',batch_key,operation,estimated_requests,reserved_at,completed_at,status,error_code,error
+                    FROM x_request_budget;
+                    DROP TABLE x_request_budget;
+                    ALTER TABLE x_request_budget_v2 RENAME TO x_request_budget;
+                    CREATE INDEX IF NOT EXISTS idx_x_request_budget_time
+                        ON x_request_budget(reserved_at,slot_id,source,status);
+                    """
+                )
+                db.execute("PRAGMA foreign_keys=ON")
             db.execute(
                 """
                 INSERT OR IGNORE INTO post_sources(
@@ -1354,7 +1606,7 @@ class KolPostStore:
             if db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0] == 0:
                 db.execute("INSERT INTO schema_meta(version) VALUES (16)")
             else:
-                db.execute("UPDATE schema_meta SET version=16")
+                db.execute("UPDATE schema_meta SET version=18")
             db.execute(
                 """
                 UPDATE classifications
@@ -1422,6 +1674,7 @@ class KolPostStore:
             ("gap_kols_json", "gap_kols", []),
             ("fallback_kols_json", "fallback_kols", []),
             ("shadow_failed_kols_json", "shadow_failed_kols", []),
+            ("platform_breakdown_json", "platform_breakdown", {}),
             ("errors_json", "errors", []),
             ("warnings_json", "warnings", []),
         ]:
@@ -1464,8 +1717,9 @@ class KolPostStore:
             cursor = db.execute(
                 """
                 INSERT INTO kols(
-                    display_name,platform,handle,profile_url,domain,status,tracking_mode,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    display_name,platform,handle,profile_url,domain,status,tracking_mode,
+                    external_account_id,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     display_name.strip() or clean_handle,
@@ -1475,6 +1729,7 @@ class KolPostStore:
                     domain.strip(),
                     status,
                     tracking_mode,
+                    clean_handle,
                     timestamp,
                     timestamp,
                 ),
@@ -1501,15 +1756,70 @@ class KolPostStore:
         assert result is not None
         return result
 
-    def list_kols(self, status: str | None = None) -> list[dict[str, Any]]:
+    def set_account_availability(
+        self,
+        kol_id: int,
+        status: str,
+        *,
+        reason: str = "",
+        source: str = "system",
+    ) -> dict[str, Any]:
+        allowed = {
+            "active", "rate_limited", "provider_failed", "protected",
+            "suspected_unavailable", "suspended", "deleted", "renamed", "paused",
+        }
+        if status not in allowed:
+            raise ValueError(f"invalid account availability status: {status}")
+        timestamp = now_iso()
+        with self.connect() as db:
+            previous = db.execute(
+                "SELECT availability_status,availability_reason FROM kols WHERE id=?",
+                (kol_id,),
+            ).fetchone()
+            cursor = db.execute(
+                """
+                UPDATE kols SET availability_status=?,availability_reason=?,
+                    availability_checked_at=?,updated_at=? WHERE id=?
+                """,
+                (status, reason[:2000], timestamp, timestamp, kol_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"KOL not found: {kol_id}")
+            if previous is None or str(previous["availability_status"] or "active") != status or str(previous["availability_reason"] or "") != reason[:2000]:
+                db.execute(
+                    """
+                    INSERT INTO kol_account_status_history(kol_id,status,reason,source,observed_at)
+                    VALUES(?,?,?,?,?)
+                    """,
+                    (kol_id, status, reason[:2000], source[:100], timestamp),
+                )
+        result = self.get_kol(kol_id)
+        assert result is not None
+        return result
+
+    def account_availability_history(self, kol_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM kol_account_status_history WHERE kol_id=? ORDER BY observed_at DESC LIMIT ?",
+                (kol_id, max(1, min(limit, 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_kols(self, status: str | None = None, platform: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM kols"
-        params: tuple[Any, ...] = ()
+        conditions: list[str] = []
+        params: list[Any] = []
         if status:
-            query += " WHERE status=?"
-            params = (status,)
+            conditions.append("status=?")
+            params.append(status)
+        if platform:
+            conditions.append("lower(platform)=?")
+            params.append(platform.casefold())
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY display_name COLLATE NOCASE"
         with self.connect() as db:
-            return [dict(row) for row in db.execute(query, params).fetchall()]
+            return [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
 
     def get_kol(self, kol_id: int) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -1619,6 +1929,12 @@ class KolPostStore:
                 """
                 UPDATE kols
                 SET last_post_id=?,last_fetched_at=?,last_success_at=?,fetch_status=?,
+                    availability_status=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN 'active' ELSE availability_status END,
+                    availability_reason=CASE
+                        WHEN ?='success' AND availability_status IN ('rate_limited','provider_failed')
+                        THEN '' ELSE availability_reason END,
                     last_gap_at=CASE WHEN ?='gap_detected' THEN ? ELSE last_gap_at END,
                     consecutive_failures=?,backfill_requested=?,backfill_status=?,
                     backfill_completed_depth=?,backfill_result_count=?,backfill_warning=?,
@@ -1629,6 +1945,8 @@ class KolPostStore:
                     stored_post_id,
                     timestamp,
                     last_success_at,
+                    status,
+                    status,
                     status,
                     status,
                     timestamp,
@@ -1658,9 +1976,13 @@ class KolPostStore:
         timestamp = now_iso()
         with self.connect() as db:
             existing = db.execute("SELECT * FROM posts WHERE post_id=?", (post.post_id,)).fetchone()
+            existing_has_content = bool(
+                existing is not None
+                and (str(existing["text"] or "").strip() or str(existing["article_text"] or "").strip())
+            )
             warning = post.provider_warning
             if existing is not None:
-                if str(existing["content_hash"] or "") != post.content_hash:
+                if not existing_has_content and str(existing["content_hash"] or "") != post.content_hash:
                     db.execute(
                         """
                         INSERT INTO post_content_revisions(
@@ -1707,6 +2029,25 @@ class KolPostStore:
                     _json([warning] if warning else []),
                 ),
             ) if existing is not None else None
+
+            # A complete private/archive row is authoritative.  Bulk account
+            # fetches may provide fresher metrics or an alternate raw source,
+            # but must never replace its正文、媒体、原始响应、摘要或内容哈希.
+            if existing is not None and existing_has_content:
+                db.execute(
+                    """
+                    UPDATE posts SET metrics_json=?,metrics_provider=?,provider_warning=?,fetched_at=?
+                    WHERE post_id=?
+                    """,
+                    (
+                        _json(post.metrics),
+                        post.metrics_provider,
+                        warning or str(existing["provider_warning"] or ""),
+                        post.fetched_at,
+                        post.post_id,
+                    ),
+                )
+                return False
 
             if existing is None:
                 db.execute(
@@ -2429,8 +2770,15 @@ class KolPostStore:
     ) -> None:
         status = "failed" if error else "completed"
         value = payload or {}
+        with self.connect() as db:
+            attempt_row = db.execute(
+                "SELECT model_attempts FROM classifications WHERE post_id=?",
+                (post_id,),
+            ).fetchone()
+        attempts_before = int(attempt_row[0] or 0) if attempt_row else 0
+        retry_delays = (timedelta(minutes=30), timedelta(hours=6), timedelta(hours=24))
         retry_at = (
-            (datetime.now(SHANGHAI) + timedelta(hours=6)).isoformat(timespec="seconds")
+            (datetime.now(SHANGHAI) + retry_delays[min(attempts_before, 2)]).isoformat(timespec="seconds")
             if error
             else ""
         )
@@ -2496,6 +2844,148 @@ class KolPostStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"classification not found: {post_id}")
+
+    def enqueue_post_recovery(self, *, platform: str = "") -> int:
+        """Queue public link-only rows for content hydration, idempotently."""
+        timestamp = now_iso()
+        clauses = [
+            "p.canonical_provider='public-dataset-recovery'",
+            "trim(coalesce(p.text,''))=''",
+            "trim(coalesce(p.article_text,''))=''",
+        ]
+        params: list[Any] = []
+        if platform:
+            clauses.append("p.platform=?")
+            params.append(platform)
+        where = " AND ".join(clauses)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT p.post_id,p.kol_id,p.platform,p.handle,p.url FROM posts p WHERE {where}",
+                params,
+            ).fetchall()
+            db.executemany(
+                """
+                INSERT INTO post_recovery_queue(
+                    post_id,kol_id,platform,handle,url,state,attempts,next_attempt_at,
+                    last_error_code,last_error,provider,queued_at,hydrated_at,updated_at
+                ) VALUES(?,?,?,?,?,'queued',0,'','','','',?,?,?)
+                ON CONFLICT(post_id) DO UPDATE SET
+                    kol_id=excluded.kol_id,platform=excluded.platform,handle=excluded.handle,
+                    url=excluded.url,updated_at=excluded.updated_at
+                """,
+                [
+                    (row["post_id"], row["kol_id"], row["platform"], row["handle"], row["url"], timestamp, "", timestamp)
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def list_post_recovery_queue(
+        self, *, platform: str = "", limit: int = 100, resume: bool = True
+    ) -> list[dict[str, Any]]:
+        clauses = ["state IN ('queued','cooldown')"] if resume else ["state='queued'"]
+        params: list[Any] = []
+        if platform:
+            clauses.append("platform=?")
+            params.append(platform)
+        clauses.append("(next_attempt_at='' OR next_attempt_at<=?)")
+        params.append(now_iso())
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM post_recovery_queue WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY updated_at,post_id LIMIT ?",
+                (*params, max(1, min(int(limit), 1000))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_post_recovery_running(self, post_id: str) -> bool:
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE post_recovery_queue SET state='running',attempts=attempts+1,updated_at=? "
+                "WHERE post_id=? AND state IN ('queued','cooldown') AND (next_attempt_at='' OR next_attempt_at<=?)",
+                (now_iso(), post_id, now_iso()),
+            )
+            return cursor.rowcount > 0
+
+    def reconcile_post_recovery_queue(self) -> int:
+        """Mark link-only queue rows hydrated when a bulk account fetch filled them."""
+        timestamp = now_iso()
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT q.post_id
+                FROM post_recovery_queue q
+                JOIN posts p ON p.post_id=q.post_id
+                WHERE q.state IN ('queued','cooldown','running')
+                  AND (trim(coalesce(p.text,''))<>'' OR trim(coalesce(p.article_text,''))<>'')
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+            db.execute(
+                """
+                UPDATE post_recovery_queue
+                SET state='hydrated',next_attempt_at='',last_error_code='',last_error='',
+                    provider=COALESCE(NULLIF((SELECT p.canonical_provider FROM posts p WHERE p.post_id=post_recovery_queue.post_id),''),'bulk-fetch'),
+                    hydrated_at=COALESCE(NULLIF(hydrated_at,''),?),updated_at=?
+                WHERE state IN ('queued','cooldown','running')
+                  AND EXISTS (
+                    SELECT 1 FROM posts p WHERE p.post_id=post_recovery_queue.post_id
+                      AND (trim(coalesce(p.text,''))<>'' OR trim(coalesce(p.article_text,''))<>'')
+                  )
+                """,
+                (timestamp, timestamp),
+            )
+        return len(rows)
+
+    def finish_post_recovery(
+        self,
+        post_id: str,
+        *,
+        state: str,
+        provider: str = "",
+        error_code: str = "",
+        error: str = "",
+        retry_after_seconds: int = 0,
+    ) -> None:
+        if state not in {"queued", "cooldown", "hydrated", "terminal"}:
+            raise ValueError(f"invalid post recovery state: {state}")
+        timestamp = now_iso()
+        next_attempt = ""
+        if retry_after_seconds:
+            next_attempt = (datetime.now(SHANGHAI) + timedelta(seconds=retry_after_seconds)).isoformat(timespec="seconds")
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE post_recovery_queue SET state=?,next_attempt_at=?,last_error_code=?,last_error=?,
+                    provider=COALESCE(NULLIF(?,''),provider),hydrated_at=CASE WHEN ?='hydrated' THEN ? ELSE hydrated_at END,
+                    updated_at=? WHERE post_id=?
+                """,
+                (state, next_attempt, error_code[:80], error[:2000], provider, state, timestamp, timestamp, post_id),
+            )
+
+    def post_recovery_summary(self, *, platform: str = "") -> dict[str, Any]:
+        clauses = ["1=1"]
+        params: list[Any] = []
+        if platform:
+            clauses.append("platform=?")
+            params.append(platform)
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT state,count(*) AS count FROM post_recovery_queue WHERE "
+                + " AND ".join(clauses) + " GROUP BY state",
+                params,
+            ).fetchall()
+        values = {str(row["state"]): int(row["count"]) for row in rows}
+        return {
+            "total": sum(values.values()),
+            "queued": values.get("queued", 0),
+            "running": values.get("running", 0),
+            "cooldown": values.get("cooldown", 0),
+            "hydrated": values.get("hydrated", 0),
+            "terminal": values.get("terminal", 0),
+        }
 
     def get_post(self, post_id: str) -> dict[str, Any]:
         with self.connect() as db:
@@ -2673,6 +3163,7 @@ class KolPostStore:
                 """
                 SELECT p.post_id FROM posts p JOIN classifications c ON c.post_id=p.post_id
                 WHERE p.review_status='pending' AND c.is_candidate=1
+                    AND c.model_status IN ('not_requested','failed')
                     AND p.local_media_json NOT IN ('','[]')
                     AND (
                         c.ocr_status='not_requested' OR (
@@ -2682,7 +3173,7 @@ class KolPostStore:
                     )
                 ORDER BY p.posted_at DESC LIMIT ?
                 """,
-                (timestamp, max(1, min(limit, 50))),
+                (timestamp, max(1, min(limit, 150))),
             ).fetchall()
             ids = [str(row["post_id"]) for row in rows]
             if ids:
@@ -2742,7 +3233,15 @@ class KolPostStore:
 
     def prepare_model_queue(self) -> int:
         with self.connect() as db:
-            cursor = db.execute(
+            non_candidates = db.execute(
+                """
+                UPDATE classifications SET model_status='not_needed',model_name='rules',
+                    model_error='',updated_at=?
+                WHERE is_candidate=0 AND model_status='not_requested'
+                """,
+                (now_iso(),),
+            )
+            resolved_candidates = db.execute(
                 """
                 UPDATE classifications SET model_status='not_needed',model_name='rules+ocr',
                     model_error='',updated_at=?
@@ -2753,7 +3252,15 @@ class KolPostStore:
                 """,
                 (now_iso(),),
             )
-        return int(cursor.rowcount)
+        return int(non_candidates.rowcount) + int(resolved_candidates.rowcount)
+
+    def release_model_claim(self, post_id: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE classifications SET model_status='not_requested',updated_at=? "
+                "WHERE post_id=? AND model_status='running'",
+                (now_iso(), post_id),
+            )
 
     def claim_posts_for_model(
         self,
@@ -2804,7 +3311,8 @@ class KolPostStore:
                     )
                     AND c.ocr_status IN ('not_needed','completed','failed')
                     AND (c.rule_symbols_json='[]' OR c.rule_direction='' OR c.evidence_type='ambiguous')
-                    ORDER BY p.posted_at DESC LIMIT ?
+                    ORDER BY CASE c.model_status WHEN 'not_requested' THEN 0 ELSE 1 END,
+                             p.posted_at DESC LIMIT ?
                     """,
                     (timestamp, row_limit),
                 ).fetchall()
@@ -2949,6 +3457,90 @@ class KolPostStore:
             "last_fetch_run": last_run,
         }
 
+    def model_queue_summary(
+        self,
+        *,
+        daily_limit: int = 250,
+        ocr_daily_limit: int = 150,
+    ) -> dict[str, Any]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT c.model_status,COUNT(*) count
+                FROM classifications c JOIN posts p ON p.post_id=c.post_id
+                WHERE p.review_status='pending' AND c.is_candidate=1
+                GROUP BY c.model_status
+                """
+            ).fetchall()
+            processable = int(db.execute(
+                """
+                SELECT COUNT(*)
+                FROM classifications c JOIN posts p ON p.post_id=c.post_id
+                WHERE p.review_status='pending' AND c.is_candidate=1
+                  AND (
+                    c.model_status IN ('not_requested','running')
+                    OR (c.model_status='failed' AND c.model_attempts<3)
+                  )
+                  AND c.ocr_status IN ('not_needed','completed','failed')
+                  AND (c.rule_symbols_json='[]' OR c.rule_direction='' OR c.evidence_type='ambiguous')
+                """
+            ).fetchone()[0])
+            manual_attention = int(db.execute(
+                """
+                SELECT COUNT(*)
+                FROM classifications c JOIN posts p ON p.post_id=c.post_id
+                WHERE p.review_status='pending' AND c.is_candidate=1
+                  AND c.model_status='failed' AND c.model_attempts>=3
+                """
+            ).fetchone()[0])
+            awaiting_ocr = int(db.execute(
+                """
+                SELECT COUNT(*)
+                FROM classifications c JOIN posts p ON p.post_id=c.post_id
+                WHERE p.review_status='pending' AND c.is_candidate=1
+                  AND c.model_status IN ('not_requested','failed')
+                  AND p.local_media_json NOT IN ('','[]')
+                  AND (
+                    c.ocr_status IN ('not_requested','running')
+                    OR (c.ocr_status='failed' AND c.ocr_attempts<3)
+                  )
+                """
+            ).fetchone()[0])
+            ocr_manual_attention = int(db.execute(
+                """
+                SELECT COUNT(*)
+                FROM classifications c JOIN posts p ON p.post_id=c.post_id
+                WHERE p.review_status='pending' AND c.is_candidate=1
+                  AND c.model_status IN ('not_requested','failed')
+                  AND c.ocr_status='failed' AND c.ocr_attempts>=3
+                """
+            ).fetchone()[0])
+            non_candidate_pending = int(db.execute(
+                "SELECT COUNT(*) FROM classifications WHERE is_candidate=0 AND model_status='not_requested'"
+            ).fetchone()[0])
+        counts = {str(row["model_status"]): int(row["count"]) for row in rows}
+        limit = max(1, int(daily_limit))
+        ocr_limit = max(1, int(ocr_daily_limit))
+        estimated_model_days = (processable + limit - 1) // limit
+        estimated_ocr_days = (awaiting_ocr + ocr_limit - 1) // ocr_limit
+        return {
+            "candidate_total": sum(counts.values()),
+            "completed": counts.get("completed", 0),
+            "not_requested": counts.get("not_requested", 0),
+            "running": counts.get("running", 0),
+            "failed": counts.get("failed", 0),
+            "not_needed": counts.get("not_needed", 0),
+            "processable_remaining": processable,
+            "awaiting_ocr": awaiting_ocr,
+            "manual_attention": manual_attention + ocr_manual_attention,
+            "model_manual_attention": manual_attention,
+            "ocr_manual_attention": ocr_manual_attention,
+            "non_candidate_not_requested": non_candidate_pending,
+            "daily_limit": limit,
+            "ocr_daily_limit": ocr_limit,
+            "estimated_days": max(estimated_model_days, estimated_ocr_days),
+        }
+
     def prepare_fetch_queue(
         self,
         batch_key: str,
@@ -3010,6 +3602,8 @@ class KolPostStore:
                 SELECT k.*
                 FROM fetch_queue q JOIN kols k ON k.id=q.kol_id
                 WHERE q.batch_key=? AND k.status='active'
+                  AND NOT EXISTS (SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=q.batch_key)
+                  AND COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','protected','paused')
                   AND (
                     q.state='queued'
                     OR (q.state='cooldown' AND (q.not_before='' OR q.not_before<=?))
@@ -3058,7 +3652,9 @@ class KolPostStore:
         not_before = (
             current + timedelta(seconds=max(0, int(cooldown_seconds)))
         ).isoformat(timespec="seconds")
-        state = "cooldown" if error_code in {"rate_limited", "authentication_failed"} else "queued"
+        state = "cooldown" if error_code in {
+            "rate_limited", "authentication_failed", "provider_incompatible"
+        } else "queued"
         with self.connect() as db:
             db.execute(
                 """
@@ -3102,7 +3698,8 @@ class KolPostStore:
     def latest_pending_fetch_batch(self, platform: str = "") -> str:
         query = (
             "SELECT batch_key,MAX(updated_at) latest FROM fetch_queue "
-            "WHERE state<>'completed'"
+            "WHERE state<>'completed' AND NOT EXISTS "
+            "(SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=fetch_queue.batch_key)"
         )
         params: list[Any] = []
         if platform:
@@ -3112,6 +3709,220 @@ class KolPostStore:
         with self.connect() as db:
             row = db.execute(query, params).fetchone()
         return str(row["batch_key"]) if row else ""
+
+    def reset_interrupted_fetch_queue(self, batch_key: str) -> int:
+        """Make queue items from a killed recovery worker resumable."""
+        timestamp = now_iso()
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE fetch_queue
+                SET state='queued',started_at='',updated_at=?
+                WHERE batch_key=? AND state='running'
+                """,
+                (timestamp, batch_key),
+            )
+        return max(0, cursor.rowcount)
+
+    def reopen_fetch_queue(self, batch_key: str) -> int:
+        """Requeue completed rows for the next persisted cursor page.
+
+        Historical recovery deliberately processes one page per invocation;
+        the database cursor, not the queue's completed flag, is the source of
+        truth for the next page.
+        """
+        timestamp = now_iso()
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE fetch_queue SET state='queued',started_at='',completed_at='',updated_at=? "
+                "WHERE batch_key=? AND state='completed' AND NOT EXISTS ("
+                "SELECT 1 FROM x_page_checkpoints c WHERE c.kol_id=fetch_queue.kol_id AND c.phase='completed')",
+                (timestamp, batch_key),
+            )
+        return max(0, cursor.rowcount)
+
+    def archive_legacy_fetch_batches(self, older_than: datetime) -> list[str]:
+        cutoff = older_than.astimezone(SHANGHAI).isoformat(timespec="seconds")
+        timestamp = now_iso()
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT batch_key FROM fetch_queue WHERE updated_at<? GROUP BY batch_key",
+                (cutoff,),
+            ).fetchall()
+            keys = [str(row["batch_key"]) for row in rows]
+            for key in keys:
+                db.execute(
+                    "INSERT OR IGNORE INTO fetch_batch_archive(batch_key,reason,archived_at) VALUES(?,?,?)",
+                    (key, "superseded_legacy", timestamp),
+                )
+        return keys
+
+    def create_fetch_batch(
+        self,
+        batch_id: str,
+        *,
+        batch_kind: str,
+        platform: str,
+        window_start: str,
+        window_end: str,
+        strategy_version: str,
+        total_kols: int,
+    ) -> None:
+        if batch_kind not in {"freshness", "recent_recovery", "historical_recovery"}:
+            raise ValueError(f"invalid fetch batch kind: {batch_kind}")
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO fetch_batches(
+                    batch_id,batch_kind,platform,window_start,window_end,
+                    strategy_version,status,total_kols,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?, 'running',?,?,?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    status='running',
+                    error=''
+                """,
+                (
+                    batch_id,
+                    batch_kind,
+                    platform,
+                    window_start,
+                    window_end,
+                    strategy_version,
+                    max(0, int(total_kols)),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def finish_fetch_batch(
+        self,
+        batch_id: str,
+        *,
+        status: str,
+        completed_kols: int,
+        successful_kols: int,
+        failed_kols: int,
+        new_posts: int,
+        error: str = "",
+    ) -> None:
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE fetch_batches SET status=?,completed_kols=?,successful_kols=?,
+                    failed_kols=?,new_posts=?,error=?,updated_at=?,completed_at=?
+                WHERE batch_id=?
+                """,
+                (
+                    status,
+                    max(0, int(completed_kols)),
+                    max(0, int(successful_kols)),
+                    max(0, int(failed_kols)),
+                    max(0, int(new_posts)),
+                    error[:2000],
+                    timestamp,
+                    timestamp,
+                    batch_id,
+                ),
+            )
+
+    def collection_coverage(
+        self,
+        *,
+        platform: str = "",
+        window_start: str = "",
+        window_end: str = "",
+    ) -> dict[str, Any]:
+        conditions = ["k.status='active'", "COALESCE(k.availability_status,'active') NOT IN ('suspended','deleted','paused')"]
+        params: list[Any] = []
+        if platform:
+            conditions.append("lower(k.platform)=?")
+            params.append(platform.casefold())
+        where = " AND ".join(conditions)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT k.id,k.display_name,k.platform,k.handle,k.last_success_at,
+                       k.fetch_status,k.availability_status,k.availability_reason,
+                       COUNT(CASE WHEN p.posted_at>=? AND p.posted_at<=? THEN 1 END) AS window_posts
+                FROM kols k LEFT JOIN posts p ON p.kol_id=k.id
+                WHERE {where}
+                GROUP BY k.id
+                ORDER BY lower(k.platform),lower(k.display_name)
+                """,
+                (window_start or "0000-01-01", window_end or "9999-12-31", *params),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        total = len(items)
+        successful = sum(
+            1 for item in items
+            if str(item.get("last_success_at") or "")
+            and str(item.get("fetch_status") or "") in {"success", "gap_detected"}
+            and (
+                not window_start
+                or str(item.get("last_success_at") or "")[:10] >= window_start
+            )
+        )
+        return {
+            "platform": platform or "all",
+            "window_start": window_start,
+            "window_end": window_end,
+            "target": total,
+            "successful": successful,
+            "coverage": successful / total if total else 0.0,
+            "items": items,
+        }
+
+    def open_collection_gap(
+        self,
+        kol_id: int,
+        *,
+        platform: str,
+        window_start: str,
+        window_end: str,
+        last_post_id: str = "",
+        recovery_depth: int = 0,
+        status: str = "open",
+        error: str = "",
+    ) -> None:
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO collection_gaps(
+                    kol_id,platform,window_start,window_end,last_post_id,
+                    recovery_depth,status,error,last_verified_at,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(kol_id,window_start,window_end) DO UPDATE SET
+                    last_post_id=excluded.last_post_id,recovery_depth=excluded.recovery_depth,
+                    status=excluded.status,error=excluded.error,
+                    last_verified_at=excluded.last_verified_at,updated_at=excluded.updated_at
+                """,
+                (
+                    kol_id,
+                    platform,
+                    window_start,
+                    window_end,
+                    last_post_id,
+                    max(0, int(recovery_depth)),
+                    status,
+                    error[:2000],
+                    timestamp if status == "closed" else "",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def list_collection_gaps(self, *, status: str = "open", limit: int = 500) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT g.*,k.handle,k.display_name FROM collection_gaps g JOIN kols k ON k.id=g.kol_id "
+                "WHERE g.status=? ORDER BY g.updated_at LIMIT ?",
+                (status, max(1, min(int(limit), 5000))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def start_fetch_run(self, requested_count: int, *, total_kols: int = 0) -> str:
         run_id = uuid.uuid4().hex
@@ -3156,7 +3967,15 @@ class KolPostStore:
             )
 
     def finish_fetch_run(self, summary: FetchSummary) -> None:
-        status = "failed" if summary.successful_kols == 0 and summary.failed_kols else "partial" if summary.failed_kols else "success"
+        status = (
+            "blocked"
+            if summary.blocked_platforms and summary.successful_kols == 0
+            else "failed"
+            if summary.successful_kols == 0 and (summary.failed_kols or summary.blocked_platforms)
+            else "partial"
+            if summary.failed_kols or summary.blocked_platforms
+            else "success"
+        )
         with self.connect() as db:
             db.execute(
                 """
@@ -3164,7 +3983,7 @@ class KolPostStore:
                     processed_kols=CASE WHEN total_kols>0 THEN total_kols ELSE ? END,
                     successful_kols=?,failed_kols=?,
                     new_posts=?,candidate_posts=?,auth_status=?,gap_kols_json=?,fallback_kols_json=?,
-                    shadow_failed_kols_json=?,errors_json=? WHERE run_id=?
+                    shadow_failed_kols_json=?,platform_breakdown_json=?,errors_json=? WHERE run_id=?
                 """,
                 (
                     now_iso(),
@@ -3178,6 +3997,7 @@ class KolPostStore:
                     _json(summary.gap_kols),
                     _json(summary.fallback_kols),
                     _json(summary.shadow_failed_kols),
+                    _json(summary.platform_breakdown),
                     _json(summary.errors),
                     summary.run_id,
                 ),
@@ -3329,6 +4149,733 @@ class NitterCredentialStore(KeyringCredentialStore):
         return {"kind": "cookie", "auth_token": auth_token, "ct0": ct0}
 
 
+class ReaderCredentialStore(KeyringCredentialStore):
+    """Low-frequency reader identity, kept separate from the user's main X session."""
+
+    service_name = "ai-hub/twitter-reader"
+
+
+class XSessionManager:
+    """Guard a small, auditable pool of X reader sessions.
+
+    Credentials stay in Windows Credential Manager.  This class only persists
+    slot identity, request reservations, cooldowns, leases and pagination
+    checkpoints in the local KOL database.  A lease fixes one session to one
+    batch, so callers cannot switch sessions after a rate-limit response.
+    """
+
+    SLOT_IDS = (1, 2, 3)
+    SERVICE_PREFIX = "ai-hub/x-session/slot-"
+    DEFAULT_POLICY = {
+        "global_limit_24h": 180,
+        "session_limit_24h": 90,
+        "min_interval_seconds": 60,
+    }
+
+    def __init__(self, store: Any, *, gate_path: Path | None = None):
+        self.store = store
+        self.gate_path = Path(gate_path or Path(store.path).with_name("x-session-gate.lock"))
+        self._ensure_slots()
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(SHANGHAI)
+
+    @classmethod
+    def _timestamp(cls) -> str:
+        return cls._now().isoformat(timespec="seconds")
+
+    @staticmethod
+    def _parse_time(value: str) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value or ""))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _service(cls, slot_id: int) -> str:
+        if int(slot_id) not in cls.SLOT_IDS:
+            raise ValueError("X session slot must be 1, 2 or 3")
+        return f"{cls.SERVICE_PREFIX}{int(slot_id)}"
+
+    @staticmethod
+    def _keyring() -> Any:
+        import keyring  # type: ignore
+
+        return keyring
+
+    @classmethod
+    def _read_payload(cls, slot_id: int) -> dict[str, str] | None:
+        try:
+            raw = cls._keyring().get_password(cls._service(slot_id), "session") or ""
+            if not raw:
+                return None
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                return None
+            auth = str(value.get("auth_token") or "")
+            ct0 = str(value.get("ct0") or "")
+            if not auth or not ct0:
+                return None
+            return {"auth_token": auth, "ct0": ct0}
+        except Exception:
+            return None
+
+    @classmethod
+    def _write_payload(cls, slot_id: int, auth_token: str, ct0: str) -> None:
+        # Store one encrypted pair so an interrupted update cannot leave a
+        # slot with a new auth_token and an old ct0.
+        payload = json.dumps(
+            {"auth_token": auth_token, "ct0": ct0},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        cls._keyring().set_password(cls._service(slot_id), "session", payload)
+
+    def _ensure_slots(self) -> None:
+        timestamp = self._timestamp()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO x_collection_policy(policy_id,enabled,global_limit_24h,session_limit_24h,min_interval_seconds,public_enabled,public_limit_24h,next_slot_id,updated_at) VALUES(1,1,?,?,?,?,?,?,?)",
+                    (
+                        self.DEFAULT_POLICY["global_limit_24h"],
+                        self.DEFAULT_POLICY["session_limit_24h"],
+                        self.DEFAULT_POLICY["min_interval_seconds"],
+                        1,
+                        30,
+                        1,
+                        timestamp,
+                    ),
+                )
+                for slot_id in self.SLOT_IDS:
+                    db.execute(
+                        "INSERT OR IGNORE INTO x_session_slots(slot_id,label,credential_service,created_at,updated_at) VALUES(?,?,?,?,?)",
+                        (slot_id, f"X session {slot_id}", self._service(slot_id), timestamp, timestamp),
+                    )
+        # Only the existing primary slot is eligible for one-time migration.
+        # Reader/Nitter are deliberately not copied because they may be the
+        # same account and must never silently create a second identity.
+        if self._read_payload(1) is None:
+            try:
+                keyring = self._keyring()
+                auth = keyring.get_password("ai-hub/twitter-cli", "auth_token") or ""
+                ct0 = keyring.get_password("ai-hub/twitter-cli", "ct0") or ""
+                if auth and ct0:
+                    self._write_payload(1, auth, ct0)
+            except Exception:
+                pass
+
+    def _row(self, slot_id: int) -> dict[str, Any] | None:
+        with self.store.connect() as db:
+            row = db.execute("SELECT * FROM x_session_slots WHERE slot_id=?", (int(slot_id),)).fetchone()
+        return dict(row) if row else None
+
+    def slots(self) -> list[dict[str, Any]]:
+        self._ensure_slots()
+        with self.store.connect() as db:
+            rows = [dict(row) for row in db.execute("SELECT * FROM x_session_slots ORDER BY slot_id")]
+        now = self._now()
+        identities: dict[str, int] = {}
+        for row in rows:
+            identity = str(row.get("user_id") or "")
+            if identity:
+                identities[identity] = identities.get(identity, 0) + 1
+        for row in rows:
+            row["credential_configured"] = self._read_payload(int(row["slot_id"])) is not None
+            cooldown = self._parse_time(str(row.get("cooldown_until") or ""))
+            if row["status"] == "cooldown" and (cooldown is None or cooldown <= now):
+                row["status"] = "ready" if row["user_id"] and row["credential_configured"] else "pending_verification"
+            row["cooldown_active"] = bool(cooldown and cooldown > now)
+            row["duplicate_identity"] = bool(row.get("user_id") and identities.get(str(row["user_id"]), 0) > 1)
+        return rows
+
+    def credentials_for(self, slot_id: int) -> dict[str, str]:
+        payload = self._read_payload(int(slot_id))
+        if payload is None:
+            raise XSessionUnavailableError(f"X session slot {int(slot_id)} has no complete credentials")
+        return {"TWITTER_AUTH_TOKEN": payload["auth_token"], "TWITTER_CT0": payload["ct0"]}
+
+    def cli_config_dir(self) -> Path:
+        """Return a private config directory with retries disabled.
+
+        twitter-cli discovers config.yaml from its working directory.  Keeping
+        this file under the local runtime avoids modifying the user-level tool
+        installation and prevents a 429 from being retried by the CLI itself.
+        """
+        directory = Path(self.store.path).parent / "twitter-cli-config"
+        directory.mkdir(parents=True, exist_ok=True)
+        config = directory / "config.yaml"
+        if not config.exists():
+            config.write_text(
+                "fetch:\n  count: 20\nrateLimit:\n  requestDelay: 0\n  maxRetries: 0\n  retryBaseDelay: 60\n  maxCount: 20\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        return directory
+
+    def save_credentials(self, slot_id: int, auth_token: str, ct0: str, *, label: str = "") -> dict[str, Any]:
+        auth_token, ct0 = validate_twitter_credentials(auth_token, ct0)
+        slot_id = int(slot_id)
+        previous = self._read_payload(slot_id)
+        try:
+            self._write_payload(slot_id, auth_token, ct0)
+        except Exception as exc:
+            if previous:
+                try:
+                    self._write_payload(slot_id, previous["auth_token"], previous["ct0"])
+                except Exception:
+                    pass
+            raise CredentialStorageError("Windows Credential Manager 保存失败，本次输入未生效") from exc
+        timestamp = self._timestamp()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute(
+                    """UPDATE x_session_slots SET label=COALESCE(NULLIF(?,''),label),user_id='',screen_name='',
+                       status='pending_verification',enabled=0,last_verified_at='',cooldown_until='',
+                       last_error_code='',last_error='',consecutive_rate_limits=0,updated_at=? WHERE slot_id=?""",
+                    (label.strip(), timestamp, slot_id),
+                )
+        return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
+
+    def set_status(self, slot_id: int, status: str, *, reason: str = "") -> dict[str, Any]:
+        allowed = {"pending_verification", "ready", "cooldown", "auth_required", "disabled"}
+        if status not in allowed:
+            raise ValueError(f"unsupported X session status: {status}")
+        timestamp = self._timestamp()
+        enabled = 1 if status == "ready" else 0
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                row = db.execute("SELECT user_id FROM x_session_slots WHERE slot_id=?", (int(slot_id),)).fetchone()
+                if not row:
+                    raise KeyError(f"X session slot {slot_id} not found")
+                if status == "ready" and (not row["user_id"] or self._read_payload(int(slot_id)) is None):
+                    raise ValueError("X session must be verified and have complete credentials before enabling")
+                db.execute(
+                    "UPDATE x_session_slots SET status=?,enabled=?,last_error=?,updated_at=? WHERE slot_id=?",
+                    (status, enabled, reason[:2000], timestamp, int(slot_id)),
+                )
+        return next(item for item in self.slots() if int(item["slot_id"]) == int(slot_id))
+
+    @staticmethod
+    def _identity_from_payload(value: Any) -> tuple[str, str]:
+        found: list[tuple[str, str]] = []
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                identity = str(node.get("id") or node.get("user_id") or node.get("userId") or "").strip()
+                name = str(node.get("screenName") or node.get("username") or node.get("screen_name") or node.get("name") or "").strip()
+                if identity and identity.isdigit():
+                    found.append((identity, name))
+                for child in node.values():
+                    walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+        walk(value)
+        return found[0] if found else ("", "")
+
+    def verify_slot(self, slot_id: int, command: str, *, timeout_seconds: int = 30) -> dict[str, Any]:
+        slot_id = int(slot_id)
+        batch_key = f"verify:slot-{slot_id}:{uuid.uuid4().hex}"
+        credential_env = self.credentials_for(slot_id)
+        request_id = self.reserve_request(slot_id, batch_key=batch_key, operation="verify", cost=3, allow_unverified=True)
+        env = os.environ.copy()
+        env.update(credential_env)
+        env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        try:
+            completed = subprocess.run(
+                [command, "whoami", "--json"], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=max(10, min(timeout_seconds, 60)),
+                env=env, cwd=str(self.cli_config_dir()), check=False,
+            )
+            detail = (completed.stderr or completed.stdout or "").strip()
+            if completed.returncode != 0:
+                lowered = detail.casefold()
+                code = "rate_limited" if "429" in lowered or "rate" in lowered and "limit" in lowered else "auth_required" if any(token in lowered for token in ("auth", "unauthorized", "login", "cookie")) else "provider_error"
+                self.record_failure(slot_id, code, "X session verification failed")
+                self.finish_request(request_id, status="failed", error_code=code, error="verification failed")
+                return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
+            try:
+                payload = json.loads(completed.stdout or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            user_id, screen_name = self._identity_from_payload(payload)
+            if not user_id:
+                self.record_failure(slot_id, "provider_error", "X session identity was not returned")
+                self.finish_request(request_id, status="failed", error_code="provider_error", error="identity missing")
+                return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
+            self.mark_verified(slot_id, user_id, screen_name)
+            self.finish_request(request_id, status="completed")
+            return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
+        except subprocess.TimeoutExpired:
+            self.record_failure(slot_id, "provider_error", "X session verification timed out")
+            self.finish_request(request_id, status="failed", error_code="provider_error", error="verification timed out")
+            return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
+
+    def mark_verified(self, slot_id: int, user_id: str, screen_name: str = "") -> None:
+        timestamp = self._timestamp()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute(
+                    "UPDATE x_session_slots SET label=CASE WHEN label='' OR label LIKE 'X session %' THEN ? ELSE label END,user_id=?,screen_name=?,status='ready',enabled=1,last_verified_at=?,last_error_code='',last_error='',cooldown_until='',updated_at=? WHERE slot_id=?",
+                    (str(screen_name)[:100] or f"X session {slot_id}", str(user_id), str(screen_name)[:100], timestamp, timestamp, int(slot_id)),
+                )
+
+    def _policy(self) -> dict[str, Any]:
+        with self.store.connect() as db:
+            row = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
+        if not row:
+            self._ensure_slots()
+            return self._policy()
+        return dict(row)
+
+    def _recent_usage(self, *, slot_id: int | None = None) -> int:
+        cutoff = (self._now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        with self.store.connect() as db:
+            if slot_id is None:
+                row = db.execute("SELECT COALESCE(SUM(estimated_requests),0) AS total FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()
+            else:
+                slot = db.execute("SELECT user_id FROM x_session_slots WHERE slot_id=?", (int(slot_id),)).fetchone()
+                user_id = str(slot["user_id"] or "") if slot else ""
+                if user_id:
+                    row = db.execute("SELECT COALESCE(SUM(b.estimated_requests),0) AS total FROM x_request_budget b JOIN x_session_slots s ON s.slot_id=b.slot_id WHERE b.reserved_at>=? AND b.source='primary' AND s.user_id=? AND b.status<>'cancelled'", (cutoff, user_id)).fetchone()
+                else:
+                    row = db.execute("SELECT COALESCE(SUM(estimated_requests),0) AS total FROM x_request_budget WHERE reserved_at>=? AND source='primary' AND slot_id=? AND status<>'cancelled'", (cutoff, int(slot_id))).fetchone()
+        return int(row["total"] if row else 0)
+
+    def policy_status(self) -> dict[str, Any]:
+        policy = self._policy()
+        now = self._now()
+        paused = self._parse_time(str(policy.get("paused_until") or ""))
+        global_used = self._recent_usage()
+        cutoff = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+        with self.store.connect() as db:
+            public_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+        public_paused = self._parse_time(str(policy.get("public_paused_until") or ""))
+        slots = self.slots()
+        for row in slots:
+            row["used_24h"] = self._recent_usage(slot_id=int(row["slot_id"]))
+            row["remaining_24h"] = max(0, int(policy["session_limit_24h"]) - row["used_24h"])
+        return {
+            "enabled": bool(policy["enabled"]),
+            "global_limit_24h": int(policy["global_limit_24h"]),
+            "session_limit_24h": int(policy["session_limit_24h"]),
+            "min_interval_seconds": int(policy["min_interval_seconds"]),
+            "global_used_24h": global_used,
+            "global_remaining_24h": max(0, int(policy["global_limit_24h"]) - global_used),
+            "paused_until": str(policy.get("paused_until") or "") if paused and paused > now else "",
+            "pause_reason": str(policy.get("pause_reason") or ""),
+            "public_backup": {
+                "enabled": bool(policy.get("public_enabled", 1)) and bool(policy.get("enabled", 1)),
+                "provider": "fxtwitter",
+                "adapter_version": "x-tweet-fetcher-3.0.0+f057d6b",
+                "limit_24h": int(policy.get("public_limit_24h", 30)),
+                "used_24h": public_used,
+                "remaining_24h": max(0, int(policy.get("public_limit_24h", 30)) - public_used),
+                "paused_until": str(policy.get("public_paused_until") or "") if public_paused and public_paused > now else "",
+                "pause_reason": str(policy.get("public_pause_reason") or ""),
+            },
+            "next_slot_id": int(policy["next_slot_id"]),
+            "slots": slots,
+        }
+
+    def set_policy(self, *, enabled: bool | None = None, paused: bool | None = None, reason: str = "") -> dict[str, Any]:
+        timestamp = self._timestamp()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                current = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
+                if not current:
+                    self._ensure_slots()
+                    current = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
+                new_enabled = int(current["enabled"] if enabled is None else bool(enabled))
+                pause_until = ""
+                if paused:
+                    pause_until = (self._now() + timedelta(hours=24)).isoformat(timespec="seconds")
+                db.execute("UPDATE x_collection_policy SET enabled=?,paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1", (new_enabled, pause_until, reason[:2000], timestamp))
+        return self.policy_status()
+
+    def pause_global(self, reason: str, *, seconds: int = 7200) -> None:
+        timestamp = self._timestamp()
+        until = (self._now() + timedelta(seconds=max(60, int(seconds)))).isoformat(timespec="seconds")
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("UPDATE x_collection_policy SET paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1", (until, reason[:2000], timestamp))
+
+    def _lease_slot(self, batch_key: str, operation: str, *, allow_unverified: bool = False) -> int:
+        policy = self._policy()
+        now = self._now()
+        paused = self._parse_time(str(policy.get("paused_until") or ""))
+        if not bool(policy["enabled"]):
+            raise XSessionUnavailableError("X collection is manually paused")
+        if paused and paused > now:
+            raise XBudgetDeferredError(f"X collection paused until {paused.isoformat(timespec='seconds')}")
+        with self.store.connect() as db:
+            existing = db.execute("SELECT slot_id FROM x_batch_leases WHERE batch_key=? AND status IN ('active','paused')", (batch_key,)).fetchone()
+            if existing:
+                return int(existing["slot_id"])
+            rows = [dict(row) for row in db.execute("SELECT * FROM x_session_slots ORDER BY slot_id")]
+        start = int(policy["next_slot_id"])
+        ordered = sorted(rows, key=lambda row: ((int(row["slot_id"]) - start) % 3))
+        global_used = self._recent_usage()
+        if global_used >= int(policy["global_limit_24h"]):
+            self.pause_global("global request budget exhausted", seconds=3600)
+            raise XBudgetDeferredError("X global request budget exhausted")
+        for row in ordered:
+            slot_id = int(row["slot_id"])
+            if self._read_payload(slot_id) is None:
+                continue
+            cooldown = self._parse_time(str(row.get("cooldown_until") or ""))
+            if cooldown and cooldown > now:
+                continue
+            ready_after_cooldown = row["status"] == "ready" or (
+                row["status"] == "cooldown" and cooldown is not None and cooldown <= now
+            )
+            enabled_after_cooldown = bool(row["enabled"]) or (row["status"] == "cooldown" and cooldown is not None and cooldown <= now)
+            if not allow_unverified and (not ready_after_cooldown or not enabled_after_cooldown or not row["user_id"]):
+                continue
+            if self._recent_usage(slot_id=slot_id) >= int(policy["session_limit_24h"]):
+                continue
+            timestamp = self._timestamp()
+            with FileLock(str(self.gate_path), timeout=10):
+                with self.store.connect() as db:
+                    check = db.execute("SELECT slot_id FROM x_batch_leases WHERE batch_key=? AND status IN ('active','paused')", (batch_key,)).fetchone()
+                    if check:
+                        return int(check["slot_id"])
+                    db.execute("INSERT INTO x_batch_leases(batch_key,slot_id,operation,status,started_at,updated_at) VALUES(?,?,?,'active',?,?)", (batch_key, slot_id, operation, timestamp, timestamp))
+                    db.execute("UPDATE x_collection_policy SET next_slot_id=?,updated_at=? WHERE policy_id=1", (1 if slot_id == 3 else slot_id + 1, timestamp))
+            return slot_id
+        raise XSessionUnavailableError("no verified X session is currently available")
+
+    def batch_slot(self, batch_key: str, operation: str = "collection") -> int:
+        return self._lease_slot(batch_key, operation)
+
+    def reserve_request(
+        self,
+        slot_id: int,
+        *,
+        batch_key: str,
+        operation: str,
+        cost: int = 1,
+        allow_unverified: bool = False,
+    ) -> int:
+        slot_id = int(slot_id)
+        cost = max(1, int(cost))
+        policy = self._policy()
+        if not bool(policy["enabled"]):
+            raise XSessionUnavailableError("X collection is manually paused")
+        if not allow_unverified:
+            row = self._row(slot_id)
+            cooldown = self._parse_time(str(row.get("cooldown_until") or "")) if row else None
+            ready_after_cooldown = bool(row and (row["status"] == "ready" or (row["status"] == "cooldown" and cooldown and cooldown <= self._now())))
+            enabled_after_cooldown = bool(row and (row["enabled"] or (row["status"] == "cooldown" and cooldown and cooldown <= self._now())))
+            if not row or not ready_after_cooldown or not enabled_after_cooldown:
+                raise XSessionUnavailableError(f"X session slot {slot_id} is not ready")
+        cutoff = (self._now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        for _ in range(3):
+            wait_seconds = 0.0
+            with FileLock(str(self.gate_path), timeout=30):
+                with self.store.connect() as db:
+                    paused = self._parse_time(str(policy.get("paused_until") or ""))
+                    if paused and paused > self._now():
+                        raise XBudgetDeferredError(f"X collection paused until {paused.isoformat(timespec='seconds')}")
+                    global_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+                    slot_identity = db.execute("SELECT user_id FROM x_session_slots WHERE slot_id=?", (slot_id,)).fetchone()
+                    user_id = str(slot_identity["user_id"] or "") if slot_identity else ""
+                    if user_id:
+                        session_used = int(db.execute("SELECT COALESCE(SUM(b.estimated_requests),0) FROM x_request_budget b JOIN x_session_slots s ON s.slot_id=b.slot_id WHERE b.reserved_at>=? AND b.source='primary' AND s.user_id=? AND b.status<>'cancelled'", (cutoff, user_id)).fetchone()[0])
+                    else:
+                        session_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='primary' AND slot_id=? AND status<>'cancelled'", (cutoff, slot_id)).fetchone()[0])
+                    if global_used + cost > int(policy["global_limit_24h"]) or session_used + cost > int(policy["session_limit_24h"]):
+                        until = (self._now() + timedelta(hours=1)).isoformat(timespec="seconds")
+                        db.execute("UPDATE x_collection_policy SET paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1", (until, "X request budget exhausted", self._timestamp()))
+                        raise XBudgetDeferredError("X request budget exhausted")
+                    latest = db.execute("SELECT MAX(reserved_at) FROM x_request_budget WHERE reserved_at>=?", (cutoff,)).fetchone()[0]
+                    if user_id:
+                        latest_slot = db.execute("SELECT MAX(b.reserved_at) FROM x_request_budget b JOIN x_session_slots s ON s.slot_id=b.slot_id WHERE b.reserved_at>=? AND b.source='primary' AND s.user_id=?", (cutoff, user_id)).fetchone()[0]
+                    else:
+                        latest_slot = db.execute("SELECT MAX(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND source='primary' AND slot_id=?", (cutoff, slot_id)).fetchone()[0]
+                    for value in (latest, latest_slot):
+                        parsed = self._parse_time(str(value or ""))
+                        if parsed:
+                            wait_seconds = max(wait_seconds, int(policy["min_interval_seconds"]) - (self._now() - parsed).total_seconds())
+                    if wait_seconds <= 0:
+                        cursor = db.execute("INSERT INTO x_request_budget(slot_id,source,batch_key,operation,estimated_requests,reserved_at) VALUES(?, 'primary', ?,?,?,?)", (slot_id, batch_key, operation, cost, self._timestamp()))
+                        return int(cursor.lastrowid)
+            if wait_seconds > 0:
+                if wait_seconds > int(policy["min_interval_seconds"]) + 5:
+                    raise XBudgetDeferredError(f"X request interval opens in {int(wait_seconds)} seconds")
+                time.sleep(wait_seconds)
+        raise XBudgetDeferredError("X request gate could not reserve a permit")
+
+    def finish_request(self, request_id: int, *, status: str = "completed", error_code: str = "", error: str = "") -> None:
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("UPDATE x_request_budget SET status=?,completed_at=?,error_code=?,error=? WHERE request_id=?", (status, self._timestamp(), error_code[:80], error[:2000], int(request_id)))
+
+    def record_success(self, slot_id: int) -> None:
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("UPDATE x_session_slots SET last_success_at=?,cooldown_until='',last_error_code='',last_error='',consecutive_rate_limits=0,status='ready',enabled=1,updated_at=? WHERE slot_id=? AND status<>'disabled'", (self._timestamp(), self._timestamp(), int(slot_id)))
+
+    def record_failure(self, slot_id: int, error_code: str, error: str) -> None:
+        now = self._now()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                row = db.execute("SELECT consecutive_rate_limits FROM x_session_slots WHERE slot_id=?", (int(slot_id),)).fetchone()
+                count = int(row["consecutive_rate_limits"] if row else 0)
+                if error_code == "rate_limited":
+                    count += 1
+                cooldown = now + timedelta(hours=24 if count >= 2 else 2)
+                status = "cooldown" if error_code == "rate_limited" else "auth_required" if error_code == "auth_required" else "pending_verification"
+                db.execute("UPDATE x_session_slots SET status=?,enabled=0,cooldown_until=?,last_error_code=?,last_error=?,consecutive_rate_limits=?,updated_at=? WHERE slot_id=?", (status, cooldown.isoformat(timespec="seconds") if error_code == "rate_limited" else "", error_code[:80], error[:2000], count, self._timestamp(), int(slot_id)))
+
+    def kol_id_for_handle(self, handle: str) -> int:
+        with self.store.connect() as db:
+            row = db.execute("SELECT id FROM kols WHERE platform='X' AND handle=? COLLATE NOCASE", (str(handle).lstrip("@"),)).fetchone()
+        if not row:
+            raise KeyError(f"X KOL handle not found: {handle}")
+        return int(row["id"])
+
+    def checkpoint(self, kol_id: int) -> dict[str, Any] | None:
+        with self.store.connect() as db:
+            row = db.execute("SELECT * FROM x_page_checkpoints WHERE kol_id=?", (int(kol_id),)).fetchone()
+        return dict(row) if row else None
+
+    def save_checkpoint(self, kol_id: int, slot_id: int, *, phase: str, user_id: str = "", latest_seen_post_id: str = "", contiguous_post_id: str = "", cursor: str = "", pages_completed: int = 0, last_page_new_ids: int = 0, stop_reason: str = "") -> None:
+        timestamp = self._timestamp()
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("""INSERT INTO x_page_checkpoints(kol_id,slot_id,user_id,phase,latest_seen_post_id,contiguous_post_id,cursor,pages_completed,last_page_new_ids,stop_reason,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kol_id) DO UPDATE SET slot_id=excluded.slot_id,user_id=excluded.user_id,phase=excluded.phase,latest_seen_post_id=excluded.latest_seen_post_id,contiguous_post_id=excluded.contiguous_post_id,cursor=excluded.cursor,pages_completed=excluded.pages_completed,last_page_new_ids=excluded.last_page_new_ids,stop_reason=excluded.stop_reason,updated_at=excluded.updated_at""", (int(kol_id), int(slot_id), str(user_id), phase, latest_seen_post_id, contiguous_post_id, cursor, int(pages_completed), int(last_page_new_ids), stop_reason[:2000], timestamp))
+
+
+class PublicBackupDeferredError(TwitterProviderError):
+    """The cookie-free public backup is paused or over its shared budget."""
+
+
+class PublicBackupRateLimitError(TwitterRateLimitError):
+    """FxTwitter returned an upstream rate-limit response."""
+
+
+class PublicBackupNotFoundError(TwitterProviderError):
+    """The requested public URL is not available from FxTwitter."""
+
+
+class PublicBackupGate:
+    """Cookie-free request gate sharing the X global budget ledger."""
+
+    def __init__(self, store: Any, *, gate_path: Path | None = None):
+        self.store = store
+        self.gate_path = Path(gate_path or Path(store.path).with_name("x-session-gate.lock"))
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(SHANGHAI)
+
+    def _policy(self) -> dict[str, Any]:
+        with self.store.connect() as db:
+            row = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
+        return dict(row) if row else {
+            "enabled": 1, "global_limit_24h": 180, "public_enabled": 1,
+            "public_limit_24h": 30, "min_interval_seconds": 60,
+            "paused_until": "", "public_paused_until": "",
+        }
+
+    def status(self) -> dict[str, Any]:
+        policy = self._policy()
+        cutoff = (self._now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        with self.store.connect() as db:
+            global_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+            public_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+        now = self._now()
+        paused = XSessionManager._parse_time(str(policy.get("public_paused_until") or ""))
+        return {
+            "enabled": bool(policy.get("public_enabled", 1)) and bool(policy.get("enabled", 1)),
+            "provider": "fxtwitter",
+            "adapter_version": "x-tweet-fetcher-3.0.0+f057d6b",
+            "global_limit_24h": int(policy.get("global_limit_24h", 180)),
+            "public_limit_24h": int(policy.get("public_limit_24h", 30)),
+            "global_used_24h": global_used,
+            "public_used_24h": public_used,
+            "global_remaining_24h": max(0, int(policy.get("global_limit_24h", 180)) - global_used),
+            "public_remaining_24h": max(0, int(policy.get("public_limit_24h", 30)) - public_used),
+            "paused_until": str(policy.get("public_paused_until") or "") if paused and paused > now else "",
+            "pause_reason": str(policy.get("public_pause_reason") or ""),
+        }
+
+    def reserve(self, *, batch_key: str, operation: str, cost: int = 1) -> int:
+        cost = max(1, int(cost))
+        for _ in range(3):
+            policy = self._policy()
+            if not bool(policy.get("enabled", 1)) or not bool(policy.get("public_enabled", 1)):
+                raise PublicBackupDeferredError("public X backup is disabled")
+            now = self._now()
+            public_paused = XSessionManager._parse_time(str(policy.get("public_paused_until") or ""))
+            global_paused = XSessionManager._parse_time(str(policy.get("paused_until") or ""))
+            if global_paused and global_paused > now:
+                raise PublicBackupDeferredError("X collection is globally paused")
+            if public_paused and public_paused > now:
+                raise PublicBackupDeferredError("public X backup is cooling down")
+            cutoff = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+            wait_seconds = 0.0
+            with FileLock(str(self.gate_path), timeout=30):
+                with self.store.connect() as db:
+                    global_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+                    public_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0])
+                    if global_used + cost > int(policy.get("global_limit_24h", 180)):
+                        raise PublicBackupDeferredError("X global request budget exhausted")
+                    if public_used + cost > int(policy.get("public_limit_24h", 30)):
+                        oldest = db.execute("SELECT MIN(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0]
+                        reset = XSessionManager._parse_time(str(oldest or "")) or now
+                        until = max(now + timedelta(hours=2), reset + timedelta(hours=24))
+                        db.execute("UPDATE x_collection_policy SET public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1", (until.isoformat(timespec="seconds"), "FxTwitter public backup budget exhausted", now.isoformat(timespec="seconds")))
+                        raise PublicBackupDeferredError("public X backup budget exhausted")
+                    latest = db.execute("SELECT MAX(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0]
+                    parsed = XSessionManager._parse_time(str(latest or ""))
+                    if parsed:
+                        wait_seconds = max(0.0, int(policy.get("min_interval_seconds", 60)) - (now - parsed).total_seconds())
+                    if wait_seconds <= 0:
+                        cursor = db.execute("INSERT INTO x_request_budget(slot_id,source,batch_key,operation,estimated_requests,reserved_at) VALUES(NULL,'public',?,?,?,?)", (batch_key, operation, cost, now.isoformat(timespec="seconds")))
+                        return int(cursor.lastrowid)
+            if wait_seconds > int(policy.get("min_interval_seconds", 60)) + 5:
+                raise PublicBackupDeferredError("public X request interval is not open")
+            time.sleep(wait_seconds)
+        raise PublicBackupDeferredError("public X request gate could not reserve a permit")
+
+    def finish(self, request_id: int, *, status: str = "completed", error_code: str = "", error: str = "") -> None:
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("UPDATE x_request_budget SET status=?,completed_at=?,error_code=?,error=? WHERE request_id=?", (status, self._now().isoformat(timespec="seconds"), error_code[:80], error[:2000], int(request_id)))
+
+    def pause(self, reason: str, *, seconds: int = 7200) -> None:
+        until = (self._now() + timedelta(seconds=max(60, int(seconds)))).isoformat(timespec="seconds")
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                db.execute("UPDATE x_collection_policy SET public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1", (until, reason[:2000], self._now().isoformat(timespec="seconds")))
+
+    def set_policy(self, *, enabled: bool | None = None, paused: bool | None = None, reason: str = "") -> dict[str, Any]:
+        with FileLock(str(self.gate_path), timeout=10):
+            with self.store.connect() as db:
+                current = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
+                if not current:
+                    return self.status()
+                public_enabled = int(current["public_enabled"] if enabled is None else bool(enabled))
+                pause_until = str(current["public_paused_until"] or "")
+                pause_reason = str(current["public_pause_reason"] or "")
+                if paused is True:
+                    pause_until = (self._now() + timedelta(hours=24)).isoformat(timespec="seconds")
+                    pause_reason = reason or "public X backup manually paused"
+                elif paused is False:
+                    pause_until = ""
+                    pause_reason = ""
+                db.execute("UPDATE x_collection_policy SET public_enabled=?,public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1", (public_enabled, pause_until, pause_reason[:2000], self._now().isoformat(timespec="seconds")))
+        return self.status()
+
+
+class FxTwitterPublicPostProvider:
+    """Strict, no-cookie single-post adapter backed by the pinned XTF parser."""
+
+    name = "fxtwitter"
+    adapter_version = "x-tweet-fetcher-3.0.0+f057d6b"
+    _url_pattern = re.compile(r"^https://(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d{5,25})/?$")
+
+    def __init__(self, gate: PublicBackupGate, *, timeout_seconds: int = 15):
+        self.gate = gate
+        self.timeout_seconds = max(5, min(int(timeout_seconds), 30))
+
+    @staticmethod
+    def _normalise(tweet: dict[str, Any], response: dict[str, Any], username: str, post_id: str, url: str) -> dict[str, Any]:
+        site_packages = Path(os.environ.get("XTF_SITE_PACKAGES", Path(__file__).resolve().parents[2] / "_runtime" / "venv-x-fetcher" / "Lib" / "site-packages"))
+        import sys
+        if site_packages.is_dir() and str(site_packages) not in sys.path:
+            sys.path.insert(0, str(site_packages))
+        try:
+            from xtf.backends.fxtwitter import normalize_tweet_json  # type: ignore
+            normalized = normalize_tweet_json(tweet)
+        except Exception as exc:
+            raise TwitterProviderError(f"pinned XTF parser unavailable: {type(exc).__name__}") from exc
+        tweet_id = str(tweet.get("id") or response.get("tweet_id") or "")
+        if tweet_id != post_id:
+            raise TwitterProviderError("FxTwitter returned a different post ID")
+        created = str(tweet.get("created_at") or "")
+        created_at = parsedate_to_datetime(created).astimezone(timezone.utc).isoformat(timespec="seconds") if created else ""
+        if not created_at:
+            raise TwitterProviderError("FxTwitter returned no exact timestamp")
+        media: list[dict[str, Any]] = []
+        for item in (tweet.get("media") or {}).get("all", []) if isinstance(tweet.get("media"), dict) else []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            media.append({"type": str(item.get("type") or "image"), "url": str(item.get("url")), "width": item.get("width", 0), "height": item.get("height", 0)})
+        article = normalized.get("article") if isinstance(normalized.get("article"), dict) else {}
+        quote = tweet.get("quote") if isinstance(tweet.get("quote"), dict) else {}
+        quote_author = quote.get("author") if isinstance(quote.get("author"), dict) else {}
+        return {
+            "id": post_id,
+            "text": str(normalized.get("text") or ""),
+            "articleTitle": str(article.get("title") or ""),
+            "articleText": str(article.get("full_text") or ""),
+            "author": {"name": str(normalized.get("author") or username), "screenName": str(normalized.get("screen_name") or username)},
+            "createdAtISO": created_at,
+            "url": url,
+            "media": media,
+            "metrics": {"likes": normalized.get("likes", 0), "retweets": normalized.get("retweets", 0), "replies": normalized.get("replies_count", 0), "views": normalized.get("views", 0), "bookmarks": normalized.get("bookmarks", 0)},
+            "quotedTweet": {"id": str(quote.get("id") or ""), "text": str(quote.get("text") or ""), "author": {"name": str(quote_author.get("name") or ""), "screenName": str(quote_author.get("screen_name") or "")}} if quote else {},
+            "lang": str(normalized.get("lang") or ""),
+            "isRetweet": bool(tweet.get("retweeted_tweet") or tweet.get("retweet")),
+            "rawResponse": response,
+        }
+
+    def fetch_post(self, url: str, *, batch_key: str) -> dict[str, Any]:
+        match = self._url_pattern.fullmatch(str(url).strip())
+        if not match:
+            raise ValueError("public X backup accepts only a standard HTTPS post URL")
+        username, post_id = match.groups()
+        request_id = self.gate.reserve(batch_key=batch_key, operation="public_single_post", cost=1)
+        api_url = f"https://api.fxtwitter.com/{username}/status/{post_id}"
+        try:
+            request = urllib.request.Request(api_url, headers={"User-Agent": "ai-hub-x-public-backup/1"})
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read(10 * 1024 * 1024 + 1)
+                if len(raw) > 10 * 1024 * 1024:
+                    raise TwitterProviderError("FxTwitter response exceeded 10 MB")
+                payload = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(payload, dict):
+                raise TwitterProviderError("FxTwitter returned a non-object response")
+            code = int(payload.get("code") or 0)
+            if code == 404:
+                raise PublicBackupNotFoundError("FxTwitter public post was not found")
+            if code in {403, 429} or "rate" in str(payload.get("message") or "").casefold():
+                self.gate.pause("FxTwitter public backup rate limited", seconds=7200)
+                raise PublicBackupRateLimitError("FxTwitter public backup rate limited")
+            if code != 200 or not isinstance(payload.get("tweet"), dict):
+                raise TwitterProviderError("FxTwitter public response was unavailable")
+            result = self._normalise(dict(payload["tweet"]), payload, username, post_id, str(url).strip())
+            self.gate.finish(request_id, status="completed")
+            return result
+        except urllib.error.HTTPError as exc:
+            code = "rate_limited" if exc.code in {403, 429} else "upstream_error"
+            self.gate.finish(request_id, status="failed", error_code=code, error="FxTwitter HTTP response")
+            if exc.code in {403, 429}:
+                self.gate.pause("FxTwitter public backup rate limited", seconds=7200)
+                raise PublicBackupRateLimitError("FxTwitter public backup rate limited") from exc
+            if exc.code == 404:
+                raise PublicBackupNotFoundError("FxTwitter public post was not found") from exc
+            raise TwitterProviderError("FxTwitter public upstream HTTP error") from exc
+        except PublicBackupRateLimitError:
+            self.gate.finish(request_id, status="failed", error_code="rate_limited", error="FxTwitter public response")
+            raise
+        except PublicBackupNotFoundError:
+            self.gate.finish(request_id, status="failed", error_code="not_found", error="FxTwitter public response")
+            raise
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            self.gate.finish(request_id, status="failed", error_code="upstream_error", error="FxTwitter public request failed")
+            raise TwitterProviderError("FxTwitter public request failed") from exc
+        except Exception:
+            self.gate.finish(request_id, status="failed", error_code="provider_error", error="FxTwitter public parser failed")
+            raise
+
+
 class OpenCodeGoCredentialStore:
     service_name = "ai-hub/opencode-go"
 
@@ -3405,6 +4952,27 @@ class OpenCodeGoCredentialStore:
 DeepSeekCredentialStore = OpenCodeGoCredentialStore
 
 
+def _resolve_twitter_command(command: str) -> str:
+    """Resolve the managed twitter-cli executable for scheduled tasks."""
+    configured = str(command or os.environ.get("KOL_TWITTER_COMMAND", "twitter")).strip()
+    candidates = [configured]
+    if configured.casefold() in {"twitter", "twitter.exe"}:
+        candidates.extend(
+            [
+                str(Path.home() / ".local" / "bin" / "twitter.exe"),
+                str(Path.home() / ".local" / "bin" / "twitter"),
+            ]
+        )
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            return str(path.resolve())
+        resolved = shutil.which(candidate)
+        if resolved:
+            return str(Path(resolved).resolve())
+    return configured
+
+
 class TwitterCliProvider:
     name = "twitter-cli"
 
@@ -3415,14 +4983,133 @@ class TwitterCliProvider:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         timeout_seconds: int = 60,
         proxy_url: str = "",
+        session_manager: XSessionManager | None = None,
+        batch_key: str = "",
+        history_mode: bool = False,
     ):
-        self.command = command
+        self.command = _resolve_twitter_command(command)
         self.credentials = credentials or KeyringCredentialStore()
         self.runner = runner
         self.timeout_seconds = max(10, min(timeout_seconds, 180))
         self.proxy_url = proxy_url.strip()
+        self.session_manager = session_manager
+        self.batch_key = batch_key or f"x-run:{uuid.uuid4().hex}"
+        self.history_mode = bool(history_mode)
+        self._slot_id: int | None = None
+        self._direct_client: Any | None = None
+        self._direct_client_slot: int | None = None
+        self._direct_user_ids: dict[str, str] = {}
+
+    def _direct_client_for_slot(self, slot_id: int) -> Any:
+        if self._direct_client is not None and self._direct_client_slot == slot_id:
+            return self._direct_client
+        site_packages = Path(
+            os.environ.get(
+                "TWITTER_CLI_SITE_PACKAGES",
+                Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "twitter-cli" / "Lib" / "site-packages",
+            )
+        )
+        if not site_packages.is_dir():
+            raise TwitterProviderError(f"twitter-cli 0.8.5 runtime missing: {site_packages}")
+        import sys
+        if str(site_packages) not in sys.path:
+            sys.path.insert(0, str(site_packages))
+        try:
+            from twitter_cli.client import TwitterClient  # type: ignore
+        except Exception as exc:
+            raise TwitterProviderError(f"twitter-cli 0.8.5 import failed: {type(exc).__name__}") from exc
+        credentials = self.session_manager.credentials_for(slot_id) if self.session_manager else {
+            "TWITTER_AUTH_TOKEN": self.credentials.load_values()[0],
+            "TWITTER_CT0": self.credentials.load_values()[1],
+        }
+        self._direct_client = TwitterClient(
+            credentials["TWITTER_AUTH_TOKEN"],
+            credentials["TWITTER_CT0"],
+            {"requestDelay": 0, "maxRetries": 0, "retryBaseDelay": 60, "maxCount": 20},
+            cookie_string=f"auth_token={credentials['TWITTER_AUTH_TOKEN']}; ct0={credentials['TWITTER_CT0']}",
+        )
+        self._direct_client_slot = slot_id
+        return self._direct_client
+
+    def _fetch_guarded_page(self, handle: str, max_count: int) -> ProviderFetchResult:
+        assert self.session_manager is not None
+        if self._slot_id is None:
+            self._slot_id = self.session_manager.batch_slot(
+                self.batch_key,
+                "history" if self.history_mode else "freshness",
+            )
+        slot_id = self._slot_id
+        kol_id = self.session_manager.kol_id_for_handle(handle)
+        checkpoint = self.session_manager.checkpoint(kol_id) if kol_id else None
+        cursor = str(checkpoint.get("cursor") or "") if checkpoint else ""
+        user_id = str(checkpoint.get("user_id") or "") if checkpoint else ""
+        operation = "history_page" if self.history_mode else "freshness_page"
+        # Each page includes one authenticated profile lookup and one
+        # timeline request; the first client construction also performs the
+        # library's homepage/transaction bootstrap.  Charging conservatively
+        # keeps the project budget below the platform-facing request count.
+        cost = 2 if self._direct_client is not None or user_id else 4
+        request_id = self.session_manager.reserve_request(
+            slot_id,
+            batch_key=self.batch_key,
+            operation=operation,
+            cost=cost,
+        )
+        started = time.perf_counter()
+        try:
+            client = self._direct_client_for_slot(slot_id)
+            from twitter_cli.client import _deep_get, parse_timeline_response  # type: ignore
+            from twitter_cli.graphql import FEATURES  # type: ignore
+            from twitter_cli.serialization import tweet_to_dict  # type: ignore
+            if not user_id:
+                profile = client.fetch_user(handle.lstrip("@"))
+                user_id = str(profile.id)
+            variables = {
+                "userId": user_id,
+                "count": min(max(1, int(max_count)), 20),
+                "includePromotedContent": False,
+                "latestControlAvailable": True,
+                "requestContext": "launch",
+                "withQuickPromoteEligibilityTweetFields": True,
+                "withVoice": True,
+                "withV2Timeline": True,
+            }
+            if cursor:
+                variables["cursor"] = cursor
+            data = client._graphql_get("UserTweets", variables, FEATURES)
+            tweets, next_cursor = parse_timeline_response(
+                data,
+                lambda value: _deep_get(value, "data", "user", "result", "timeline_v2", "timeline", "instructions"),
+            )
+            posts = [tweet_to_dict(tweet) for tweet in tweets if getattr(tweet, "id", "")]
+            self.session_manager.finish_request(request_id, status="completed")
+            self.session_manager.record_success(slot_id)
+            return ProviderFetchResult(
+                provider=self.name,
+                posts=posts,
+                attempts=[ProviderAttempt(self.name, "success", len(posts), int((time.perf_counter() - started) * 1000))],
+                warnings=[],
+                next_cursor=str(next_cursor or ""),
+                user_id=user_id,
+                exhausted=not bool(next_cursor),
+            )
+        except Exception as exc:
+            detail = str(exc)
+            lowered = detail.casefold()
+            error_code = "rate_limited" if getattr(exc, "status_code", 0) == 429 or "429" in lowered or "rate" in lowered and "limit" in lowered else "auth_required" if any(token in lowered for token in ("unauthorized", "not_authenticated", "login", "cookie")) else "provider_error"
+            self.session_manager.finish_request(request_id, status="failed", error_code=error_code, error="X reader request failed")
+            if error_code == "rate_limited":
+                self.session_manager.pause_global("X reader rate limit", seconds=7200)
+                self.session_manager.record_failure(slot_id, error_code, "X reader rate limit")
+                raise TwitterRateLimitError("X reader rate limit; collection deferred") from exc
+            if error_code == "auth_required":
+                self.session_manager.record_failure(slot_id, error_code, "X reader authentication required")
+                raise TwitterAuthenticationError("X reader authentication required") from exc
+            raise TwitterProviderError(f"X reader request failed: {type(exc).__name__}") from exc
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
+        if self.session_manager is not None:
+            return self._fetch_guarded_page(handle, max_count)
         started = time.perf_counter()
         env = os.environ.copy()
         env.update(self.credentials.load())
@@ -3439,6 +5126,11 @@ class TwitterCliProvider:
                 env=env,
                 check=False,
             )
+        except FileNotFoundError as exc:
+            raise TwitterProviderError(
+                f"twitter-cli executable not found: {self.command}; "
+                "install twitter-cli 0.8.5 or set KOL_TWITTER_COMMAND"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise TwitterProviderError(
                 f"twitter-cli timed out after {self.timeout_seconds} seconds"
@@ -3486,7 +5178,7 @@ class ZhihuProfileProvider:
         browser_path: str = "",
         profile_directory: str = "Default",
         user_data_dir: str = "",
-        port: int = 9222,
+        port: int = 9223,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         timeout_seconds: int = 120,
     ):
@@ -3498,6 +5190,57 @@ class ZhihuProfileProvider:
         self.port = int(port)
         self.runner = runner
         self.timeout_seconds = max(30, min(int(timeout_seconds), 300))
+        self.session_prepared = False
+        self.preflight_error = ""
+
+    def prepare_session(self, handle: str) -> None:
+        """Preflight the shared browser once before a Zhihu batch."""
+        if self.session_prepared:
+            return
+        if not self.script_path.is_file():
+            raise ZhihuProviderError(f"Zhihu capture script is missing: {self.script_path}")
+        command = [
+            self.python_command,
+            str(self.script_path),
+            "--handle",
+            handle,
+            "--port",
+            str(self.port),
+            "--profile-directory",
+            self.profile_directory,
+            "--prepare-only",
+        ]
+        if self.browser_path:
+            command.extend(["--browser-path", self.browser_path])
+        if self.user_data_dir:
+            command.extend(["--user-data-dir", self.user_data_dir])
+        try:
+            completed = self.runner(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.preflight_error = (
+                f"Zhihu browser preflight timed out after {self.timeout_seconds} seconds"
+            )
+            raise ZhihuProviderError(self.preflight_error) from exc
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            self.preflight_error = f"Zhihu browser preflight returned invalid JSON: {exc}"
+            raise ZhihuProviderError(self.preflight_error) from exc
+        if completed.returncode != 0 or not payload.get("ok"):
+            self.preflight_error = str(
+                payload.get("error") or completed.stderr or "Zhihu browser preflight failed"
+            )[-2000:]
+            raise ZhihuProviderError(self.preflight_error)
+        self.session_prepared = True
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
         if not self.script_path.is_file():
@@ -3509,11 +5252,14 @@ class ZhihuProfileProvider:
             "--handle",
             handle,
             "--limit",
-            str(max(1, min(int(max_count), 200))),
+            # Historical recovery is paged and resumable; allow a larger
+            # bounded batch than the ordinary freshness sweep.
+            str(max(1, min(int(max_count), 1000))),
             "--port",
             str(self.port),
             "--profile-directory",
             self.profile_directory,
+            "--no-launch",
         ]
         if self.browser_path:
             command.extend(["--browser-path", self.browser_path])
@@ -3726,13 +5472,18 @@ class FallbackXPostProvider:
     name = "auto"
 
     def __init__(self, primary: XPostProvider, fallback: XPostProvider, mode: str = "enabled"):
-        if mode not in {"enabled", "shadow"}:
+        if mode not in {"enabled", "shadow", "disabled"}:
             raise ValueError(f"unsupported fallback mode: {mode}")
         self.primary = primary
         self.fallback = fallback
         self.mode = mode
         self.primary_auth_failed = False
         self.shadow_fallback_failed = False
+
+    @property
+    def credentials(self) -> KeyringCredentialStore | None:
+        """Expose the primary reader store for discovery health checks only."""
+        return getattr(self.primary, "credentials", None)
 
     @staticmethod
     def _failed_attempt(provider: str, started: float, exc: Exception) -> ProviderAttempt:
@@ -3750,6 +5501,11 @@ class FallbackXPostProvider:
         )
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
+        if self.mode == "disabled":
+            return _provider_result(
+                self.primary.fetch_user_posts(handle, max_count),
+                self.primary.name,
+            )
         attempts: list[ProviderAttempt] = []
         warnings: list[str] = []
         primary_error: Exception | None = None
@@ -3884,6 +5640,10 @@ def build_x_post_provider(
     nitter_url: str = "http://127.0.0.1:9377",
     fallback_mode: str = "enabled",
     proxy_url: str | None = None,
+    twitter_timeout_seconds: int = 60,
+    session_manager: XSessionManager | None = None,
+    batch_key: str = "",
+    history_mode: bool = False,
 ) -> XPostProvider:
     if mode not in {"auto", "twitter", "nitter"}:
         raise ValueError(f"unsupported X provider: {mode}")
@@ -3891,13 +5651,17 @@ def build_x_post_provider(
         twitter_command,
         twitter_credentials or KeyringCredentialStore(),
         proxy_url=(proxy_url if proxy_url is not None else os.environ.get("KOL_X_PROXY", "http://127.0.0.1:7897")),
+        timeout_seconds=twitter_timeout_seconds,
+        session_manager=session_manager,
+        batch_key=batch_key,
+        history_mode=history_mode,
     )
     fallback = XtfNitterProvider(xtf_command, nitter_url)
     if mode == "twitter":
         return primary
     if mode == "nitter":
         return fallback
-    return FallbackXPostProvider(primary, fallback, mode=fallback_mode)
+    return FallbackXPostProvider(primary, fallback, mode=fallback_mode if fallback_mode in {"enabled", "shadow", "disabled"} else "shadow")
 
 
 def download_images(
@@ -4666,17 +6430,25 @@ def classify_pending_with_codex(
     store: KolPostStore,
     classifier: CodexPostClassifier,
     limit: int = 0,
+    *,
+    daily_limit: int = 250,
 ) -> tuple[int, int]:
     completed = 0
     failed = 0
     remaining = max(0, limit)
+    budget = ModelDailyBudget(store, daily_limit=daily_limit) if daily_limit else None
     with store.model_worker():
         store.prepare_model_queue()
         while limit == 0 or remaining > 0:
+            if budget is not None and budget.status()["remaining"] <= 0:
+                break
             candidates = store.claim_posts_for_model(1)
             if not candidates:
                 break
             for post in candidates:
+                if budget is not None and not budget.reserve():
+                    store.release_model_claim(post["post_id"])
+                    return completed, failed
                 try:
                     payload = classifier.classify(post)
                     store.save_model_classification(
@@ -4685,7 +6457,10 @@ def classify_pending_with_codex(
                         model_name=str(getattr(classifier, "model_name", "codex")),
                         prompt_version=classifier.prompt_version,
                     )
+
                     completed += 1
+                    if budget is not None:
+                        budget.finish(success=True)
                 except Exception as exc:
                     store.save_model_classification(
                         post["post_id"],
@@ -4695,10 +6470,86 @@ def classify_pending_with_codex(
                         error=str(exc),
                     )
                     failed += 1
+                    if budget is not None:
+                        budget.finish(success=False)
                 if limit:
                     remaining -= 1
                     if remaining <= 0:
                         break
+    return completed, failed
+
+
+def classify_pending_in_batches(
+    store: KolPostStore,
+    classifier: Any,
+    limit: int = 0,
+    *,
+    daily_limit: int = 250,
+    batch_size: int = 10,
+) -> tuple[int, int]:
+    """Drain the durable candidate queue with bounded model batch requests."""
+    completed = 0
+    failed = 0
+    remaining = max(0, int(limit))
+    budget = ModelDailyBudget(store, daily_limit=daily_limit) if daily_limit else None
+    safe_batch_size = max(1, min(int(batch_size), 20))
+    with store.model_worker():
+        store.prepare_model_queue()
+        while limit == 0 or remaining > 0:
+            available = budget.status()["remaining"] if budget is not None else safe_batch_size
+            if available <= 0:
+                break
+            requested = min(safe_batch_size, int(available))
+            if limit:
+                requested = min(requested, remaining)
+            candidates = store.claim_posts_for_model(requested)
+            if not candidates:
+                break
+            claimed: list[dict[str, Any]] = []
+            for post in candidates:
+                if budget is not None and not budget.reserve():
+                    store.release_model_claim(post["post_id"])
+                    continue
+                claimed.append(post)
+            if not claimed:
+                break
+            stop_after_batch = False
+            try:
+                results = classifier.classify_many(claimed)
+            except Exception as exc:
+                results = {}
+                batch_error = str(exc)
+                stop_after_batch = isinstance(exc, ModelProviderUnavailableError)
+            else:
+                batch_error = ""
+            for post in claimed:
+                payload = results.get(post["post_id"]) if isinstance(results, dict) else None
+                if isinstance(payload, dict):
+                    store.save_model_classification(
+                        post["post_id"],
+                        payload,
+                        model_name=str(getattr(classifier, "model_name", "codex-batch")),
+                        prompt_version=classifier.prompt_version,
+                    )
+                    completed += 1
+                    if budget is not None:
+                        budget.finish(success=True)
+                else:
+                    error = batch_error or "batch classifier returned no result"
+                    store.save_model_classification(
+                        post["post_id"],
+                        None,
+                        model_name=str(getattr(classifier, "model_name", "codex-batch")),
+                        prompt_version=classifier.prompt_version,
+                        error=error,
+                    )
+                    failed += 1
+                    if budget is not None:
+                        budget.finish(success=False)
+            if limit:
+                remaining -= len(claimed)
+            if stop_after_batch:
+                break
     return completed, failed
 
 
@@ -4719,6 +6570,9 @@ def _fetch_with_retry(
                 attempts=[*attempts, *result.attempts],
                 warnings=result.warnings,
                 comparisons=result.comparisons,
+                next_cursor=result.next_cursor,
+                user_id=result.user_id,
+                exhausted=result.exhausted,
             )
         except TwitterAuthenticationError as exc:
             if not getattr(exc, "attempts", None):
@@ -4745,7 +6599,21 @@ def _fetch_with_retry(
                     )
                 ]
             attempts.extend(captured)
-            if attempt >= len(retry_delays):
+            detail = str(exc).casefold()
+            deterministic = any(
+                marker in detail
+                for marker in (
+                    "all_backends_failed",
+                    "invalid json",
+                    "not configured",
+                    "not a tweet list",
+                    "not a post list",
+                    "unsupported",
+                    "missing",
+                )
+            )
+            retryable = not isinstance(exc, TwitterRateLimitError) and not deterministic
+            if attempt >= len(retry_delays) or not retryable:
                 exc.attempts = attempts
                 raise
             if retry_delays[attempt] > 0:
@@ -4771,6 +6639,11 @@ def _fetch_with_cursor_search(
     max_pages: int,
 ) -> ProviderFetchResult:
     result = _fetch_with_retry(provider, handle, requested, retry_delays)
+    # The guarded provider persists and advances one real cursor page per
+    # invocation.  Never emulate pagination by re-requesting an expanded count
+    # (that both defeats the request budget and can skip a page on restart).
+    if getattr(provider, "session_manager", None) is not None:
+        return result
     if (
         not previous_last_id
         or previous_last_id in _payload_post_ids(result.posts)
@@ -4807,6 +6680,9 @@ def _fetch_with_cursor_search(
                 attempts,
                 list(dict.fromkeys(warnings)),
                 comparisons,
+                next_cursor=latest.next_cursor,
+                user_id=latest.user_id,
+                exhausted=latest.exhausted,
             )
         attempts.extend(expanded.attempts)
         warnings.extend(expanded.warnings)
@@ -4819,6 +6695,9 @@ def _fetch_with_cursor_search(
                 attempts,
                 list(dict.fromkeys(warnings)),
                 comparisons,
+                next_cursor=expanded.next_cursor,
+                user_id=expanded.user_id,
+                exhausted=expanded.exhausted,
             )
         if len(expanded.posts) < requested * page:
             break
@@ -4829,6 +6708,9 @@ def _fetch_with_cursor_search(
         attempts,
         list(dict.fromkeys(warnings)),
         comparisons,
+        next_cursor=latest.next_cursor,
+        user_id=latest.user_id,
+        exhausted=latest.exhausted,
     )
 
 
@@ -4843,16 +6725,23 @@ def run_post_fetch(
     classifier: RuleClassifier | None = None,
     download_media: bool = True,
     sleep_seconds: float = 2.0,
-    retry_delays: tuple[float, ...] = (5.0, 15.0),
+    retry_delays: tuple[float, ...] = (3.0,),
     batch_key: str = "",
     rate_limit_cooldown_seconds: int = 1800,
     max_gap_pages: int = 3,
     dry_run: bool = False,
+    fresh_first_page: bool = False,
+    reconcile_zhihu: bool = True,
 ) -> FetchSummary:
     rule_classifier = classifier or RuleClassifier()
     if not dry_run:
         store.interrupt_stale_fetch_runs()
     active_kols = store.list_kols("active")
+    active_kols = [
+        kol for kol in active_kols
+        if str(kol.get("availability_status") or "active")
+        not in {"suspended", "deleted", "protected", "paused"}
+    ]
     if platforms:
         allowed_platforms = {value.casefold() for value in platforms}
         active_kols = [
@@ -4874,13 +6763,17 @@ def run_post_fetch(
         and str(kol.get("platform") or "X").casefold() != "zhihu"
         for kol in active_kols
     )
-    requested_depth = max(
-        [max_count, 100 if initial_backfill else max_count]
-        + [
-            int(kol.get("backfill_requested") or 0)
-            for kol in active_kols
-            if str(kol.get("backfill_status") or "") == "queued"
-        ]
+    requested_depth = (
+        max_count
+        if fresh_first_page
+        else max(
+            [max_count, 100 if initial_backfill else max_count]
+            + [
+                int(kol.get("backfill_requested") or 0)
+                for kol in active_kols
+                if str(kol.get("backfill_status") or "") == "queued"
+            ]
+        )
     )
     if batch_key and not dry_run:
         store.prepare_fetch_queue(
@@ -4889,6 +6782,7 @@ def run_post_fetch(
             requested_count=requested_depth,
         )
         active_kols = store.pending_fetch_queue(batch_key)
+    selected_kols = list(active_kols)
     run_id = (
         f"dry-run-{uuid.uuid4().hex}"
         if dry_run
@@ -4905,12 +6799,86 @@ def run_post_fetch(
     authentication_failed = False
     rate_limit_paused = False
     platform_auth_failures: set[str] = set()
+    platform_blocked_errors: dict[str, str] = {}
+    blocked_reported: set[str] = set()
+    platform_breakdown: dict[str, dict[str, Any]] = {}
+    guarded_provider = provider
+    if getattr(guarded_provider, "session_manager", None) is None:
+        guarded_provider = getattr(guarded_provider, "primary", guarded_provider)
+    session_manager = getattr(guarded_provider, "session_manager", None)
+    has_x_targets = any(
+        str(kol.get("platform") or "X").casefold() == "x" for kol in selected_kols
+    )
+    if has_x_targets and session_manager is not None:
+        session_status = session_manager.policy_status()
+        ready_slots = [
+            row for row in session_status.get("slots", [])
+            if row.get("status") == "ready"
+            and row.get("enabled")
+            and row.get("credential_configured")
+            and row.get("user_id")
+        ]
+        if not session_status.get("enabled"):
+            platform_blocked_errors["x"] = "X collection is manually paused"
+        elif session_status.get("paused_until"):
+            platform_blocked_errors["x"] = (
+                "X collection is cooling down until "
+                + str(session_status.get("paused_until"))
+            )
+        elif not ready_slots:
+            platform_blocked_errors["x"] = "no verified X session is currently available"
+    for kol in selected_kols:
+        platform_key = str(kol.get("platform") or "X").casefold()
+        platform_breakdown.setdefault(
+            platform_key,
+            {
+                "target": 0,
+                "success": 0,
+                "failed": 0,
+                "blocked": 0,
+                "rate_limited": 0,
+                "provider_failed": 0,
+                "pending": 0,
+            },
+        )["target"] += 1
+    for value in platform_breakdown.values():
+        value["pending"] = value["target"]
     providers_by_platform = {
         str(key).casefold(): value for key, value in (platform_providers or {}).items()
     }
+    zhihu_kols = [
+        kol for kol in active_kols
+        if str(kol.get("platform") or "X").casefold() == "zhihu"
+    ]
+    zhihu_provider = providers_by_platform.get("zhihu", provider)
+    if zhihu_kols and hasattr(zhihu_provider, "prepare_session"):
+        try:
+            zhihu_provider.prepare_session(str(zhihu_kols[0].get("handle") or ""))
+        except Exception as exc:
+            platform_blocked_errors["zhihu"] = str(exc)
     for index, kol in enumerate(active_kols):
         platform = str(kol.get("platform") or "X").casefold()
         selected_provider = providers_by_platform.get(platform, provider)
+        if platform in platform_blocked_errors:
+            if platform not in blocked_reported:
+                errors.append(
+                    f"{platform} batch blocked before account fetch: {platform_blocked_errors[platform]}"
+                )
+                blocked_reported.add(platform)
+            if not dry_run:
+                store.update_fetch_progress(
+                    run_id,
+                    processed_kols=index + 1,
+                    successful_kols=successful,
+                    failed_kols=failed,
+                    new_posts=new_posts,
+                    candidate_posts=candidate_posts,
+                )
+            platform_breakdown[platform]["blocked"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
+            continue
         if platform in platform_auth_failures:
             if batch_key:
                 break
@@ -4926,13 +6894,28 @@ def run_post_fetch(
                     new_posts=new_posts,
                     candidate_posts=candidate_posts,
                 )
+            platform_breakdown[platform]["failed"] += 1
+            platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             continue
         if batch_key and not dry_run:
             store.mark_fetch_queue_running(batch_key, int(kol["id"]))
         previous_last_id = str(kol.get("last_post_id") or "")
         last_fetched = str(kol.get("last_fetched_at") or "")
-        requested = max_count if platform == "zhihu" or last_fetched else 100
-        backfill_queued = str(kol.get("backfill_status") or "") == "queued"
+        # Morning freshness pass intentionally uses a small first page.  Gap
+        # recovery is resumed by the persistent queue after every account had
+        # a chance to contribute its newest post.
+        requested = (
+            max_count
+            if platform == "zhihu" or last_fetched or fresh_first_page
+            else 100
+        )
+        backfill_queued = (
+            not fresh_first_page
+            and str(kol.get("backfill_status") or "") == "queued"
+        )
         archive_only_backfill = (
             platform == "zhihu"
             and str(kol.get("tracking_mode") or "") == "direct_profile"
@@ -4942,7 +6925,7 @@ def run_post_fetch(
             backfill_target = int(kol.get("backfill_requested") or 0)
             completed_depth = int(kol.get("backfill_completed_depth") or 0)
             requested = min(backfill_target, completed_depth + 100)
-        if last_fetched and not backfill_queued:
+        if last_fetched and not backfill_queued and not fresh_first_page:
             try:
                 if datetime.fromisoformat(last_fetched) < datetime.now(SHANGHAI) - timedelta(days=3):
                     requested = max(max_count, 100)
@@ -4956,7 +6939,11 @@ def run_post_fetch(
                 requested,
                 retry_delays,
                 previous_last_id=previous_last_id,
-                max_pages=max_gap_pages if platform == "x" else 1,
+                # A freshness pass is deliberately one page.  Cursor search
+                # belongs to the later recovery pass; expanding here turns a
+                # requested 20-post sweep into 100/200-post calls and can
+                # starve the remaining accounts under platform limits.
+                max_pages=max_gap_pages if platform == "x" and not fresh_first_page else 1,
             )
             if not dry_run:
                 store.record_fetch_attempts(run_id, kol["id"], kol["handle"], fetch_result.attempts)
@@ -5038,6 +7025,28 @@ def run_post_fetch(
                         )
                     ],
                 )
+            guarded_provider = provider
+            if getattr(guarded_provider, "session_manager", None) is None:
+                guarded_provider = getattr(guarded_provider, "primary", guarded_provider)
+            session_manager = getattr(guarded_provider, "session_manager", None)
+            session_slot = getattr(guarded_provider, "_slot_id", None)
+            if not dry_run and platform == "x" and session_manager is not None and session_slot:
+                checkpoint = session_manager.checkpoint(int(kol["id"]))
+                history_mode = bool(getattr(guarded_provider, "history_mode", False))
+                first_id = seen_ids[0] if seen_ids else ""
+                page_end_id = seen_ids[-1] if seen_ids else ""
+                session_manager.save_checkpoint(
+                    int(kol["id"]),
+                    int(session_slot),
+                    phase="completed" if history_mode and fetch_result.exhausted else "history" if history_mode else "freshness",
+                    user_id=fetch_result.user_id or str((checkpoint or {}).get("user_id") or ""),
+                    latest_seen_post_id=first_id,
+                    contiguous_post_id=page_end_id if history_mode else first_id,
+                    cursor=fetch_result.next_cursor if history_mode else "",
+                    pages_completed=int((checkpoint or {}).get("pages_completed") or 0) + 1,
+                    last_page_new_ids=len(seen_ids),
+                    stop_reason="source_exhausted" if history_mode and fetch_result.exhausted else "",
+                )
             gap_search_incomplete = any(
                 warning.startswith("gap_search_incomplete:")
                 for warning in fetch_result.warnings
@@ -5080,26 +7089,59 @@ def run_post_fetch(
                     else:
                         store.complete_fetch_queue_item(batch_key, int(kol["id"]))
             successful += 1
+            platform_breakdown[platform]["success"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
         except Exception as exc:
             attempts = list(getattr(exc, "attempts", []))
             rate_limited_this_account = isinstance(exc, TwitterRateLimitError) or any(
                 attempt.error_code == "rate_limited" for attempt in attempts
             )
-            failed += 1
-            errors.append(f"@{kol['handle']}: {exc}")
-            if not dry_run:
-                store.mark_fetch_failed(kol["id"])
-                store.record_fetch_attempts(
-                    run_id,
-                    kol["id"],
-                    kol["handle"],
-                    attempts,
-                )
+            blocked_account = isinstance(exc, (XSessionUnavailableError, XBudgetDeferredError))
+            zhihu_incompatible = platform == "zhihu" and "10003" in str(exc)
+            if not blocked_account:
+                failed += 1
+                errors.append(f"@{kol['handle']}: {exc}")
+                if not dry_run:
+                    store.mark_fetch_failed(kol["id"])
+                    store.record_fetch_attempts(
+                        run_id,
+                        kol["id"],
+                        kol["handle"],
+                        attempts,
+                    )
             if isinstance(exc, TwitterAuthenticationError):
                 authentication_failed = True
                 platform_auth_failures.add(platform)
+            if blocked_account:
+                platform_blocked_errors[platform] = str(exc)
+            if not dry_run and not blocked_account:
+                availability = "rate_limited" if rate_limited_this_account else "provider_failed"
+                store.set_account_availability(
+                    int(kol["id"]),
+                    availability,
+                    reason=str(exc),
+                    source="fetch",
+                )
+            if blocked_account:
+                platform_breakdown[platform]["blocked"] += 1
+            else:
+                platform_breakdown[platform]["failed"] += 1
+                if rate_limited_this_account:
+                    platform_breakdown[platform]["rate_limited"] += 1
+                else:
+                    platform_breakdown[platform]["provider_failed"] += 1
+            platform_breakdown[platform]["pending"] = max(
+                0, platform_breakdown[platform]["pending"] - 1
+            )
             if batch_key and not dry_run:
                 error_code = (
+                    "blocked_auth"
+                    if blocked_account
+                    else "provider_incompatible"
+                    if zhihu_incompatible
+                    else
                     "rate_limited"
                     if rate_limited_this_account
                     else "authentication_failed"
@@ -5112,6 +7154,11 @@ def run_post_fetch(
                     error_code=error_code,
                     error=str(exc),
                     cooldown_seconds=(
+                        0
+                        if error_code == "blocked_auth"
+                        else 21600
+                        if error_code == "provider_incompatible"
+                        else
                         rate_limit_cooldown_seconds
                         if error_code in {"rate_limited", "authentication_failed"}
                         else 300
@@ -5131,7 +7178,7 @@ def run_post_fetch(
         if batch_key and rate_limited_this_account:
             rate_limit_paused = True
             break
-    if not dry_run and any(
+    if not dry_run and reconcile_zhihu and any(
         str(kol.get("platform") or "X").casefold() == "zhihu" for kol in active_kols
     ):
         store.reconcile_zhihu_historical_backfill()
@@ -5160,6 +7207,8 @@ def run_post_fetch(
         queue_completed=int(queue_status["completed"]),
         queue_pending=int(queue_status["pending"]),
         rate_limit_paused=rate_limit_paused,
+        blocked_platforms=sorted(platform_blocked_errors),
+        platform_breakdown=platform_breakdown,
     )
     if not dry_run:
         store.finish_fetch_run(summary)

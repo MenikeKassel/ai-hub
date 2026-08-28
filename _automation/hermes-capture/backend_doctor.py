@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -84,7 +84,7 @@ def main() -> int:
     parser.add_argument(
         "--scan-root",
         action="append",
-        default=[r"<AI_HUB_HOME>", r"F:\ai-workspace"],
+        default=[r"E:\aiworkspace", r"F:\ai-workspace"],
         help="Root to scan for local backend repos. Repeatable.",
     )
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-﻿"""Inventory and score an exported Twitter/X likes JSON file.
+"""Inventory and score an exported Twitter/X likes JSON file.
 
 This script is intentionally conservative:
 - it never writes to Notion;
@@ -19,10 +19,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-DEFAULT_INPUT_GLOB = r"<AI_HUB_HOME>\twitter-*-1781096618442.json"
-DEFAULT_OUT_DIR = r"<AI_HUB_HOME>\ai-hub\_runtime\staging"
+DEFAULT_INPUT_GLOB = str(Path(__file__).resolve().parents[2] / "twitter-*-1781096618442.json")
+DEFAULT_OUT_DIR = str(Path(__file__).resolve().parents[2] / "_runtime" / "staging")
 DEFAULT_OBSIDIAN_REPORT = (
-    r"<OBSIDIAN_VAULT>\06_Logs\2026-07-02-twitter-likes-inventory.md"
+    r"F:\research\06_Logs\2026-07-02-twitter-likes-inventory.md"
 )
 
 STOCK_KEYWORDS = [
@@ -103,7 +103,7 @@ def resolve_input(path_arg: str | None) -> Path:
         if not path.exists():
             raise FileNotFoundError(path)
         return path
-    matches = sorted(Path(r"<AI_HUB_HOME>").glob("twitter-*-1781096618442.json"))
+    matches = sorted(Path(r"E:\aiworkspace").glob("twitter-*-1781096618442.json"))
     if not matches:
         raise FileNotFoundError(DEFAULT_INPUT_GLOB)
     return matches[0]
@@ -247,7 +247,7 @@ def build_report(summary: dict, candidates: list[dict]) -> str:
             "## Promotion Rule",
             "",
             "- Keep the raw JSON as the historical archive.",
-            "- Promote only a reviewed item into `source-note-placeholder.md",
+            "- Promote only a reviewed item into `01_Sources/` when it teaches a reusable idea or supports an active project.",
             "- Add a row to `04_Projects/KOL推荐事件表.md` only when the item has a clear KOL, asset, date, direction, reason, and original URL.",
             "- Create or update `03_Entities/` pages only for KOLs and companies that appear repeatedly or matter to a current decision.",
         ]

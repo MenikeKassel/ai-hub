@@ -1,4 +1,4 @@
-﻿# A-share Trading Research and Audit v1
+# A-share Trading Research and Audit v1
 
 This module is a read-only research helper for the Obsidian trading system.
 It does not connect to brokers, place orders, or produce position advice.
@@ -27,7 +27,7 @@ the existing private KOL database or event ledger during the migration period.
 - Fetch daily price data with AKShare when available.
 - Optionally cross-check prices with Baostock when installed.
 - Generate Obsidian-friendly audit reports.
-- Keep runtime data under `<AI_HUB_HOME>\ai-hub\_runtime\trading`.
+- Keep runtime data under `D:\aiworkspace\ai-hub\_runtime\trading`.
 - Treat ETFs as a separate instrument type. The first real ETF audit target is
   `159139`, opened on 2026-07-07 at 1.460. Do not send ETF codes through a
   stock-only data endpoint.
@@ -55,7 +55,8 @@ python trading_cli.py kol-method-research-run --pending
 python trading_cli.py kol-post-doctor
 python trading_cli.py kol-post-fetch --backfill 100
 python trading_cli.py kol-post-fetch --as-of 2026-07-13 --notify
-python trading_cli.py kol-post-classify --pending
+python trading_cli.py kol-post-classify --pending --daily-limit 250 --ocr-limit 150
+python trading_cli.py kol-ai-queue-maintain --daily-limit 250 --apply
 python trading_cli.py kol-review-agent-doctor
 python trading_cli.py kol-review-agent-run --mode shadow --max-runtime 25
 python trading_cli.py kol-review-agent-run --post-id <post-id> --dry-run
@@ -69,6 +70,7 @@ python trading_cli.py kol-leads-extract --pending
 python trading_cli.py market-init
 python trading_cli.py market-doctor
 python trading_cli.py market-freestockdb-doctor
+python trading_cli.py market-symbol-admissions reconcile --as-of 2026-08-25 --apply
 python trading_cli.py market-backfill --symbols "600900,159139,000300" --start 2024-01-01
 python trading_cli.py market-minute-fetch --symbol 600900 --start 2026-07-01 --end 2026-07-03 --frequency 1m
 python trading_cli.py market-sync --as-of 2026-07-14
@@ -77,11 +79,10 @@ python trading_cli.py market-weekly --as-of 2026-07-14
 .\fetch_external_tools.ps1
 ```
 
-Use the existing `<AI_HUB_HOME>\lianghua\.venv` if the default Python does
-not have `akshare` installed:
+Use the managed D-drive runtime for operational commands:
 
 ```powershell
-& '<AI_HUB_HOME>\lianghua\.venv\Scripts\python.exe' trading_cli.py doctor
+& 'D:\aiworkspace\ai-hub\_runtime\venv-trading\Scripts\python.exe' trading_cli.py doctor
 ```
 
 ## KOL return tracker
@@ -163,7 +164,7 @@ Obsidian or rewrite the historical manual `KOL推荐事件表.md`.
 Install the weekday 20:00 task and dedicated environment from PowerShell:
 
 ```powershell
-& '<AI_HUB_HOME>\ai-hub\scripts\install-kol-tracker.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-kol-tracker.ps1'
 ```
 
 The task is named `KOL_Return_Tracker_Daily`, starts when a missed run becomes
@@ -180,8 +181,8 @@ to the local post record and registers an active return event without network
 dependencies.
 
 ```powershell
-& '<AI_HUB_HOME>\ai-hub\scripts\install-kol-post-fetch.ps1'
-& '<AI_HUB_HOME>\ai-hub\scripts\start-kol-ui.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-kol-post-fetch.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\start-kol-ui.ps1'
 ```
 
 Open `http://127.0.0.1:8123`. Configure `auth_token` and `ct0` on the System
@@ -196,10 +197,10 @@ stored separately under `ai-hub/nitter` and is materialized as a private
 `sessions.jsonl` file only while starting Nitter.
 
 ```powershell
-& '<AI_HUB_HOME>\ai-hub\scripts\install-docker-desktop.ps1'
-& '<AI_HUB_HOME>\ai-hub\scripts\install-x-tweet-fetcher.ps1'
-& '<AI_HUB_HOME>\ai-hub\scripts\install-kol-nitter-task.ps1'
-& '<AI_HUB_HOME>\ai-hub\scripts\start-kol-nitter.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-docker-desktop.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-x-tweet-fetcher.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-kol-nitter-task.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\start-kol-nitter.ps1'
 ```
 
 Automatic collection starts in `shadow` mode. Both providers are queried, but
@@ -267,8 +268,8 @@ interrupted approval stages are recorded for repair instead of silently
 disappearing. The UI can add, edit, pause, and resume accounts; it cannot delete
 their history.
 
-The initial enabled handles are `public_kol_1`, `public_kol_2`, `public_kol_3`,
-`public_kol_4`, `public_kol_5`, and `Public KOL 6`. Serenity is intentionally not
+The initial enabled handles are `agudianjinshou`, `WwQQ129146`, `sszcw`,
+`bafeite1234`, `Mimiwftt`, and `Hoyooyoo`. Serenity is intentionally not
 auto-followed until the original account identity is confirmed.
 
 ## Morning recommendation workflow v4
@@ -307,32 +308,21 @@ drafts from being published.
 Market runtime data lives under `_runtime\trading\market`: immutable raw
 snapshots, normalized Parquet, DuckDB catalog/coverage, manifests, and quality
 audits. BaoStock is the normal daily provider and AKShare is the first fallback.
-The optional local FreeStockDB service (`FREESTOCKDB_ROOT`, default
-`<AI_HUB_HOME>\stockdb`; `FREESTOCKDB_URL`, default `http://127.0.0.1:7899`)
-is the third daily freshness provider and the minute-bar supplement. The
-runtime manager checks the exact executable path, loopback port, manifest,
-catalog size, disk guard, and smoke symbols before accepting the service. Its
-configured HTTP mirror is explicitly marked `untrusted_transport`: it can fill
-new dates and provide event-window minutes, but it cannot be the sole authority
-for a frozen return checkpoint. Install the weekday 17:50 verified update task
-with `scripts\install-freestockdb-task.ps1`; first validate it with
-`python trading_cli.py market-freestockdb-doctor` and
-`python trading_cli.py market-freestockdb-update --dry-run`. A successful update
-uses an A/B dataset rotation, manifest/file verification, a one-generation rollback,
-and an isolated loopback restart. The first run copies the active dataset into a
-private staging tree; later runs reuse the previous verified generation and do not
-copy the whole database again. After that bootstrap snapshot, the current generation
-stays available while the isolated candidate updates and pauses only for the final
-swap. Free-space checks include the bytes still missing from a resumable candidate
-plus a 5 GB guard. On Windows, `<AI_HUB_HOME>\stockdb\data` must be the
-junction pointing to the real `<MARKET_DATA_HOME>\free-stockdb\live` directory. A reversed
-junction is reported as `storage_layout=reversed` and blocks updates. If an existing canonical
-daily batch is healthy, FreeStockDB only appends dates after that batch's end and
-cannot overwrite it. Minute snapshots are stored separately under
-`warehouse\minute_<frequency>` and never enter KOL return calculations.
-The bundled Windows release reads `stockdb.conf` and is therefore started from
-its own directory without source-build command-line flags; set
-`FREESTOCKDB_SERVER_ARGUMENTS=1` only for a compatible source build.
+The local FreeStockDB service is fixed at
+`D:\aiworkspace\freestock\stockdb` and `http://127.0.0.1:7899`. It is a
+loopback-only historical read source. The runtime manager starts `stockdb.exe`
+with that directory as its working directory and validates the manifest,
+catalog, data path, listener and smoke symbols. Automatic FreeStockDB updates,
+daily market synchronization and return/research recomputation are disabled in
+historical mode.
+
+The published market manifest is frozen at `2026-08-25`. Confirmed KOL stock
+leads enter the SQLite admission queue; they do not change DuckDB lifecycle or
+coverage. `market-symbol-admissions reconcile` prepares a candidate, accepts a
+symbol only when raw and qfq history are both complete through the cutoff, and
+atomically publishes the verified manifest. Normal market write APIs return
+HTTP 409. Minute snapshots remain separate under `warehouse\minute_<frequency>`
+and never enter KOL return calculations.
 Event-window minutes can be audited with `kol-intraday-backfill --all` and
 `kol-intraday-audit`; the resulting context is displayed beside each formal
 recommendation without creating a trading signal.
@@ -346,10 +336,11 @@ executable frozen checkpoints. Fewer than ten 1M samples never receive a rank;
 10 verified 1M events are provisional, 20 verified 3M events are reliable, and
 10 verified 6M events form the long-term tier.
 
-Install the 19:30 market sync, single 07:20/08:20/08:45 morning orchestrator, 02:30 combined digest,
-Sunday weekly refresh, and isolated RapidOCR runtime with
-`scripts\install-research-data-tasks.ps1`. To install only OCR, run
-`scripts\install-fast-ocr.ps1`.
+`scripts\install-kol-recovery-tasks.ps1` installs the D-drive operational
+schedule: X at 07:20 and 19:00, Zhihu at 06:30, 08:05 and 19:20, review-only
+morning finalization at 08:45, and the bounded OCR/AI backlog at 09:15. Market
+sync, return tracking and research recomputation tasks remain absent. To
+install only OCR, run `scripts\install-fast-ocr.ps1`.
 
 ## Legacy review agent
 
@@ -397,7 +388,7 @@ error.
 ## Boundaries
 
 - `daily_stock_analysis` is treated as an external report engine.
-- `<AI_HUB_HOME>\lianghua\person` is a learning/backtest sandbox.
+- Legacy E/F-drive learning sandboxes are not part of this D-drive runtime.
 - KOL candidates and their review state remain in the local SQLite ledger.
 - The tracker audits observable recommendation performance; it does not infer
   tradeability or recommend following a KOL.

@@ -1,0 +1,12 @@
+{
+  "restore_date": "2026-08-28",
+  "public_source_revision": "667ae0a866f3d7f980133ef8221cde1a693428c1",
+  "public_source_repository": "https://github.com/MenikeKassel/ai-hub",
+  "source_version": "3.0.0",
+  "working_tree_source": "local-recovery-with-historical-market-admissions",
+  "runtime_data": "excluded-from-git",
+  "post_runtime_as_of": "2026-08-28",
+  "market_as_of": "2026-08-25",
+  "market_mode": "historical",
+  "market_write_enabled": false
+}

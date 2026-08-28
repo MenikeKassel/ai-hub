@@ -1,4 +1,4 @@
-﻿"""Deterministic, batch-weighted KOL performance analysis.
+"""Deterministic, batch-weighted KOL performance analysis.
 
 This module deliberately sits above the existing return tracker.  It reads the
 frozen checkpoint CSV and never rewrites marks, baselines, or event status.
@@ -23,21 +23,19 @@ import httpx
 
 from kol_posts import DeepSeekCredentialStore, ModelProviderUnavailableError
 from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
-from kol_tracker import EventRecord, KolStore, is_executable_event
+from kol_tracker import (
+    EventRecord,
+    KolStore,
+    PRIMARY_WARNINGS,
+    is_executable_event,
+    is_long_event,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-PERFORMANCE_VERSION = "kol-performance-v3"
+PERFORMANCE_VERSION = "kol-performance-v4"
 HORIZONS = ("1W", "1M", "3M", "6M")
 RECENT_WINDOWS = (7, 30, 90)
-PRIMARY_WARNINGS = {
-    "conditional_intraday_entry_unverified",
-    "one_price_limit_suspected",
-    "data_conflict",
-    "source_conflict",
-    "secondhand",
-    "retrospective",
-}
 
 
 def _number(value: Any) -> float | None:
@@ -78,8 +76,18 @@ def _warning_tokens(event: EventRecord) -> set[str]:
     return {item.strip() for item in event.execution_warning.split(";") if item.strip()}
 
 
-def _is_long_event(event: EventRecord) -> bool:
-    return event.direction.strip().lower() == "long"
+def _is_executable_long(event: EventRecord) -> bool:
+    """Long events that are executable and free of primary execution warnings.
+
+    Mirrors the primary-universe rule (PRIMARY_WARNINGS + is_executable_event)
+    without the post-store evidence checks, so it can count the executable long
+    universe from the event table alone.
+    """
+    return (
+        is_long_event(event)
+        and is_executable_event(event)
+        and not (_warning_tokens(event) & PRIMARY_WARNINGS)
+    )
 
 
 def _parse_post_id(event: EventRecord) -> str:
@@ -118,6 +126,18 @@ class BatchOutcome:
     max_favorable: float
 
 
+@dataclass(frozen=True)
+class AuditCounts:
+    """Per-identity event counts that are independent of the return sample.
+
+    These are audit-caliber counters over the active/completed event table and
+    do not follow the window/horizon filters that shape the return metrics.
+    """
+
+    short_by_identity: dict[str, int]
+    executable_long_by_identity: dict[str, int]
+
+
 def bootstrap_ci(values: list[float], *, seed: str, iterations: int = 2000) -> tuple[float, float] | None:
     """Return a deterministic percentile CI for the median, if sample size permits."""
     if len(values) < 5:
@@ -134,11 +154,31 @@ def bootstrap_ci(values: list[float], *, seed: str, iterations: int = 2000) -> t
 
 
 def _metrics(outcomes: list[BatchOutcome], *, input_key: str) -> dict[str, Any]:
+    """Return-sample metrics plus directional event counts.
+
+    Field caliber (documented, stable since kol-performance-v3):
+    - long_event_count: long events inside this metrics view's return sample
+      (identical to event_count; follows the window/horizon filters).
+    - short_event_count: short events excluded from returns (audit caliber,
+      does not follow window/horizon filters; the service overrides the 0
+      default with the per-identity audit count).
+    - executable_long_event_count: long events that are executable and free of
+      primary execution warnings (audit caliber; the service overrides the
+      long_event_count fallback with the per-identity audit count).
+    - audit_event_count: audit-retained event total = long_event_count +
+      short_event_count.
+    Returns are computed on long events only; short events never enter the
+    return sample, win rate, or ranking.
+    """
     if not outcomes:
         return {
             "batch_count": 0,
             "samples": 0,
             "event_count": 0,
+            "long_event_count": 0,
+            "short_event_count": 0,
+            "executable_long_event_count": 0,
+            "audit_event_count": 0,
             "recommendation_days": 0,
             "unique_symbols": 0,
             "unmatured_batch_count": 0,
@@ -160,10 +200,15 @@ def _metrics(outcomes: list[BatchOutcome], *, input_key: str) -> dict[str, Any]:
     mae = [item.max_adverse for item in outcomes]
     mfe = [item.max_favorable for item in outcomes]
     ci = bootstrap_ci(excess, seed=input_key)
+    long_event_count = sum(len(item.event_ids) for item in outcomes)
     return {
         "batch_count": len(outcomes),
         "samples": len(outcomes),
-        "event_count": sum(len(item.event_ids) for item in outcomes),
+        "event_count": long_event_count,
+        "long_event_count": long_event_count,
+        "short_event_count": 0,
+        "executable_long_event_count": long_event_count,
+        "audit_event_count": long_event_count,
         "recommendation_days": len({item.posted_at[:10] for item in outcomes}),
         "unique_symbols": len({symbol for item in outcomes for symbol in item.symbols}),
         "unmatured_batch_count": 0,
@@ -264,7 +309,8 @@ class PerformanceStore:
                     status TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     completed_at TEXT NOT NULL DEFAULT '',
-                    error TEXT NOT NULL DEFAULT ''
+                    error TEXT NOT NULL DEFAULT '',
+                    foundation_release_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS performance_snapshots(
                     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,6 +325,7 @@ class PerformanceStore:
                     input_hash TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    foundation_release_id TEXT NOT NULL DEFAULT '',
                     UNIQUE(input_hash, platform, kol_key, horizon, window_name)
                 );
                 CREATE TABLE IF NOT EXISTS performance_narratives(
@@ -294,17 +341,34 @@ class PerformanceStore:
                     status TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    foundation_release_id TEXT NOT NULL DEFAULT '',
                     UNIQUE(input_hash, platform, kol_key, horizon, window_name)
                 );
                 CREATE INDEX IF NOT EXISTS idx_performance_series
                     ON performance_snapshots(platform,kol_key,horizon,window_name,as_of);
                 """
             )
+            for table, column in (
+                ("performance_runs", "foundation_release_id"),
+                ("performance_snapshots", "foundation_release_id"),
+                ("performance_narratives", "foundation_release_id"),
+            ):
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                if column not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             db.commit()
         finally:
             db.close()
 
-    def save_run(self, run_id: str, as_of: str, input_hash: str, status: str = "completed", error: str = "") -> None:
+    def save_run(
+        self,
+        run_id: str,
+        as_of: str,
+        input_hash: str,
+        status: str = "completed",
+        error: str = "",
+        foundation_release_id: str = "",
+    ) -> None:
         now = datetime.now(SHANGHAI).isoformat(timespec="seconds")
         db = self.connect()
         try:
@@ -312,10 +376,10 @@ class PerformanceStore:
                 db.execute(
                     """
                     INSERT OR REPLACE INTO performance_runs(
-                        run_id,as_of,mode,algorithm_version,input_hash,status,started_at,completed_at,error
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                        run_id,as_of,mode,algorithm_version,input_hash,status,started_at,completed_at,error,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (run_id, as_of, "deterministic", PERFORMANCE_VERSION, input_hash, status, now, now, error),
+                    (run_id, as_of, "deterministic", PERFORMANCE_VERSION, input_hash, status, now, now, error, foundation_release_id),
                 )
                 db.commit()
         finally:
@@ -332,13 +396,14 @@ class PerformanceStore:
                     """
                     INSERT OR IGNORE INTO performance_snapshots(
                         run_id,as_of,platform,kol_key,horizon,window_name,tier,rank,
-                        input_hash,payload_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        input_hash,payload_json,created_at,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         row["run_id"], row["as_of"], row["platform"], row["kol_key"],
                         row["horizon"], row["window_name"], row["tier"], row.get("rank"),
                         row["input_hash"], json.dumps(row["payload"], ensure_ascii=False, sort_keys=True), now,
+                        row.get("foundation_release_id", ""),
                     ),
                     )
                     inserted += int(cursor.rowcount > 0)
@@ -347,7 +412,7 @@ class PerformanceStore:
             db.close()
         return inserted
 
-    def save_narrative(self, *, as_of: str, platform: str, kol_key: str, horizon: str, window_name: str, input_hash: str, payload: dict[str, Any], provider: str = "rules", model: str = "none", status: str = "fallback") -> bool:
+    def save_narrative(self, *, as_of: str, platform: str, kol_key: str, horizon: str, window_name: str, input_hash: str, payload: dict[str, Any], provider: str = "rules", model: str = "none", status: str = "fallback", foundation_release_id: str = "") -> bool:
         now = datetime.now(SHANGHAI).isoformat(timespec="seconds")
         db = self.connect()
         try:
@@ -355,10 +420,10 @@ class PerformanceStore:
                 cursor = db.execute(
                     """
                     INSERT OR IGNORE INTO performance_narratives(
-                        as_of,platform,kol_key,horizon,window_name,input_hash,provider,model,status,payload_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        as_of,platform,kol_key,horizon,window_name,input_hash,provider,model,status,payload_json,created_at,foundation_release_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (as_of, platform, kol_key, horizon, window_name, input_hash, provider, model, status, json.dumps(payload, ensure_ascii=False, sort_keys=True), now),
+                    (as_of, platform, kol_key, horizon, window_name, input_hash, provider, model, status, json.dumps(payload, ensure_ascii=False, sort_keys=True), now, foundation_release_id),
                 )
                 db.commit()
                 return bool(cursor.rowcount > 0)
@@ -488,6 +553,13 @@ class KolPerformanceService:
             return False
         return True
 
+    def _foundation_release_id(self) -> str:
+        for row in reversed(self.event_store.load_marks()):
+            value = str(row.get("foundation_release_id") or "")
+            if value:
+                return value
+        return ""
+
     def _events_and_identities(self) -> tuple[list[EventRecord], dict[str, KolIdentity], dict[str, bool]]:
         events = self.event_store.load_events()
         identities: dict[str, KolIdentity] = {}
@@ -511,16 +583,25 @@ class KolPerformanceService:
                 pass
         return events, identities, primary
 
-    def _outcomes(self, *, as_of: date, horizon: str, primary_only: bool | None) -> tuple[list[BatchOutcome], set[str], set[str]]:
+    def _outcomes(
+        self, *, as_of: date, horizon: str, primary_only: bool | None
+    ) -> tuple[list[BatchOutcome], set[str], set[str], AuditCounts]:
         events, identities, primary = self._events_and_identities()
         event_by_id = {event.event_id: event for event in events}
         all_batch_keys: set[str] = set()
+        short_by_identity: dict[str, int] = {}
+        executable_long_by_identity: dict[str, int] = {}
         for event in events:
             identity = identities[self.resolve_identity(event).key]
             if event.status not in {"active", "completed"}:
                 continue
-            if not _is_long_event(event):
+            if not is_long_event(event):
+                # Short events never enter the return pipeline; they are
+                # counted here so the audit totals keep them visible.
+                short_by_identity[identity.key] = short_by_identity.get(identity.key, 0) + 1
                 continue
+            if _is_executable_long(event):
+                executable_long_by_identity[identity.key] = executable_long_by_identity.get(identity.key, 0) + 1
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
             if primary_only is False and primary.get(event.event_id, False):
@@ -534,7 +615,7 @@ class KolPerformanceService:
             event = event_by_id.get(str(row.get("event_id") or ""))
             if event is None or event.status not in {"active", "completed"}:
                 continue
-            if not _is_long_event(event):
+            if not is_long_event(event):
                 continue
             if primary_only is True and not primary.get(event.event_id, False):
                 continue
@@ -578,7 +659,15 @@ class KolPerformanceService:
                 )
             )
             mature_keys.add(batch_key)
-        return outcomes, all_batch_keys - mature_keys, all_batch_keys
+        return (
+            outcomes,
+            all_batch_keys - mature_keys,
+            all_batch_keys,
+            AuditCounts(
+                short_by_identity=short_by_identity,
+                executable_long_by_identity=executable_long_by_identity,
+            ),
+        )
 
     def _row_for_identity(
         self,
@@ -589,22 +678,25 @@ class KolPerformanceService:
         window_name: str,
         primary_only: bool | None,
     ) -> dict[str, Any]:
-        outcomes, unmatured_keys, _ = self._outcomes(as_of=as_of, horizon=horizon, primary_only=primary_only)
+        outcomes, unmatured_keys, _, audit_counts = self._outcomes(as_of=as_of, horizon=horizon, primary_only=primary_only)
         matching = [item for item in outcomes if item.identity.key == identity.key]
         if window_name != "all":
             days = int(window_name)
             start = as_of - timedelta(days=days)
             matching = [item for item in matching if start.isoformat() <= item.trade_date <= as_of.isoformat()]
         metrics = _metrics(matching, input_key=f"{as_of}|{identity.key}|{horizon}|{window_name}|{primary_only}")
+        self._apply_audit_counts(metrics, identity, audit_counts)
         # Count the maturity backlog for the same KOL even when the recent window is empty.
         metrics["unmatured_batch_count"] = sum(
             1 for key in unmatured_keys if key.startswith(identity.key + "|")
         )
         tier_source = {}
         for item_horizon in HORIZONS:
-            values, _, _ = self._outcomes(as_of=as_of, horizon=item_horizon, primary_only=primary_only)
+            values, _, _, horizon_audit = self._outcomes(as_of=as_of, horizon=item_horizon, primary_only=primary_only)
             values = [item for item in values if item.identity.key == identity.key]
-            tier_source[item_horizon] = _metrics(values, input_key=f"{as_of}|{identity.key}|{item_horizon}|all|{primary_only}")
+            horizon_metrics = _metrics(values, input_key=f"{as_of}|{identity.key}|{item_horizon}|all|{primary_only}")
+            self._apply_audit_counts(horizon_metrics, identity, horizon_audit)
+            tier_source[item_horizon] = horizon_metrics
         tier, rank_horizon = _tier(tier_source)
         row = {
             "kol_key": identity.key,
@@ -625,6 +717,19 @@ class KolPerformanceService:
         }
         row["narrative"] = _rule_narrative(identity.display_name, tier, metrics)
         return row
+
+    @staticmethod
+    def _apply_audit_counts(metrics: dict[str, Any], identity: KolIdentity, audit_counts: AuditCounts) -> None:
+        """Overlay audit-caliber directional counts onto a metrics dict.
+
+        long_event_count stays the return-sample count; short_event_count and
+        executable_long_event_count are audit-caliber (full active/completed
+        universe for the identity, independent of window/horizon/primary_only).
+        audit_event_count is the audit-retained total = long + short.
+        """
+        metrics["short_event_count"] = audit_counts.short_by_identity.get(identity.key, 0)
+        metrics["executable_long_event_count"] = audit_counts.executable_long_by_identity.get(identity.key, 0)
+        metrics["audit_event_count"] = metrics["long_event_count"] + metrics["short_event_count"]
 
     @staticmethod
     def _rank(rows: list[dict[str, Any]], horizon: str) -> None:
@@ -692,6 +797,7 @@ class KolPerformanceService:
     def refresh(self, *, as_of: date) -> dict[str, Any]:
         result = self.compute(as_of=as_of, window="all", horizon="1W", primary_only=True)
         run_id = f"perf-{uuid.uuid4().hex[:12]}"
+        foundation_release_id = self._foundation_release_id()
         input_hash = _hash(result)
         snapshots: list[dict[str, Any]] = []
         for row in result["rows"]:
@@ -703,6 +809,7 @@ class KolPerformanceService:
                     "horizon": horizon,
                     "metrics": metrics,
                     "narrative": narrative,
+                    "foundation_release_id": foundation_release_id,
                 }
                 snapshots.append({
                     "run_id": run_id,
@@ -715,6 +822,7 @@ class KolPerformanceService:
                     "rank": row["rank"],
                     "input_hash": _hash(payload),
                     "payload": payload,
+                    "foundation_release_id": foundation_release_id,
                 })
                 self.store.save_narrative(
                     as_of=as_of.isoformat(),
@@ -724,9 +832,10 @@ class KolPerformanceService:
                     window_name="all",
                     input_hash=_hash(payload),
                     payload=narrative,
+                    foundation_release_id=foundation_release_id,
                 )
         inserted = self.store.save_snapshots(snapshots)
-        self.store.save_run(run_id, as_of.isoformat(), input_hash)
+        self.store.save_run(run_id, as_of.isoformat(), input_hash, foundation_release_id=foundation_release_id)
         result["run_id"] = run_id
         result["snapshots_inserted"] = inserted
         return result
@@ -747,6 +856,7 @@ class KolPerformanceService:
                 provider=str(narrative.get("provider") or "rules"),
                 model=str(narrative.get("model") or "none"),
                 status=str(narrative.get("status") or "fallback"),
+                foundation_release_id=self._foundation_release_id(),
             )
         return result
 

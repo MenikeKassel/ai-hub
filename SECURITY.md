@@ -1,4 +1,4 @@
-﻿# Security
+# Security
 
 Do not commit credentials, cookies, request headers, personal transaction
 records, raw social-media snapshots, local databases, media, or purchased

@@ -1,10 +1,11 @@
-﻿param(
+param(
     [switch]$SkipHermes,
     [switch]$SkipTests
 )
 
 $ErrorActionPreference = "Continue"
 $Repo = Split-Path -Parent $PSScriptRoot
+$vaultPath = if ($env:OBSIDIAN_VAULT) { $env:OBSIDIAN_VAULT } else { Join-Path $Repo "_automation\_vault" }
 
 function Section($Name) {
     Write-Host ""
@@ -13,9 +14,9 @@ function Section($Name) {
 
 Section "Workspace"
 Write-Host "Repo: $Repo"
-Write-Host "Obsidian vault: <OBSIDIAN_VAULT>"
-Write-Host "Hermes runtime: <USER_HOME>\AppData\Local\hermes"
-Write-Host "Hermes user config: <USER_HOME>\.hermes"
+Write-Host "Obsidian vault: $vaultPath"
+Write-Host "Hermes runtime: $env:LOCALAPPDATA\hermes"
+Write-Host "Hermes user config: $env:USERPROFILE\.hermes"
 
 Section "Git"
 git -C $Repo status --short

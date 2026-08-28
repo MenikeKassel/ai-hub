@@ -1,4 +1,4 @@
-﻿"""Read-only importer for the purchased 2026-07-31 daily archive.
+"""Read-only importer for dated purchased daily CSV archives.
 
 The archive is treated as an untrusted, dated snapshot.  This module never
 modifies the source directory and only writes through the existing MarketStore
@@ -18,7 +18,7 @@ import pandas as pd
 from market_data import MarketStore, SyncResult, sync_daily_bars
 
 
-PURCHASED_DAILY_PROVIDER = "purchased_daily_20260731"
+PURCHASED_DAILY_PROVIDER = "purchased_daily"
 EXPECTED_COLUMNS = (
     "ts_code",
     "trade_date",
@@ -199,8 +199,9 @@ class PurchasedDailyProvider:
 
     name = PURCHASED_DAILY_PROVIDER
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, provider_name: str | None = None):
         self.root = Path(root)
+        self.name = provider_name or PURCHASED_DAILY_PROVIDER
 
     def has_symbol(self, symbol: str) -> bool:
         return _archive_path(self.root, symbol).is_file()

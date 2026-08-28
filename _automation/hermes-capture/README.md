@@ -1,4 +1,4 @@
-﻿# Hermes Capture Pipeline
+# Hermes Capture Pipeline
 
 This v1 pipeline connects:
 
@@ -6,21 +6,21 @@ This v1 pipeline connects:
 Feishu raw link or /clip
 -> Hermes
 -> Notion 信息收集
--> <OBSIDIAN_VAULT>\00_Inbox
+-> F:\research\00_Inbox
 ```
 
 ## Commands
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/clip https://example.com test" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/auto 3.51 copy share https://v.douyin.com/example/ note" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/idea 今天想到一个KOL指数思路" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/readlater https://example.com" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/log 今天整理了A股新手防亏系统，晚上复盘一下" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/kol https://x.com/public_kol_5 交易心理" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/event https://x.com/user/status/1 推荐某标的，待核验六要素" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/concept 大周期高位放量" --source feishu
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/holding 我买了159139，建仓时间2026-07-07，价格1.460" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/clip https://example.com test" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/auto 3.51 copy share https://v.douyin.com/example/ note" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/idea 今天想到一个KOL指数思路" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/readlater https://example.com" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/log 今天整理了A股新手防亏系统，晚上复盘一下" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/kol https://x.com/Mimiwftt 交易心理" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/event https://x.com/user/status/1 推荐某标的，待核验六要素" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/concept 大周期高位放量" --source feishu
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\capture_pipeline.py --message "/holding 我买了159139，建仓时间2026-07-07，价格1.460" --source feishu
 ```
 
 ## Reader health check
@@ -28,9 +28,9 @@ python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\capture_pipeline.py --mes
 This checks platform readers only. It does not write to Notion or Obsidian.
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\reader_probe.py
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\reader_probe.py --platform X --platform B站 --timeout 45 --json
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\reader_probe.py --platform 小红书 --url 小红书=https://www.xiaohongshu.com/explore/...
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\reader_probe.py
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\reader_probe.py --platform X --platform B站 --timeout 45 --json
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\reader_probe.py --platform 小红书 --url 小红书=https://www.xiaohongshu.com/explore/...
 ```
 
 The command exits with code 1 when any platform reader fails. That is expected while login/cookie-dependent readers such as Xiaohongshu or Zhihu are not healthy.
@@ -40,42 +40,42 @@ The command exits with code 1 when any platform reader fails. That is expected w
 This checks optional heavy crawler prerequisites. It does not fetch platform content or write captures.
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\backend_doctor.py
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\backend_doctor.py --json
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\backend_doctor.py
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\backend_doctor.py --json
 ```
 
 Use `reader_probe.py` to answer "can this URL be read now?". Use `backend_doctor.py` to answer "what tool/login/API-key is missing for full crawling?".
 
 ## MediaCrawler backend
 
-MediaCrawler is kept as an ignored external repo under `<AI_HUB_HOME>\ai-hub\_external\MediaCrawler`.
+MediaCrawler is kept as an ignored external repo under `E:\aiworkspace\ai-hub\_external\MediaCrawler`.
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624"
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624" --enqueue
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624" --execute
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624"
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624" --enqueue
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_runner.py --url "https://www.zhihu.com/question/19581624" --execute
 ```
 
-Default mode is a dry run. `--enqueue` writes a pending job to `<AI_HUB_HOME>\ai-hub\_runtime\mediacrawler\queue.jsonl`. `--execute` may open/login browser windows.
+Default mode is a dry run. `--enqueue` writes a pending job to `E:\aiworkspace\ai-hub\_runtime\mediacrawler\queue.jsonl`. `--execute` may open/login browser windows.
 
 Queue management:
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json list
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next --execute
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next --execute --import-results
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json mark <job_id> --status cancelled --note "manual skip"
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json list
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next --execute
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json run-next --execute --import-results
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_queue.py --json mark <job_id> --status cancelled --note "manual skip"
 ```
 
-`run-next` is a dry run unless `--execute` is provided. Use it after browser login/API keys are ready. Add `--import-results` to write successful MediaCrawler output into Obsidian `source-note-placeholder.md
+`run-next` is a dry run unless `--execute` is provided. Use it after browser login/API keys are ready. Add `--import-results` to write successful MediaCrawler output into Obsidian `01_Sources/MediaCrawler`; add `--import-notion` only when you also want Notion pages created or refreshed.
 
 Output import can also be run separately:
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json scan
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json import --job-id <job_id>
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json import --job-id <job_id> --notion
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json scan
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json import --job-id <job_id>
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\mediacrawler_importer.py --json import --job-id <job_id> --notion
 ```
 
 When `/clip` fails on MediaCrawler-supported sources (`小红书;知乎;抖音;B站` by default), the capture pipeline can enqueue a MediaCrawler `detail` job. A failed capture does not write to Notion or Obsidian; Hermes asks the user to supplement usable content first.
@@ -87,7 +87,7 @@ Zhihu note: bare `/question/<id>` pages first use the local Chrome fallback in `
 This is the preferred backend for Zhihu question/answer-flow pages. It connects to a local logged-in Chrome page through Chrome DevTools, extracts bounded answer cards or page API results, and returns Markdown for the normal capture pipeline. It does not read Chrome cookie files.
 
 ```powershell
-python <AI_HUB_HOME>\ai-hub\_automation\hermes-capture\zhihu_local_capture.py --url "https://www.zhihu.com/question/2055737047265161338" --json
+python E:\aiworkspace\ai-hub\_automation\hermes-capture\zhihu_local_capture.py --url "https://www.zhihu.com/question/2055737047265161338" --json
 ```
 
 If DevTools is not reachable, close Chrome and start it like this, then rerun the command:
@@ -104,7 +104,7 @@ enable_zhihu_local_browser: "true"
 zhihu_local_browser: "edge"
 zhihu_local_browser_path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
 zhihu_local_browser_profile: "Default"
-zhihu_local_user_data_dir: "<USER_HOME>\\AppData\\Local\\hermes\\browser-profiles\\zhihu-edge"
+zhihu_local_user_data_dir: "C:\\Users\\YOUR_USER\\AppData\\Local\\hermes\\browser-profiles\\zhihu-edge"
 zhihu_local_cdp_port: 9222
 zhihu_local_max_answers: 12
 zhihu_local_max_scrolls: 10
@@ -117,19 +117,19 @@ obsidian_project_allowlist: "交易系统;KOL指数;基本面量化系统"
 
 ## Notes
 
-- `NOTION_API_KEY` is loaded from `<USER_HOME>\.hermes\.env` first, then from `<USER_HOME>\AppData\Local\hermes\.env`.
+- `NOTION_API_KEY` is loaded from `C:\Users\YOUR_USER\.hermes\.env` first, then from `C:\Users\YOUR_USER\AppData\Local\hermes\.env`.
 - The pipeline creates the minimum Notion properties if they are missing.
 - `/readlater` writes to Notion only.
-- Obsidian is trading-only: only `交易系统`, `KOL指数`, and `基本面量化系统` items are written to `<OBSIDIAN_VAULT>`. Other captures remain in Notion.
+- Obsidian is trading-only: only `交易系统`, `KOL指数`, and `基本面量化系统` items are written to `F:\research`. Other captures remain in Notion.
 - `/auto` detects raw share text: text with a URL becomes `/clip`; plain text becomes `/log`.
 - Feishu raw non-command messages containing a URL are rewritten to `/auto <original text>` by the Hermes `pre_gateway_dispatch` hook.
 - `/log`, `/day`, and `/j` write daily activity logs to Notion only.
 - `/kol` writes a KOL profile/source as a KOL entity lead.
-  - X profile URLs such as `https://x.com/Public KOL 6` are accepted as profile leads even when no tweet/status id is present.
+  - X profile URLs such as `https://x.com/Hoyooyoo` are accepted as profile leads even when no tweet/status id is present.
 - `/event` writes a KOL recommendation candidate; it still needs six-element audit before entering `KOL推荐事件表`.
 - `/concept` writes a reusable concept lead.
 - `/holding` writes a real holding audit lead.
-- `/clip` and `/idea` write to Notion and `<OBSIDIAN_VAULT>\00_Inbox`.
+- `/clip` and `/idea` write to Notion and `F:\research\00_Inbox`.
 - Hermes command handling is plugin-first through `hermes-capture-commands`; stale `/clip -> /hermes-capture` quick command aliases should be removed.
 
 ## Readers
@@ -144,5 +144,5 @@ obsidian_project_allowlist: "交易系统;KOL指数;基本面量化系统"
 
 See:
 
-- `<AI_HUB_HOME>\ai-hub\_docs\platform-reader-research.md` for the research matrix and verification notes.
-- `<AI_HUB_HOME>\ai-hub\_docs\heavy-backend-setup.md` for MediaCrawler/XHS-Downloader/twitter-cli/Bilibili backend setup.
+- `E:\aiworkspace\ai-hub\_docs\platform-reader-research.md` for the research matrix and verification notes.
+- `E:\aiworkspace\ai-hub\_docs\heavy-backend-setup.md` for MediaCrawler/XHS-Downloader/twitter-cli/Bilibili backend setup.

@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -42,9 +42,9 @@ def test_parse_log():
 
 
 def test_parse_trading_object_commands():
-    kol = parse_message("/kol https://x.com/public_kol_5 交易心理")
+    kol = parse_message("/kol https://x.com/Mimiwftt 交易心理")
     assert kol["command"] == "kol"
-    assert kol["url"] == "https://x.com/public_kol_5"
+    assert kol["url"] == "https://x.com/Mimiwftt"
     assert kol["note"] == "交易心理"
 
     event = parse_message("/event https://x.com/a/status/1 推荐高德红外")
@@ -103,8 +103,8 @@ def test_classify_source_type():
 
 
 def test_extract_x_profile_handle():
-    assert extract_x_profile_handle("https://x.com/Public KOL 6") == "Public KOL 6"
-    assert extract_x_profile_handle("https://twitter.com/public_kol_5") == "public_kol_5"
+    assert extract_x_profile_handle("https://x.com/Hoyooyoo") == "Hoyooyoo"
+    assert extract_x_profile_handle("https://twitter.com/Mimiwftt") == "Mimiwftt"
     assert extract_x_profile_handle("https://x.com/a/status/1") == ""
     assert extract_x_profile_handle("https://x.com/i/status/1") == ""
 
@@ -135,14 +135,14 @@ def test_obsidian_only_accepts_trading_projects():
 
 def test_build_item_command_object_hints_without_fetch():
     kol = pipeline.build_item(
-        {"command": "kol", "url": "https://x.com/Public KOL 6", "note": "待选"},
+        {"command": "kol", "url": "https://x.com/Hoyooyoo", "note": "待选"},
         {"max_content_chars": "8000"},
     )
     assert kol["fetch_ok"] is True
     assert kol["fetch_method"] == "x-profile-kol-fallback"
     assert kol["project"] == "KOL指数"
     assert kol["object_hint"] == "KOL实体线索"
-    assert "@Public KOL 6" in kol["content"]
+    assert "@Hoyooyoo" in kol["content"]
 
     concept = pipeline.build_item(
         {"command": "concept", "url": None, "note": "大周期高位放量"},

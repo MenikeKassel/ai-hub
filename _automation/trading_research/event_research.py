@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 from datetime import datetime, time
@@ -632,6 +632,10 @@ def analyze_event_methods(
         approximate_limit_threshold = 0.095
     limit_streak = 0
     for value in reversed(changes.dropna().tolist()):
+        if not np.isfinite(value):
+            # pct_change can yield inf when the previous close is zero, or
+            # NaN from suspended days; neither is a limit move.
+            continue
         if float(value) >= approximate_limit_threshold:
             limit_streak += 1
         else:

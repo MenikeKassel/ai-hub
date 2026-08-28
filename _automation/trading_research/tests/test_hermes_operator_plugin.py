@@ -1,12 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_operator_plugin import KOL_OPERATOR_SCHEMA, _build_command, run_operator
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from hermes_operator_plugin import (  # noqa: E402
+    KOL_OPERATOR_SCHEMA,
+    _build_command,
+    run_operator,
+)
 
 
 class HermesOperatorPluginTests(unittest.TestCase):
@@ -15,7 +23,17 @@ class HermesOperatorPluginTests(unittest.TestCase):
 
         self.assertIn("status", action_schema["enum"])
         self.assertIn("approve-draft", action_schema["enum"])
+        self.assertIn("discover-accounts", action_schema["enum"])
+        self.assertNotIn("accept-candidate", action_schema["enum"])
         self.assertFalse(KOL_OPERATOR_SCHEMA["parameters"]["additionalProperties"])
+
+    def test_discovery_actions_expose_fixed_fields_without_source_mutation(self) -> None:
+        properties = KOL_OPERATOR_SCHEMA["parameters"]["properties"]
+
+        self.assertEqual("^cand_[a-f0-9]{24}$", properties["candidate_id"]["pattern"])
+        self.assertEqual(30, properties["days"]["maximum"])
+        self.assertNotIn("schema", properties)
+        self.assertNotIn("source_path", properties)
 
     @patch("hermes_operator_plugin.OPERATOR")
     @patch("hermes_operator_plugin.shutil.which", return_value=r"C:\Windows\powershell.exe")
@@ -25,7 +43,7 @@ class HermesOperatorPluginTests(unittest.TestCase):
         operator,
     ) -> None:
         operator.is_file.return_value = True
-        operator.__str__.return_value = r"<AI_HUB_HOME>\ai-hub\scripts\hermes-kol-operator.ps1"
+        operator.__str__.return_value = r"E:\aiworkspace\ai-hub\scripts\hermes-kol-operator.ps1"
 
         command = _build_command(
             {"action": "approve-draft", "id": 42, "note": "confirmed"}
