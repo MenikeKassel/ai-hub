@@ -305,7 +305,7 @@ class MarketDailyPublisher:
             as_of=target.isoformat(),
             baseline_symbols=baseline,
             extension_symbols=ready_extensions,
-            source="market-daily-publish:baostock",
+            source="market-daily-publish:baostock+tencent_fallbacks",
         )
         if ui_pid_path and ui_pid_path.exists():
             try:
