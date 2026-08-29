@@ -1,6 +1,6 @@
 # GLM review entrypoint
 
-Review target: ai-hub 3.0.0, local `main` baseline prepared on 2026-08-28.
+Review target: ai-hub 3.1.0, local `main` baseline prepared on 2026-08-29.
 
 ## Read in this order
 
@@ -38,8 +38,8 @@ Do not evaluate trading performance or provide investment recommendations.
 ## Required invariants to challenge
 
 - Runtime/private data is absent from Git.
-- Normal historical market writes are impossible through API, CLI collection,
-  post review, or scheduled tasks.
+- Daily market publication is atomic and source-audited; returns and research
+  writes remain blocked by policy.
 - Confirming a stock lead cannot publish incomplete market data.
 - Existing full post content cannot be replaced by a public/recovery stub.
 - X rate limiting cannot be bypassed by switching sessions or fallback sources.
@@ -50,8 +50,11 @@ Do not evaluate trading performance or provide investment recommendations.
 
 ## Current evidence and known limitations
 
-- The console is consolidated on 8123 and historical market writes return 409.
-- Published market coverage has zero lagging symbols at the declared cutoff.
+- The console is consolidated on 8123. Market mode is live through the latest
+  completed close (`2026-08-28`); returns/research refresh writes return 409.
+- Published market coverage has 651 complete raw/qfq series; one confirmed
+  admission remains pending and four newly discovered symbols await the next
+  daily publication.
 - X slot state and request usage are persisted; unconfigured slots remain
   disabled rather than copying a legacy credential.
 - One X run may become `partial` when the only verified identity reaches its
