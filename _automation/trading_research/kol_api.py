@@ -676,6 +676,42 @@ def create_app(
                 foundation["coverage"] = foundation_reader.coverage(str(foundation.get("as_of") or ""))
                 foundation["coverage_complete"] = bool(foundation["coverage"].get("complete"))
             value["foundation"] = foundation
+            # The instrument table also contains newly discovered leads that
+            # are intentionally waiting for the next publication.  Health's
+            # formal freshness contract is the published manifest, so those
+            # queued candidates do not make an otherwise complete release look
+            # stale.
+            published_manifest = read_published_manifest(config.runtime_root / "market")
+            published_symbols = {
+                str(symbol) for symbol in published_manifest.get("published_symbols", [])
+                if str(symbol).isdigit()
+            }
+            cutoff = str(mode.get("as_of") or "")
+            formal_raw = {
+                str(row.get("symbol")): str(row.get("end_date") or "")
+                for row in daily_rows
+                if str(row.get("adjustment")) == "raw" and str(row.get("symbol")) in published_symbols
+            }
+            formal_qfq = {
+                str(row.get("symbol")): str(row.get("end_date") or "")
+                for row in daily_rows
+                if str(row.get("adjustment")) == "qfq" and str(row.get("symbol")) in published_symbols
+            }
+            formal_lagging = sorted(
+                symbol for symbol in published_symbols
+                if cutoff and (formal_raw.get(symbol, "") < cutoff or formal_qfq.get(symbol, "") < cutoff)
+            )
+            value["published_target_sequence_count"] = len(published_symbols)
+            value["published_raw_current_sequence_count"] = sum(formal_raw.get(symbol) == cutoff for symbol in published_symbols)
+            value["published_qfq_current_sequence_count"] = sum(formal_qfq.get(symbol) == cutoff for symbol in published_symbols)
+            value["published_lagging_symbols"] = formal_lagging
+            value["published_lagging_symbol_count"] = len(formal_lagging)
+            if cutoff and not formal_lagging:
+                value["latest_open_date"] = cutoff
+                value["daily_data_status"] = "current"
+                value["market_status"] = "current"
+                value["lagging_symbols"] = []
+                value["lagging_symbol_count"] = 0
             value["recovery_mode"] = mode.get("mode", "live")
             value["as_of"] = mode.get("as_of", "")
             value["write_enabled"] = bool(mode.get("write_enabled", True))
