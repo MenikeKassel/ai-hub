@@ -1,11 +1,18 @@
 # Current architecture
 
-Status date: 2026-08-28. Source version: 3.0.0.
+The market boundary is now a daily, atomic publication boundary. BaoStock is
+the primary source; FreeStockDB remains the local supplementary reader and
+Tencent/AKShare are fallbacks for symbols BaoStock cannot serve. Publication
+sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
+returns and research update flags stay disabled. Candidate directories and the
+previous published directory make each run recoverable.
+
+Status date: 2026-08-29. Source version: 3.1.0.
 
 ## Purpose and boundary
 
 The project collects public KOL evidence, classifies candidate A-share research
-content, supports human approval, and displays historical market context. It
+content, supports human approval, and displays the published daily market context. It
 does not connect to a broker, place orders, issue trading signals, or copy KOL
 positions.
 

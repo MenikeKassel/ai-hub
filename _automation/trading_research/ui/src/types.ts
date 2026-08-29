@@ -982,6 +982,10 @@ export interface Health {
   recovery_mode?: 'historical' | 'live' | string
   as_of?: string
   write_enabled?: boolean
+  market_update_enabled?: boolean
+  returns_update_enabled?: boolean
+  research_update_enabled?: boolean
+  publication_mode?: string
   twitter_cli: string
   twitter_credentials_configured: boolean
   twitter_reader_credentials_configured?: boolean
@@ -998,6 +1002,15 @@ export interface Health {
   x_collection_status?: string
   public_backup?: PublicBackupHealth
   model_daily_budget?: {
+    usage_date: string
+    daily_limit: number
+    attempted: number
+    completed: number
+    failed: number
+    remaining: number
+    updated_at: string
+  }
+  ocr_daily_budget?: {
     usage_date: string
     daily_limit: number
     attempted: number
@@ -1023,6 +1036,7 @@ export interface Health {
     ocr_daily_limit: number
     estimated_days: number
   }
+  queue_status?: QueueStatus
   market_admissions?: {
     total: number
     pending: number
@@ -1103,6 +1117,14 @@ export interface Health {
     threshold: number
     runs: Array<{ run_id: string; min_coverage: number; avg_coverage: number }>
   }
+}
+
+export interface QueueStatus {
+  x: { total_items: number; unique_batches: number; queued: number; running: number; cooldown: number; unique_kols: number }
+  zhihu: { total_items: number; unique_batches: number; queued: number; running: number; cooldown: number; unique_kols: number }
+  ocr_model: Health['model_queue']
+  post_recovery: { total: number; queued: number; running: number; cooldown: number; hydrated: number; terminal: number }
+  market_admissions: { total: number; pending: number; staging: number; published: number; failed: number }
 }
 
 export interface PipelineRefresh {

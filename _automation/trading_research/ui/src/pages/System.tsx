@@ -28,6 +28,7 @@ function runPresentation(status: FetchRun['status']) {
 export default function System() {
   const client = useQueryClient()
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
+  const queueStatus = useQuery({ queryKey: ['queue-status'], queryFn: api.queueStatus, refetchInterval: 10_000 })
   const diagnostics = useQuery({
     queryKey: ['system-diagnostics'],
     queryFn: api.diagnostics,
@@ -106,6 +107,9 @@ export default function System() {
   const h = health.data || diagnostics.data
     ? { ...(health.data || {}), ...(diagnostics.data || {}) } as typeof health.data
     : undefined
+  // Older deployments and the review fixture return an empty array for
+  // unknown endpoints; only use a queue payload after its shape is checked.
+  const queues = queueStatus.data && !Array.isArray(queueStatus.data) && queueStatus.data.x ? queueStatus.data : h?.queue_status
   const fetchRunning = tasks.data?.fetch?.status === 'running'
   const morningRunning = tasks.data?.morning?.status === 'running'
   const pipelineBusy = startTask.isPending || fetchRunning || morningRunning
@@ -114,7 +118,7 @@ export default function System() {
 
   return <section>
     <header className="page-header">
-      <div><span className="eyebrow">DATA HEALTH</span><h1>数据健康</h1>{h?.recovery_mode === 'historical' && <span className="scope-note">行情历史只读 · 数据截至 {h.as_of || '未知'}</span>}</div>
+      <div><span className="eyebrow">DATA HEALTH</span><h1>数据健康</h1>{h?.recovery_mode === 'historical' ? <span className="scope-note">行情历史只读 · 数据截至 {h.as_of || '未知'}</span> : h?.market_update_enabled && <span className="scope-note">每日收盘行情 · 数据截至 {h?.as_of || '未发布'} · 收益/研究更新停用</span>}</div>
       <div className="header-actions">
         <button className="primary-button" disabled={pipelineBusy} onClick={() => startTask.mutate('morning')}>
           {morningRunning ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}
@@ -145,6 +149,7 @@ export default function System() {
         total={tasks.data?.fetch?.total_kols || 0}
         running={fetchRunning}
       />
+      {queues && <div className="scope-note">待处理：X {queues.x.queued + queues.x.running + queues.x.cooldown} 项 / {queues.x.unique_kols} 个账号 · 知乎 {queues.zhihu.queued + queues.zhihu.running + queues.zhihu.cooldown} 项 · OCR {queues.ocr_model?.awaiting_ocr ?? 0} · 模型 {queues.ocr_model?.processable_remaining ?? 0} · 行情准入 {queues.market_admissions.pending}</div>}
     </div>
       <div className="panel task-console">
       <div className="panel-heading"><div><h2>采集恢复</h2><span>先补最近 7 天；AI 503 不会阻塞帖子保存</span></div><button className="secondary-button" disabled={recoveryBusy || !recoveryPreview.data?.x_session_ready} onClick={() => startRecovery.mutate()}><RefreshCw className={recoveryBusy ? 'spin' : ''} size={16} />{recoveryBusy ? '恢复运行中' : '补齐最近 7 天'}</button></div>
@@ -169,7 +174,7 @@ export default function System() {
       <HealthItem icon={Database} label="Market warehouse" ok={!!h?.market?.ok} value={`${h?.market?.active_instruments || 0} active / ${h?.market?.coverage_count || 0} coverage`} />
       <HealthItem icon={Database} label="行情准入" ok={(h?.market_admissions?.failed ?? 0) === 0} value={`已发布 ${h?.market_admissions?.published ?? 0} / 待补 ${h?.market_admissions?.pending ?? 0} / 失败 ${h?.market_admissions?.failed ?? 0}`} />
       <HealthItem icon={Database} label="FreeStockDB" ok={!!h?.component_status?.freestockdb.ok} value={`${h?.component_status?.freestockdb.status || 'unknown'} / ${h?.freestockdb?.data_path || 'D盘数据未连接'}`} />
-      <HealthItem icon={RefreshCw} label="Market and returns tasks" ok={h?.recovery_mode === 'historical' || (h?.market_sync_task === 'installed' && h?.return_task === 'installed')} value={h?.recovery_mode === 'historical' ? 'historical / intentionally disabled' : `market ${h?.market_sync_task || '-'} / returns ${h?.return_task || '-'}`} />
+      <HealthItem icon={RefreshCw} label="Market and returns tasks" ok={h?.recovery_mode === 'historical' || h?.market_update_enabled === false || (h?.market_sync_task === 'installed' && (h?.returns_update_enabled === false || h?.return_task === 'installed'))} value={h?.recovery_mode === 'historical' ? 'historical / intentionally disabled' : `${h?.market_update_enabled === false ? 'market updates disabled' : `market ${h?.market_sync_task || '-'}`} / ${h?.returns_update_enabled === false ? 'returns disabled' : `returns ${h?.return_task || '-'}`}`} />
       <HealthItem icon={Container} label="Nitter fallback" ok={h?.fallback_mode === 'shadow' || (!!h?.nitter_ready && !!h?.redis_ready)} value={`${h?.fallback_mode || 'shadow'} / Nitter ${h?.nitter_ready ? 'ok' : 'shadow pending'} / Redis ${h?.redis_ready ? 'ok' : 'shadow pending'}`} />
       <HealthItem icon={Database} label="Posts database" ok={!!h?.database} value={h?.database || '-'} />
       <HealthItem icon={HardDrive} label="Media snapshots" ok value={`${((h?.media_bytes || 0) / 1024 / 1024).toFixed(1)} MB`} />

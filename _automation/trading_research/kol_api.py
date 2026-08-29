@@ -76,10 +76,12 @@ from market_admissions import MarketAdmissionRepository, read_published_manifest
 from market_policy import (
     MarketWriteBlockedError,
     assert_market_runtime_writes_allowed,
+    assert_research_writes_allowed,
+    assert_returns_writes_allowed,
     load_market_recovery_mode,
     market_runtime_writes_enabled,
 )
-from model_budget import ModelDailyBudget
+from model_budget import ModelDailyBudget, OcrDailyBudget
 from foundation_market_client import FoundationBackedMarketStore, FoundationMarketReader
 
 
@@ -588,6 +590,24 @@ def create_app(
     def market_writes_enabled() -> bool:
         return market_runtime_writes_enabled(recovery_mode_path)
 
+    def returns_writes_enabled() -> bool:
+        return load_market_recovery_mode(recovery_mode_path).returns_writes_enabled
+
+    def research_writes_enabled() -> bool:
+        return load_market_recovery_mode(recovery_mode_path).research_writes_enabled
+
+    def assert_returns_updates_allowed() -> None:
+        try:
+            assert_returns_writes_allowed(recovery_mode_path)
+        except MarketWriteBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def assert_research_updates_allowed() -> None:
+        try:
+            assert_research_writes_allowed(recovery_mode_path)
+        except MarketWriteBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     app.state.market_recovery_mode = market_recovery_mode
 
     def compute_market_health() -> dict[str, Any]:
@@ -615,6 +635,10 @@ def create_app(
                     "recovery_mode": mode.get("mode", "live"),
                     "as_of": mode.get("as_of", ""),
                     "write_enabled": bool(mode.get("write_enabled", True)),
+                    "market_update_enabled": bool(mode.get("market_update_enabled", mode.get("write_enabled", True))),
+                    "returns_update_enabled": bool(mode.get("returns_update_enabled", mode.get("write_enabled", True))),
+                    "research_update_enabled": bool(mode.get("research_update_enabled", mode.get("write_enabled", True))),
+                    "publication_mode": str(mode.get("publication_mode") or "atomic_daily"),
                 }
         try:
             value = market_store.health()
@@ -655,6 +679,10 @@ def create_app(
             value["recovery_mode"] = mode.get("mode", "live")
             value["as_of"] = mode.get("as_of", "")
             value["write_enabled"] = bool(mode.get("write_enabled", True))
+            value["market_update_enabled"] = bool(mode.get("market_update_enabled", value["write_enabled"]))
+            value["returns_update_enabled"] = bool(mode.get("returns_update_enabled", value["write_enabled"]))
+            value["research_update_enabled"] = bool(mode.get("research_update_enabled", value["write_enabled"]))
+            value["publication_mode"] = str(mode.get("publication_mode") or "atomic_daily")
             return value
         except Exception as exc:
             message = str(exc)
@@ -674,6 +702,10 @@ def create_app(
                 "recovery_mode": mode.get("mode", "live"),
                 "as_of": mode.get("as_of", ""),
                 "write_enabled": bool(mode.get("write_enabled", True)),
+                "market_update_enabled": bool(mode.get("market_update_enabled", mode.get("write_enabled", True))),
+                "returns_update_enabled": bool(mode.get("returns_update_enabled", mode.get("write_enabled", True))),
+                "research_update_enabled": bool(mode.get("research_update_enabled", mode.get("write_enabled", True))),
+                "publication_mode": str(mode.get("publication_mode") or "atomic_daily"),
             }
 
     market_health_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
@@ -1317,7 +1349,7 @@ def create_app(
 
     @app.post("/api/kol-performance/refresh")
     def refresh_kol_performance(body: PerformanceRefreshRequest | None = None) -> dict[str, Any]:
-        assert_market_writes_allowed()
+        assert_returns_updates_allowed()
         try:
             effective_date = date.fromisoformat(body.as_of) if body and body.as_of else date.today()
             performance.migrate_event_identities()
@@ -1553,7 +1585,7 @@ def create_app(
                 failed.append({"draft_id": draft_id, "error": str(exc)})
             except Exception as exc:
                 failed.append({"draft_id": draft_id, "error": str(exc)[:1000]})
-        if symbols:
+        if symbols and returns_writes_enabled():
             background_tasks.add_task(
                 run_post_approval_refresh,
                 config.runtime_root,
@@ -1561,7 +1593,7 @@ def create_app(
                 sorted(symbols),
                 as_of=date.today(),
             )
-        if event_ids:
+        if event_ids and research_writes_enabled():
             background_tasks.add_task(
                 lambda ids=sorted(set(event_ids)): [event_dossier.refresh(event_id) for event_id in ids]
             )
@@ -1645,18 +1677,22 @@ def create_app(
             approved, result = approve_draft_record(draft_id, body.note)
             if result is None:
                 return sanitize_recommendation_draft(approved)
-            background_tasks.add_task(
-                run_post_approval_refresh,
-                config.runtime_root,
-                ROOT,
-                [approved["symbol"]],
-                as_of=date.today(),
-            )
-            background_tasks.add_task(event_dossier.refresh, result.event_ids[0])
+            refresh_status = "not_requested"
+            if returns_writes_enabled():
+                background_tasks.add_task(
+                    run_post_approval_refresh,
+                    config.runtime_root,
+                    ROOT,
+                    [approved["symbol"]],
+                    as_of=date.today(),
+                )
+                refresh_status = "queued"
+            if research_writes_enabled():
+                background_tasks.add_task(event_dossier.refresh, result.event_ids[0])
             return {
                 **sanitize_recommendation_draft(approved),
                 "created_event": bool(result.created_events),
-                "refresh_status": "queued",
+                "refresh_status": refresh_status,
             }
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -1788,7 +1824,7 @@ def create_app(
                             )
                         )
                 refresh_status = "not_requested"
-                if body.refresh_returns and queued_symbols and market_writes_enabled():
+                if body.refresh_returns and queued_symbols and returns_writes_enabled():
                     background_tasks.add_task(
                         run_post_approval_refresh,
                         config.runtime_root,
@@ -1798,7 +1834,8 @@ def create_app(
                     )
                     refresh_status = "queued"
                 for event_id in result.event_ids:
-                    background_tasks.add_task(event_dossier.refresh, event_id)
+                    if research_writes_enabled():
+                        background_tasks.add_task(event_dossier.refresh, event_id)
                 return {
                     **asdict(result),
                     "queued_symbols": queued_symbols,
@@ -2442,7 +2479,7 @@ def create_app(
         fetch_minute: bool = False,
         with_ai: bool = False,
     ) -> dict[str, Any]:
-        assert_market_writes_allowed()
+        assert_research_updates_allowed()
         provider: FreeStockDBMarketProvider | None = None
         try:
             if fetch_cross_section or fetch_minute:
@@ -2540,7 +2577,7 @@ def create_app(
 
     @app.post("/api/events/{event_id}/data-refresh", status_code=202)
     def refresh_event_dossier(event_id: str) -> dict[str, Any]:
-        assert_market_writes_allowed()
+        assert_research_updates_allowed()
         try:
             dossier = event_dossier.refresh(event_id)
         except KeyError as exc:
@@ -2641,7 +2678,7 @@ def create_app(
                 reason=body.reason,
             )
             refresh_status = "not_required"
-            if revision.get("recalculation_required") and market_writes_enabled():
+            if revision.get("recalculation_required") and returns_writes_enabled():
                 instrument = market_store.get_instrument(updated.symbol)
                 market_store.upsert_instrument(
                     Instrument(
@@ -2666,7 +2703,8 @@ def create_app(
                     [updated.symbol],
                     as_of=date.today(),
                 )
-                background_tasks.add_task(event_dossier.refresh, updated.event_id)
+                if research_writes_enabled():
+                    background_tasks.add_task(event_dossier.refresh, updated.event_id)
                 refresh_status = "queued"
             return {
                 "event": updated.to_row(),
@@ -2786,7 +2824,7 @@ def create_app(
 
     @app.post("/api/events/{event_id}/intraday-backfill", status_code=202)
     def event_intraday_backfill(event_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
-        assert_market_writes_allowed()
+        assert_research_updates_allowed()
         if not any(event.event_id == event_id for event in event_store.load_events()):
             raise HTTPException(404, "event not found")
 
@@ -2980,6 +3018,13 @@ def create_app(
         market_component = safe_market_health(force=force)
         freestock_component = safe_freestockdb_health(force=force)
         post_recovery = post_store.post_recovery_summary()
+        queue_status = {
+            "x": post_store.fetch_queue_overview("X"),
+            "zhihu": post_store.fetch_queue_overview("Zhihu"),
+            "ocr_model": post_store.model_queue_summary(daily_limit=250, ocr_daily_limit=150),
+            "post_recovery": post_recovery,
+            "market_admissions": market_admissions.summary(),
+        }
         x_session_health = x_sessions.policy_status()
         public_backup_health = public_backup.status()
         slot_statuses = [str(item.get("status") or "") for item in x_session_health.get("slots", [])]
@@ -3017,6 +3062,9 @@ def create_app(
             "recovery_mode": market_component.get("recovery_mode", "live"),
             "as_of": market_component.get("as_of", ""),
             "write_enabled": bool(market_component.get("write_enabled", True)),
+            "market_update_enabled": bool(market_component.get("market_update_enabled", market_component.get("write_enabled", True))),
+            "returns_update_enabled": bool(market_component.get("returns_update_enabled", market_component.get("write_enabled", True))),
+            "research_update_enabled": bool(market_component.get("research_update_enabled", market_component.get("write_enabled", True))),
             "twitter_cli": _resolve_twitter_command("twitter"),
             "twitter_credentials_configured": credentials.configured(),
             "twitter_reader_credentials_configured": reader_credentials.configured(),
@@ -3066,6 +3114,7 @@ def create_app(
             "media_root": str(post_store.media_root),
             "media_bytes": media_disk_usage(post_store.media_root),
             "post_recovery": post_recovery,
+            "queue_status": queue_status,
             "post_fetch_task": _task_status("KOL_Post_Fetch_Daily"),
             "return_task": _task_status("KOL_Return_Tracker_Daily"),
             "market_sync_task": _task_status("Market_Data_Sync_Daily"),
@@ -3192,6 +3241,10 @@ def create_app(
             "recovery_mode": mode.get("mode", "live"),
             "as_of": mode.get("as_of", ""),
             "write_enabled": bool(mode.get("write_enabled", True)),
+            "market_update_enabled": bool(mode.get("market_update_enabled", mode.get("write_enabled", True))),
+            "returns_update_enabled": bool(mode.get("returns_update_enabled", mode.get("write_enabled", True))),
+            "research_update_enabled": bool(mode.get("research_update_enabled", mode.get("write_enabled", True))),
+            "publication_mode": str(mode.get("publication_mode") or "atomic_daily"),
             "admissions": market_admissions.summary(),
         }
         cached_freestock = freestockdb_health_cache.get("value") or {
@@ -3222,6 +3275,14 @@ def create_app(
         component_status.setdefault("nitter", {"status": "checking", "ready": False})
         component_status.setdefault("ai", {"status": "ready"})
         model_budget = ModelDailyBudget(post_store, daily_limit=250).status()
+        ocr_budget = OcrDailyBudget(post_store, daily_limit=150).status()
+        queue_status = {
+            "x": post_store.fetch_queue_overview("X"),
+            "zhihu": post_store.fetch_queue_overview("Zhihu"),
+            "ocr_model": post_store.model_queue_summary(daily_limit=250, ocr_daily_limit=150),
+            "post_recovery": post_store.post_recovery_summary(),
+            "market_admissions": market_admissions.summary(),
+        }
         return {
             **cached_diagnostics,
             "ok": True,
@@ -3231,6 +3292,10 @@ def create_app(
             "recovery_mode": mode.get("mode", "live"),
             "as_of": mode.get("as_of", ""),
             "write_enabled": bool(mode.get("write_enabled", True)),
+            "market_update_enabled": bool(mode.get("market_update_enabled", mode.get("write_enabled", True))),
+            "returns_update_enabled": bool(mode.get("returns_update_enabled", mode.get("write_enabled", True))),
+            "research_update_enabled": bool(mode.get("research_update_enabled", mode.get("write_enabled", True))),
+            "publication_mode": str(mode.get("publication_mode") or "atomic_daily"),
             "twitter_cli": _resolve_twitter_command("twitter"),
             "twitter_credentials_configured": credentials.configured(),
             "twitter_reader_credentials_configured": reader_credentials.configured(),
@@ -3259,7 +3324,9 @@ def create_app(
             "media_root": str(post_store.media_root),
             "media_bytes": int(cached_diagnostics.get("media_bytes") or 0),
             "post_recovery": post_store.post_recovery_summary(),
+            "queue_status": queue_status,
             "model_daily_budget": model_budget,
+            "ocr_daily_budget": ocr_budget,
             "model_queue": post_store.model_queue_summary(daily_limit=250),
             "market_admissions": market_admissions.summary(),
             "post_fetch_task": cached_diagnostics.get("post_fetch_task", "checking"),
@@ -3294,6 +3361,19 @@ def create_app(
             "review_agent": cached_diagnostics.get("review_agent", {}),
             "shadow_rollout": cached_diagnostics.get("shadow_rollout", post_store.shadow_rollout_status()),
             "component_status": component_status,
+        }
+
+    @app.get("/api/system/queues")
+    def system_queues() -> dict[str, Any]:
+        """Return all durable backlogs; this endpoint is read-only and cheap."""
+        return {
+            "ok": True,
+            "generated_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+            "x": post_store.fetch_queue_overview("X"),
+            "zhihu": post_store.fetch_queue_overview("Zhihu"),
+            "ocr_model": post_store.model_queue_summary(daily_limit=250, ocr_daily_limit=150),
+            "post_recovery": post_store.post_recovery_summary(),
+            "market_admissions": market_admissions.summary(),
         }
 
     @app.get("/api/pipeline/status")

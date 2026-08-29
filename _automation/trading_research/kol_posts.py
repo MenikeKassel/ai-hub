@@ -24,7 +24,7 @@ import httpx
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from kol_tracker import SHANGHAI, now_iso
-from model_budget import ModelDailyBudget
+from model_budget import ModelDailyBudget, OcrDailyBudget
 from opencode_go import (
     OPENCODE_GO_API_URL,
     OPENCODE_GO_MODEL,
@@ -141,7 +141,7 @@ class XSessionUnavailableError(TwitterProviderError):
     """The guarded X session pool cannot issue a request right now."""
 
 
-class XBudgetDeferredError(TwitterRateLimitError):
+class XBudgetDeferredError(TwitterProviderError):
     """A request was deferred by the local global/session budget gate."""
 
 
@@ -3173,7 +3173,7 @@ class KolPostStore:
                     )
                 ORDER BY p.posted_at DESC LIMIT ?
                 """,
-                (timestamp, max(1, min(limit, 150))),
+                (timestamp, max(1, min(limit, 50))),
             ).fetchall()
             ids = [str(row["post_id"]) for row in rows]
             if ids:
@@ -3199,6 +3199,28 @@ class KolPostStore:
                 (timestamp,),
             ).rowcount
         return {"ocr": max(0, ocr), "model": max(0, model)}
+
+    def recover_stale_classification(
+        self,
+        *,
+        ocr_minutes: int = 30,
+        model_minutes: int = 10,
+    ) -> dict[str, int]:
+        timestamp = now_iso()
+        ocr_before = (datetime.now(SHANGHAI) - timedelta(minutes=max(1, int(ocr_minutes)))).isoformat(timespec="seconds")
+        model_before = (datetime.now(SHANGHAI) - timedelta(minutes=max(1, int(model_minutes)))).isoformat(timespec="seconds")
+        with self.connect() as db:
+            ocr = db.execute(
+                "UPDATE classifications SET ocr_status='not_requested',ocr_updated_at=?,updated_at=? "
+                "WHERE ocr_status='running' AND ocr_updated_at<?",
+                (timestamp, timestamp, ocr_before),
+            ).rowcount
+            model = db.execute(
+                "UPDATE classifications SET model_status='not_requested',model_error='',updated_at=? "
+                "WHERE model_status='running' AND updated_at<?",
+                (timestamp, model_before),
+            ).rowcount
+        return {"ocr": max(0, int(ocr)), "model": max(0, int(model))}
 
     def save_ocr_result(
         self,
@@ -3260,6 +3282,14 @@ class KolPostStore:
                 "UPDATE classifications SET model_status='not_requested',updated_at=? "
                 "WHERE post_id=? AND model_status='running'",
                 (now_iso(), post_id),
+            )
+
+    def release_ocr_claim(self, post_id: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE classifications SET ocr_status='not_requested',ocr_updated_at=?,updated_at=? "
+                "WHERE post_id=? AND ocr_status='running'",
+                (now_iso(), now_iso(), post_id),
             )
 
     def claim_posts_for_model(
@@ -3693,6 +3723,63 @@ class KolPostStore:
             "queued": counts.get("queued", 0),
             "running": counts.get("running", 0),
             "cooldown": counts.get("cooldown", 0),
+        }
+
+    def fetch_queue_overview(self, platform: str = "") -> dict[str, Any]:
+        """Return durable fetch backlog grouped by batch without changing state."""
+        query = (
+            "SELECT batch_key,platform,state,COUNT(*) AS items,"
+            "COUNT(DISTINCT kol_id) AS unique_kols,MAX(updated_at) AS latest "
+            "FROM fetch_queue WHERE state IN ('queued','running','cooldown') "
+            "AND NOT EXISTS (SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=fetch_queue.batch_key)"
+        )
+        params: list[Any] = []
+        if platform:
+            query += " AND lower(platform)=?"
+            params.append(platform.casefold())
+        query += " GROUP BY batch_key,platform,state ORDER BY latest DESC"
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(query, params).fetchall()]
+            distinct_query = (
+                "SELECT COUNT(DISTINCT kol_id) FROM fetch_queue "
+                "WHERE state IN ('queued','running','cooldown') "
+                "AND NOT EXISTS (SELECT 1 FROM fetch_batch_archive a WHERE a.batch_key=fetch_queue.batch_key)"
+            )
+            if platform:
+                distinct_query += " AND lower(platform)=?"
+            distinct_kols = int(db.execute(distinct_query, params).fetchone()[0] or 0)
+        batches: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = str(row["batch_key"])
+            item = batches.setdefault(
+                key,
+                {
+                    "batch_key": key,
+                    "platform": str(row["platform"]),
+                    "latest": str(row["latest"] or ""),
+                    "items": 0,
+                    "unique_kols": 0,
+                    "queued": 0,
+                    "running": 0,
+                    "cooldown": 0,
+                },
+            )
+            state = str(row["state"])
+            count = int(row["items"] or 0)
+            item[state] = count
+            item["items"] += count
+            item["unique_kols"] = max(item["unique_kols"], int(row["unique_kols"] or 0))
+            item["latest"] = max(item["latest"], str(row["latest"] or ""))
+        values = list(batches.values())
+        values.sort(key=lambda value: value["latest"], reverse=True)
+        return {
+            "total_items": sum(int(value["items"]) for value in values),
+            "unique_batches": len(values),
+            "queued": sum(int(value["queued"]) for value in values),
+            "running": sum(int(value["running"]) for value in values),
+            "cooldown": sum(int(value["cooldown"]) for value in values),
+            "unique_kols": distinct_kols,
+            "batches": values[:100],
         }
 
     def latest_pending_fetch_batch(self, platform: str = "") -> str:
@@ -4534,7 +4621,9 @@ class XSessionManager:
             enabled_after_cooldown = bool(row["enabled"]) or (row["status"] == "cooldown" and cooldown is not None and cooldown <= now)
             if not allow_unverified and (not ready_after_cooldown or not enabled_after_cooldown or not row["user_id"]):
                 continue
-            if self._recent_usage(slot_id=slot_id) >= int(policy["session_limit_24h"]):
+            slot_used = self._recent_usage(slot_id=slot_id)
+            minimum_cost = 2 if row.get("user_id") else 4
+            if int(policy["session_limit_24h"]) - slot_used < minimum_cost:
                 continue
             timestamp = self._timestamp()
             with FileLock(str(self.gate_path), timeout=10):
@@ -5105,7 +5194,14 @@ class TwitterCliProvider:
             if error_code == "auth_required":
                 self.session_manager.record_failure(slot_id, error_code, "X reader authentication required")
                 raise TwitterAuthenticationError("X reader authentication required") from exc
-            raise TwitterProviderError(f"X reader request failed: {type(exc).__name__}") from exc
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            api_code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
+            detail = f"X reader request failed: {type(exc).__name__}"
+            if status is not None and str(status).isdigit():
+                detail += f" status={int(status)}"
+            if api_code is not None and str(api_code)[:80].replace("_", "").isalnum():
+                detail += f" code={str(api_code)[:80]}"
+            raise TwitterProviderError(detail) from exc
 
     def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
         if self.session_manager is not None:
@@ -5958,6 +6054,80 @@ def process_pending_with_ocr(
     return completed, failed
 
 
+def process_pending_ocr_with_budget(
+    store: KolPostStore,
+    classifier: OcrBatchClassifier,
+    rule_classifier: RuleClassifier,
+    *,
+    daily_limit: int = 150,
+    batch_size: int = 50,
+) -> tuple[int, int]:
+    """Process OCR in resumable 50-item chunks under a persistent daily cap."""
+    budget = OcrDailyBudget(store, daily_limit=daily_limit)
+    completed = failed = 0
+    chunk_limit = max(1, min(int(batch_size), 50))
+    while budget.status()["remaining"] > 0 and completed + failed < max(1, int(daily_limit)):
+        remaining_budget = min(
+            int(budget.status()["remaining"]),
+            max(1, int(daily_limit)) - completed - failed,
+        )
+        posts = store.claim_posts_for_ocr(min(chunk_limit, remaining_budget))
+        if not posts:
+            break
+        reserved = []
+        for post in posts:
+            if budget.reserve():
+                reserved.append(post)
+            else:
+                store.release_ocr_claim(post["post_id"])
+        if not reserved:
+            break
+        try:
+            results = classifier.classify(reserved)
+        except Exception as exc:
+            results = {}
+            batch_error = str(exc)
+        else:
+            batch_error = ""
+        for post in reserved:
+            try:
+                result = results.get(post["post_id"], {})
+                text = str(result.get("text") or "")
+                error = str(result.get("error") or batch_error)
+                if error or not text.strip():
+                    store.save_ocr_result(
+                        post["post_id"],
+                        error=error or "OCR returned no text",
+                        provider=str(result.get("provider") or getattr(classifier, "provider_name", classifier.__class__.__name__)),
+                    )
+                    failed += 1
+                    budget.finish(success=False)
+                    continue
+                store.save_ocr_result(
+                    post["post_id"],
+                    text,
+                    provider=str(result.get("provider") or getattr(classifier, "provider_name", classifier.__class__.__name__)),
+                    confidence=float(result.get("average_confidence") or 0),
+                    details=list(result.get("lines") or []),
+                )
+                store.save_rule_classification(post["post_id"], rule_classifier.classify(post, text))
+                completed += 1
+                budget.finish(success=True)
+            except Exception as exc:
+                store.save_ocr_result(
+                    post["post_id"],
+                    error=str(exc),
+                    provider=str(getattr(classifier, "provider_name", classifier.__class__.__name__)),
+                )
+                failed += 1
+                budget.finish(success=False)
+        if batch_error:
+            break
+        if len(posts) < chunk_limit:
+            break
+    return completed, failed
+
+
 class CodexPostClassifier:
     prompt_version = "kol-post-v3"
     model_name = "codex"
@@ -6586,6 +6756,18 @@ def _fetch_with_retry(
                     )
                 ]
             raise
+        except XBudgetDeferredError as exc:
+            if not getattr(exc, "attempts", None):
+                exc.attempts = [
+                    ProviderAttempt(
+                        provider.name,
+                        "deferred",
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        error_code="budget_deferred",
+                        error=str(exc)[:1000],
+                    )
+                ]
+            raise
         except (TwitterRateLimitError, TwitterProviderError) as exc:
             captured = list(getattr(exc, "attempts", []))
             if not captured:
@@ -6725,7 +6907,7 @@ def run_post_fetch(
     classifier: RuleClassifier | None = None,
     download_media: bool = True,
     sleep_seconds: float = 2.0,
-    retry_delays: tuple[float, ...] = (3.0,),
+    retry_delays: tuple[float, ...] = (),
     batch_key: str = "",
     rate_limit_cooldown_seconds: int = 1800,
     max_gap_pages: int = 3,
@@ -7137,8 +7319,10 @@ def run_post_fetch(
             )
             if batch_key and not dry_run:
                 error_code = (
-                    "blocked_auth"
-                    if blocked_account
+                    "budget_deferred"
+                    if isinstance(exc, XBudgetDeferredError)
+                    else "blocked_auth"
+                    if isinstance(exc, XSessionUnavailableError)
                     else "provider_incompatible"
                     if zhihu_incompatible
                     else
@@ -7154,7 +7338,9 @@ def run_post_fetch(
                     error_code=error_code,
                     error=str(exc),
                     cooldown_seconds=(
-                        0
+                        7200
+                        if error_code == "budget_deferred"
+                        else 0
                         if error_code == "blocked_auth"
                         else 21600
                         if error_code == "provider_incompatible"

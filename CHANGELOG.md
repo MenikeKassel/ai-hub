@@ -4,6 +4,25 @@ All notable source and operational changes are recorded here. Runtime data,
 credentials, databases, media, and generated reports are deliberately excluded
 from Git.
 
+## 3.1.0 - 2026-08-29
+
+### Added
+
+- Atomic `market-daily-publish` maintenance command with BaoStock primary and
+  local/public fallbacks, including Beijing-exchange symbols.
+- Live market-only mode flags and a daily 17:50/19:30 validation-publication
+  schedule; returns and research writes remain disabled.
+- Resumable OCR queue recovery with a persistent 150-item daily cap and 50-item
+  batches, plus safer scheduled stdout/stderr capture.
+
+### Changed
+
+- Market publication now advances only after an isolated candidate reaches the
+  latest completed trading date and passes integrity checks; failures leave the
+  previous directory and recovery mode untouched.
+- Slot 2 X credentials were verified as a distinct account; shared global and
+  per-slot budgets remain enforced.
+
 ## 3.0.0 - 2026-08-28
 
 ### Added

@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-08-28.
+Status date: 2026-08-29.
 
 ## Start and inspect
 
@@ -28,9 +28,14 @@ Expected local listeners:
 - 09:15 — bounded OCR/model backlog.
 - 19:00 — X evening collection.
 - 19:20 — Zhihu evening collection.
+- 17:50 — FreeStockDB validation/update (local D: drive).
+- 19:30 — atomic daily market publication through BaoStock and fallbacks.
 
-No market update, return tracking, event research, or performance recomputation
-task is installed in historical mode.
+The daily market publisher is the only market write task. Returns, event
+research, and performance recomputation tasks remain intentionally disabled.
+After a successful first catch-up the mode is `live` with `as_of` set to the
+latest completed trading day; `returns_update_enabled` and
+`research_update_enabled` remain `false`.
 
 ## Health interpretation
 
@@ -46,7 +51,7 @@ task is installed in historical mode.
 `processed_kols` means the scheduler considered those queue items. Use
 `successful_kols`, `failed_kols`, `blocked`, and `pending` for the actual result.
 
-## Historical market maintenance
+## Market maintenance
 
 Preview:
 
@@ -55,9 +60,16 @@ python _automation\trading_research\trading_cli.py `
   market-symbol-admissions reconcile --as-of 2026-08-25
 ```
 
-`--apply` is an offline maintenance action. Back up SQLite, market state, code,
-and task definitions before applying. Do not run ordinary market sync commands
-in historical mode.
+Daily publication is preview-only unless `--apply` is supplied:
+
+```powershell
+python _automation\trading_research\trading_cli.py market-daily-publish `
+  --as-of auto --apply --report _runtime\trading\restore-reports\market-daily-publish.json
+```
+
+The command builds and validates an isolated candidate, then atomically swaps
+the market directory. A failed run leaves the prior data and `as_of` unchanged.
+Regular returns/research refresh calls continue to return HTTP 409 by policy.
 
 ## Tests
 

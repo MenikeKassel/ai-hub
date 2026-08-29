@@ -1,5 +1,6 @@
 import type {
   BulkApprovalPreview, BulkApprovalResult, Checkpoint, CollectionCoverageResponse, CollectionRecoveryPreview, CollectionRecoveryRun, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary, XSessionPolicy, XSessionSlot, PublicBackupHealth,
+  QueueStatus,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -143,6 +144,7 @@ export const api = {
   exportEventDossier: (id: string) => `/api/events/${id}/dossier/export`,
   checkpoints: () => request<Checkpoint[]>('/api/checkpoints'),
   health: () => request<Health>('/api/system/health'),
+  queueStatus: () => request<QueueStatus>('/api/system/queues'),
   diagnostics: () => request<Health>('/api/system/diagnostics'),
   reviewAgentSummary: () => request<ReviewAgentSummary>('/api/review-agent/summary'),
   reviewAgentDecisions: (query = '') => request<ReviewAgentDecision[]>(`/api/review-agent/decisions${query ? `?${query}` : ''}`),

@@ -13,7 +13,7 @@ from kol_posts import (
 )
 from recommendation_processing import materialize_recommendation_drafts
 from recommendation_drafts import RecommendationDraftRepository
-from model_budget import ModelDailyBudget
+from model_budget import ModelDailyBudget, OcrDailyBudget
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -45,6 +45,7 @@ class MorningPipeline:
         self.active_kol_count = active_kol_count
         self.market_writes_enabled = market_writes_enabled
         self.model_budget = ModelDailyBudget(post_store, daily_limit=model_daily_limit)
+        self.ocr_budget = OcrDailyBudget(post_store, daily_limit=150)
         self.drafts = RecommendationDraftRepository(post_store)
 
     def run(
@@ -94,6 +95,10 @@ class MorningPipeline:
         stages["model_daily_limit"] = int(budget_status["daily_limit"])
         stages["model_daily_used"] = int(budget_status["attempted"])
         stages["model_daily_remaining"] = int(budget_status["remaining"])
+        ocr_budget_status = self.ocr_budget.status()
+        stages["ocr_daily_limit"] = int(ocr_budget_status["daily_limit"])
+        stages["ocr_daily_used"] = int(ocr_budget_status["attempted"])
+        stages["ocr_daily_remaining"] = int(ocr_budget_status["remaining"])
         errors: list[str] = []
         try:
             self.drafts.update_morning_run(
@@ -333,6 +338,13 @@ class MorningPipeline:
         ][:8]
         if not selected or not self.ocr_classifier or time.monotonic() >= deadline:
             return
+        budgeted: list[dict[str, Any]] = []
+        for post in selected:
+            if self.ocr_budget.reserve():
+                budgeted.append(post)
+        selected = budgeted
+        if not selected:
+            return
         previous_timeout = getattr(self.ocr_classifier, "timeout_seconds", None)
         self.ocr_classifier.timeout_seconds = min(
             180,
@@ -348,6 +360,7 @@ class MorningPipeline:
                     error=str(exc),
                     provider=str(getattr(self.ocr_classifier, "provider_name", self.ocr_classifier.__class__.__name__)),
                 )
+                self.ocr_budget.finish(success=False)
             stages["ocr_failed"] += len(selected)
             errors.append(f"ocr: {str(exc)[:1000]}")
             return
@@ -364,6 +377,7 @@ class MorningPipeline:
                     provider=str(result.get("provider") or getattr(self.ocr_classifier, "provider_name", self.ocr_classifier.__class__.__name__)),
                 )
                 stages["ocr_failed"] += 1
+                self.ocr_budget.finish(success=False)
                 continue
             self.post_store.save_ocr_result(
                 post["post_id"],
@@ -377,6 +391,7 @@ class MorningPipeline:
                 self.rule_classifier.classify(post, text),
             )
             stages["ocr_completed"] += 1
+            self.ocr_budget.finish(success=True)
 
     def _run_batches(
         self,
@@ -479,6 +494,9 @@ class MorningPipeline:
         budget_status = self.model_budget.status()
         stages["model_daily_used"] = int(budget_status["attempted"])
         stages["model_daily_remaining"] = int(budget_status["remaining"])
+        ocr_budget_status = self.ocr_budget.status()
+        stages["ocr_daily_used"] = int(ocr_budget_status["attempted"])
+        stages["ocr_daily_remaining"] = int(ocr_budget_status["remaining"])
 
     def _pending_candidates(self) -> list[dict[str, Any]]:
         with self.post_store.connect() as db:

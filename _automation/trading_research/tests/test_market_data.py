@@ -19,12 +19,44 @@ from market_data import (  # noqa: E402
     FreeStockDBMarketProvider,
     Instrument,
     MarketStore,
+    TencentMarketProvider,
     _classify_baostock_instrument,
     audit_daily_bars,
     normalise_daily_bars,
     sync_daily_bars,
 )
 from trading_cli import _completed_market_sync_date, _drain_market_queue, _sync_with_fallback  # noqa: E402
+
+
+class TencentMarketProviderTests(unittest.TestCase):
+    def test_parses_public_bj_daily_payload_without_credentials(self) -> None:
+        payload = {
+            "data": {
+                "bj920045": {
+                    "day": [["2026-08-28", "520.00", "504.00", "555.00", "495.00", "16814"]]
+                }
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()) as opened:
+            frame = TencentMarketProvider().fetch_daily(
+                "920045", "stock", date(2026, 8, 26), date(2026, 8, 28), "raw"
+            )
+        self.assertEqual(["2026-08-28"], [value.isoformat() for value in frame["date"]])
+        self.assertEqual(520.0, float(frame.iloc[0]["open"]))
+        request = opened.call_args.args[0]
+        self.assertIn("bj920045", request.full_url)
+        self.assertNotIn("auth", request.full_url.lower())
 
 
 def daily_frame(*, invalid: bool = False) -> pd.DataFrame:

@@ -73,6 +73,7 @@ from kol_posts import (
     load_stock_aliases,
     media_disk_usage,
     process_pending_with_ocr,
+    process_pending_ocr_with_budget,
     run_post_fetch,
     normalise_twitter_post,
     normalise_zhihu_answer,
@@ -113,8 +114,14 @@ from market_admissions import (
     read_published_manifest,
     write_published_manifest,
 )
-from market_policy import load_market_recovery_mode, market_runtime_writes_enabled
+from market_policy import (
+    assert_research_writes_allowed,
+    assert_returns_writes_allowed,
+    load_market_recovery_mode,
+    market_runtime_writes_enabled,
+)
 from model_budget import ModelDailyBudget
+from market_publication import MarketDailyPublisher
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from kol_performance import DeepSeekPerformanceInterpreter, KolPerformanceService, build_weekly_message
@@ -594,6 +601,7 @@ def _send_pending_notifications(store: KolStore) -> list[str]:
 
 
 def kol_update(args: argparse.Namespace) -> None:
+    _require_returns_writes("kol-update", dry_run=bool(args.dry_run))
     KOL_ROOT.mkdir(parents=True, exist_ok=True)
     lock_path = KOL_ROOT / "kol-update.lock"
     lock = FileLock(str(lock_path), timeout=1)
@@ -674,6 +682,7 @@ def _performance_service() -> KolPerformanceService:
 
 
 def kol_performance_doctor(_: argparse.Namespace) -> None:
+    _require_returns_writes("kol-performance-doctor")
     service = _performance_service()
     migration = service.migrate_event_identities()
     checks = service.doctor()
@@ -684,6 +693,7 @@ def kol_performance_doctor(_: argparse.Namespace) -> None:
 
 
 def kol_performance_refresh(args: argparse.Namespace) -> None:
+    _require_returns_writes("kol-performance-refresh")
     as_of = date.fromisoformat(args.as_of or date.today().isoformat())
     service = _performance_service()
     migration = service.migrate_event_identities()
@@ -699,6 +709,7 @@ def kol_performance_refresh(args: argparse.Namespace) -> None:
 
 
 def kol_performance_backfill(args: argparse.Namespace) -> None:
+    _require_returns_writes("kol-performance-backfill")
     service = _performance_service()
     service.migrate_event_identities()
     checkpoints = service.event_store.load_checkpoints()
@@ -720,6 +731,7 @@ def kol_performance_backfill(args: argparse.Namespace) -> None:
 
 
 def kol_performance_report(args: argparse.Namespace) -> None:
+    _require_returns_writes("kol-performance-report")
     as_of = date.fromisoformat(args.as_of or date.today().isoformat())
     service = _performance_service()
     result = service.refresh(as_of=as_of)
@@ -748,6 +760,7 @@ def kol_returns_backfill(args: argparse.Namespace) -> None:
 
 
 def kol_report(_: argparse.Namespace) -> None:
+    _require_returns_writes("kol-report")
     store = KolStore(KOL_ROOT)
     generate_dashboard(store, KOL_DASHBOARD)
     print(json.dumps({"ok": True, "dashboard": str(KOL_DASHBOARD)}, ensure_ascii=False))
@@ -784,11 +797,16 @@ def _post_store() -> KolPostStore:
 
 
 def _market_recovery_mode() -> dict[str, Any]:
-    return load_market_recovery_mode(MARKET_ROOT / "recovery-mode.json").as_dict()
+    return load_market_recovery_mode(_market_recovery_mode_path()).as_dict()
+
+
+def _market_recovery_mode_path() -> Path:
+    """Resolve the mode beside the active KOL runtime (also supports test roots)."""
+    return KOL_ROOT.parent / "market" / "recovery-mode.json"
 
 
 def _market_writes_enabled() -> bool:
-    return market_runtime_writes_enabled(MARKET_ROOT / "recovery-mode.json")
+    return market_runtime_writes_enabled(_market_recovery_mode_path())
 
 
 def _require_live_market_writes(command: str) -> None:
@@ -799,6 +817,22 @@ def _require_live_market_writes(command: str) -> None:
         f"{command} is disabled: market runtime is historical/read-only as of "
         f"{mode.get('as_of') or 'unknown'}; use an explicit restore/admission maintenance command"
     )
+
+
+def _require_returns_writes(command: str, *, dry_run: bool = False) -> None:
+    if dry_run:
+        return
+    try:
+        assert_returns_writes_allowed(_market_recovery_mode_path())
+    except RuntimeError as exc:
+        raise SystemExit(f"{command} is disabled: {exc}") from exc
+
+
+def _require_research_writes(command: str) -> None:
+    try:
+        assert_research_writes_allowed(_market_recovery_mode_path())
+    except RuntimeError as exc:
+        raise SystemExit(f"{command} is disabled: {exc}") from exc
 
 
 def _send_feishu(message: str) -> bool:
@@ -1132,7 +1166,10 @@ def kol_gap_recover(args: argparse.Namespace) -> None:
             fresh_first_page=args.scope == "recent",
             reconcile_zhihu=False,
             sleep_seconds=1.0,
-            retry_delays=(1.0,),
+            # The shared X budget treats ordinary provider failures as
+            # deferred work; retrying inside the same window would consume a
+            # second request and can turn a local failure into a false 429.
+            retry_delays=(),
             batch_key=fresh_key,
             classifier=RuleClassifier(_classification_aliases()),
         )
@@ -1153,7 +1190,7 @@ def kol_gap_recover(args: argparse.Namespace) -> None:
                 max_count=100,
                 reconcile_zhihu=False,
                 sleep_seconds=1.0,
-                retry_delays=(1.0,),
+                retry_delays=(),
                 batch_key=history_key,
                 classifier=RuleClassifier(_classification_aliases()),
             )
@@ -1554,12 +1591,14 @@ def kol_ai_resume(args: argparse.Namespace) -> None:
 def kol_ai_queue_maintain(args: argparse.Namespace) -> None:
     store = _post_store()
     before = store.model_queue_summary(daily_limit=args.daily_limit)
+    recovered = store.recover_stale_classification() if args.recover_stale else {"ocr": 0, "model": 0}
     changed = store.prepare_model_queue() if args.apply else 0
     after = store.model_queue_summary(daily_limit=args.daily_limit) if args.apply else before
     print(json.dumps({
         "ok": True,
         "dry_run": not bool(args.apply),
         "changed": changed,
+        "recovered_stale": recovered,
         "before": before,
         "after": after,
         "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
@@ -1858,11 +1897,11 @@ def kol_nitter_doctor(_: argparse.Namespace) -> None:
 def kol_post_classify(args: argparse.Namespace) -> None:
     store = _post_store()
     aliases = _classification_aliases()
-    ocr_completed, ocr_failed = process_pending_with_ocr(
+    ocr_completed, ocr_failed = process_pending_ocr_with_budget(
         store,
         _ocr_classifier(),
         RuleClassifier(aliases),
-        limit=args.ocr_limit,
+        daily_limit=args.ocr_limit,
     )
     if args.skip_codex:
         store.prepare_model_queue()
@@ -2762,6 +2801,7 @@ def kol_context_doctor(_: argparse.Namespace) -> None:
 
 
 def kol_context_backfill(args: argparse.Namespace) -> None:
+    _require_research_writes("kol-context-backfill")
     event_ids = {args.event_id} if args.event_id else None
     event_store = KolStore(KOL_ROOT)
     if event_ids and not any(event.event_id in event_ids for event in event_store.load_events()):
@@ -2823,6 +2863,7 @@ def kol_event_data_doctor(_: argparse.Namespace) -> None:
 
 
 def kol_event_data_backfill(args: argparse.Namespace) -> None:
+    _require_research_writes("kol-event-data-backfill")
     event_store = KolStore(KOL_ROOT)
     market_store = _market_store()
     service = EventDossierService(_post_store(), event_store, market_store)
@@ -3061,6 +3102,7 @@ def _run_method_ai_batches(
 
 @_exclusive_method_research
 def kol_method_research_backfill(args: argparse.Namespace) -> None:
+    _require_research_writes("kol-method-research-backfill")
     service, provider = _method_research_service(
         with_market_providers=not args.skip_cross_section or args.with_minute,
         with_ai=args.with_ai,
@@ -3125,6 +3167,7 @@ def kol_method_research_backfill(args: argparse.Namespace) -> None:
 
 @_exclusive_method_research
 def kol_method_research_run(args: argparse.Namespace) -> None:
+    _require_research_writes("kol-method-research-run")
     service, provider = _method_research_service(
         with_market_providers=True,
         with_ai=not args.skip_ai,
@@ -3885,6 +3928,34 @@ def market_symbol_admissions(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def market_daily_publish(args: argparse.Namespace) -> None:
+    publisher = MarketDailyPublisher(
+        MARKET_ROOT,
+        _post_store(),
+        free_stockdb_url=os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899"),
+    )
+    target = publisher.resolve_target_date(str(args.as_of or "auto"))
+    report_path = Path(args.report) if args.report else (
+        MARKET_ROOT.parent / "restore-reports" / f"market-daily-publish-{target.isoformat()}.json"
+    )
+    if not args.apply:
+        payload = publisher.preview(target)
+        payload["report"] = str(report_path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    payload = publisher.apply(
+        target,
+        report_path=report_path,
+        runtime_root=RUNTIME,
+        ui_pid_path=KOL_ROOT / "ui" / "server.pid",
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not payload.get("ok"):
+        raise SystemExit(2)
+
+
 def market_daily_restore(args: argparse.Namespace) -> None:
     """Build and optionally publish the 2026-08-25 tracked-market snapshot."""
     csv_root = Path(args.csv_root).expanduser()
@@ -4356,6 +4427,7 @@ def market_minute_fetch(args: argparse.Namespace) -> None:
 
 
 def kol_intraday_backfill(args: argparse.Namespace) -> None:
+    _require_research_writes("kol-intraday-backfill")
     event_store = KolStore(KOL_ROOT)
     event_ids = None if args.all else {args.event_id}
     if event_ids and not any(event.event_id in event_ids for event in event_store.load_events()):
@@ -5021,6 +5093,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="normalize non-candidates and report the resumable candidate model backlog",
     )
     p_ai_maintain.add_argument("--daily-limit", type=int, default=250)
+    p_ai_maintain.add_argument("--recover-stale", action="store_true")
     p_ai_maintain.add_argument("--apply", action="store_true")
     p_ai_maintain.set_defaults(func=kol_ai_queue_maintain)
 
@@ -5239,6 +5312,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_market_admissions.add_argument("--apply", action="store_true")
     p_market_admissions.add_argument("--report")
     p_market_admissions.set_defaults(func=market_symbol_admissions)
+
+    p_market_publish = sub.add_parser(
+        "market-daily-publish",
+        help="build and atomically publish the latest completed daily market snapshot",
+    )
+    p_market_publish.add_argument("--as-of", default="auto")
+    p_market_publish.add_argument("--apply", action="store_true")
+    p_market_publish.add_argument("--report")
+    p_market_publish.set_defaults(func=market_daily_publish)
 
     p_market_freestockdb_doctor = sub.add_parser(
         "market-freestockdb-doctor", help="check the optional local FreeStockDB service"

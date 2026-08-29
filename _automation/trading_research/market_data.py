@@ -2081,6 +2081,30 @@ def sync_daily_bars(
 class BaoStockMarketProvider:
     name = "baostock"
 
+    def __init__(self) -> None:
+        self._client: Any | None = None
+        self._logged_in = False
+
+    def _session(self) -> Any:
+        if self._logged_in and self._client is not None:
+            return self._client
+        import baostock as bs  # type: ignore
+
+        login = bs.login()
+        if login.error_code != "0":
+            raise RuntimeError(f"BaoStock login failed: {login.error_msg}")
+        self._client = bs
+        self._logged_in = True
+        return bs
+
+    def close(self) -> None:
+        if self._logged_in and self._client is not None:
+            try:
+                self._client.logout()
+            finally:
+                self._logged_in = False
+                self._client = None
+
     @staticmethod
     def provider_code(symbol: str, instrument_type: str) -> str:
         if instrument_type == "index":
@@ -2099,65 +2123,44 @@ class BaoStockMarketProvider:
         end: date,
         adjustment: str,
     ) -> pd.DataFrame:
-        import baostock as bs  # type: ignore
-
-        login = bs.login()
-        if login.error_code != "0":
-            raise RuntimeError(f"BaoStock login failed: {login.error_msg}")
-        try:
-            code = self.provider_code(symbol, instrument_type)
-            fields = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg"
-            query = bs.query_history_k_data_plus(
-                code,
-                fields,
-                start_date=start.isoformat(),
-                end_date=end.isoformat(),
-                frequency="d",
-                adjustflag=ADJUST_FLAGS[adjustment],
-            )
-            rows: list[list[str]] = []
-            while query.error_code == "0" and query.next():
-                rows.append(query.get_row_data())
-            if query.error_code != "0":
-                raise RuntimeError(f"BaoStock query failed for {code}: {query.error_msg}")
-            return pd.DataFrame(rows, columns=query.fields)
-        finally:
-            bs.logout()
+        bs = self._session()
+        code = self.provider_code(symbol, instrument_type)
+        fields = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg"
+        query = bs.query_history_k_data_plus(
+            code,
+            fields,
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            frequency="d",
+            adjustflag=ADJUST_FLAGS[adjustment],
+        )
+        rows: list[list[str]] = []
+        while query.error_code == "0" and query.next():
+            rows.append(query.get_row_data())
+        if query.error_code != "0":
+            raise RuntimeError(f"BaoStock query failed for {code}: {query.error_msg}")
+        return pd.DataFrame(rows, columns=query.fields)
 
     def fetch_calendar(self, start: date, end: date) -> list[date]:
-        import baostock as bs  # type: ignore
-
-        login = bs.login()
-        if login.error_code != "0":
-            raise RuntimeError(f"BaoStock login failed: {login.error_msg}")
-        try:
-            query = bs.query_trade_dates(start_date=start.isoformat(), end_date=end.isoformat())
-            values: list[date] = []
-            while query.error_code == "0" and query.next():
-                row = query.get_row_data()
-                if len(row) >= 2 and row[1] == "1":
-                    values.append(date.fromisoformat(row[0]))
-            if query.error_code != "0":
-                raise RuntimeError(f"BaoStock calendar query failed: {query.error_msg}")
-            return values
-        finally:
-            bs.logout()
+        bs = self._session()
+        query = bs.query_trade_dates(start_date=start.isoformat(), end_date=end.isoformat())
+        values: list[date] = []
+        while query.error_code == "0" and query.next():
+            row = query.get_row_data()
+            if len(row) >= 2 and row[1] == "1":
+                values.append(date.fromisoformat(row[0]))
+        if query.error_code != "0":
+            raise RuntimeError(f"BaoStock calendar query failed: {query.error_msg}")
+        return values
 
     def fetch_instruments(self) -> list[Instrument]:
-        import baostock as bs  # type: ignore
-
-        login = bs.login()
-        if login.error_code != "0":
-            raise RuntimeError(f"BaoStock login failed: {login.error_msg}")
-        try:
-            query = bs.query_stock_basic()
-            rows: list[dict[str, str]] = []
-            while query.error_code == "0" and query.next():
-                rows.append(dict(zip(query.fields, query.get_row_data())))
-            if query.error_code != "0":
-                raise RuntimeError(f"BaoStock instrument query failed: {query.error_msg}")
-        finally:
-            bs.logout()
+        bs = self._session()
+        query = bs.query_stock_basic()
+        rows: list[dict[str, str]] = []
+        while query.error_code == "0" and query.next():
+            rows.append(dict(zip(query.fields, query.get_row_data())))
+        if query.error_code != "0":
+            raise RuntimeError(f"BaoStock instrument query failed: {query.error_msg}")
         instruments: list[Instrument] = []
         for row in rows:
             code = str(row.get("code") or "")
@@ -2182,6 +2185,86 @@ class BaoStockMarketProvider:
                 )
             )
         return instruments
+
+
+class TencentMarketProvider:
+    """Public daily fallback, including Beijing-exchange symbols unsupported by BaoStock.
+
+    BaoStock does not recognise the ``bj`` exchange prefix.  Tencent's public
+    k-line endpoint does and is deliberately used only as a last-resort source
+    for those symbols.  It returns a compact JSON payload and does not require
+    credentials.
+    """
+
+    name = "tencent"
+
+    @staticmethod
+    def provider_symbol(symbol: str, instrument_type: str) -> str:
+        if instrument_type == "index":
+            prefix = "sh" if not symbol.startswith("399") else "sz"
+        elif symbol.startswith(("4", "8", "92")):
+            prefix = "bj"
+        elif symbol.startswith(("5", "6", "9")):
+            prefix = "sh"
+        else:
+            prefix = "sz"
+        return prefix + symbol
+
+    def fetch_daily(
+        self,
+        symbol: str,
+        instrument_type: str,
+        start: date,
+        end: date,
+        adjustment: str,
+    ) -> pd.DataFrame:
+        import urllib.parse
+        import urllib.request
+
+        # The endpoint treats the end date as exclusive.  Asking for the day
+        # after ``end`` therefore includes the requested final trading day.
+        query = urllib.parse.urlencode(
+            {
+                "param": ",".join(
+                    (
+                        self.provider_symbol(symbol, instrument_type),
+                        "day",
+                        start.strftime("%Y-%m-%d"),
+                        (end + timedelta(days=1)).strftime("%Y-%m-%d"),
+                        "1000",
+                        "qfq" if adjustment == "qfq" else "",
+                    )
+                )
+            }
+        )
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?" + query
+        request = urllib.request.Request(url, headers={"User-Agent": "ai-hub-market/3.0"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Tencent returned invalid daily JSON for {symbol}") from exc
+        code = self.provider_symbol(symbol, instrument_type)
+        rows = (((payload.get("data") or {}).get(code) or {}).get("day") or []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            raise RuntimeError(f"Tencent returned an invalid daily payload for {symbol}")
+        # [date, open, close, high, low, volume]
+        frame = pd.DataFrame(rows, columns=["date", "open", "close", "high", "low", "volume"])
+        if frame.empty:
+            return frame
+        frame["amount"] = pd.NA
+        for column in ("date", "open", "high", "low", "close", "volume", "amount"):
+            if column not in frame:
+                frame[column] = pd.NA
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
+        frame = frame[frame["date"].between(start, end, inclusive="both")]
+        return frame[["date", "open", "high", "low", "close", "volume", "amount"]].reset_index(drop=True)
+
+
+# Kept as a compatibility alias for callers that used the first fallback
+# provider name before the endpoint was switched to Tencent.
+SinaMarketProvider = TencentMarketProvider
 
 
 class AKShareMarketProvider:

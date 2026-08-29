@@ -26,13 +26,29 @@ function Write-ClassifyLog([string]$Message) {
     Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message" -Encoding UTF8
 }
 
+function Invoke-Captured([string[]]$Arguments) {
+    $stdoutPath = Join-Path $logDirectory (".kol-classify-" + [guid]::NewGuid().ToString("N") + ".out")
+    $stderrPath = Join-Path $logDirectory (".kol-classify-" + [guid]::NewGuid().ToString("N") + ".err")
+    try {
+        & $python @Arguments 1> $stdoutPath 2> $stderrPath
+        $code = $LASTEXITCODE
+        $stdout = [string](if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" })
+        $stderr = [string](if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" })
+        if ($stdout.Trim()) { Write-ClassifyLog $stdout.Trim() }
+        if ($stderr.Trim()) { Write-ClassifyLog ("stderr: " + $stderr.Trim()) }
+        return $code
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 try {
     $hasLock = $mutex.WaitOne(0)
     if (-not $hasLock) { Write-ClassifyLog "Skipped: another classifier holds the mutex."; exit 0 }
     if (-not (Test-Path -LiteralPath $python)) { throw "Trading Python not found: $python" }
-    $output = & $python $cli kol-post-classify --pending --limit 0 --daily-limit $DailyLimit --ocr-limit $OcrLimit 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    if ($output.Trim()) { Write-ClassifyLog $output.Trim() }
+    $recoveryCode = Invoke-Captured @($cli, "kol-ai-queue-maintain", "--daily-limit", $DailyLimit, "--recover-stale", "--apply")
+    if ($recoveryCode -ne 0) { throw "stale queue recovery exited with code $recoveryCode" }
+    $exitCode = Invoke-Captured @($cli, "kol-post-classify", "--pending", "--limit", "0", "--daily-limit", $DailyLimit, "--ocr-limit", $OcrLimit)
     if ($exitCode -ne 0) { throw "kol-post-classify exited with code $exitCode" }
     exit 0
 } catch {
