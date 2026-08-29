@@ -2,9 +2,10 @@
 
 Personal AI workspace source repository.
 
-Current source version: **3.0.0**. The KOL research console is consolidated at
-`http://127.0.0.1:8123/#/kols`; market data is historical and read-only through
-`2026-08-25`.
+Current source version: **3.1.0**. The KOL research console is consolidated at
+`http://127.0.0.1:8123/#/kols`; daily market data is published atomically
+through the latest completed close (`2026-08-28`). Returns and research writes
+remain disabled.
 
 For code review, start with:
 
@@ -33,7 +34,7 @@ X / Zhihu public evidence
 -> durable local post collection
 -> rules / OCR / bounded model classification
 -> human review and formal event audit
--> historical market context and return display
+-> daily market context and frozen return display
 ```
 
 Hermes capture remains a separate optional workflow. Its real configuration is

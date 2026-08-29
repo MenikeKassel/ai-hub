@@ -60,11 +60,12 @@ Ignored local state:
   fabricated.
 - AI creates evidence drafts; a human approves formal recommendation events.
 
-### Historical market
+### Daily market
 
-- `recovery-mode.json` defines `mode=historical`, `as_of=2026-08-25`, and
-  `write_enabled=false`.
-- Normal market write APIs return HTTP 409.
+- `recovery-mode.json` defines `mode=live`, the latest completed close, and
+  `publication_mode=atomic_daily`.
+- The guarded daily publisher may write market data; returns and research
+  refresh APIs remain HTTP 409.
 - Confirmed leads enter `market_symbol_admissions`; they do not directly change
   formal market coverage.
 - A symbol is published only after raw and qfq daily series both pass the cutoff

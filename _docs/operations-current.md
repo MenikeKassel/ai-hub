@@ -53,11 +53,11 @@ latest completed trading day; `returns_update_enabled` and
 
 ## Market maintenance
 
-Preview:
+Admission preview (when reviewing a newly confirmed lead):
 
 ```powershell
 python _automation\trading_research\trading_cli.py `
-  market-symbol-admissions reconcile --as-of 2026-08-25
+  market-symbol-admissions reconcile --as-of auto
 ```
 
 Daily publication is preview-only unless `--apply` is supplied:
