@@ -6131,6 +6131,29 @@ def process_pending_ocr_with_budget(
     budget = OcrDailyBudget(store, daily_limit=daily_limit, limit_mode="unlimited")
     completed = failed = 0
     chunk_limit = max(1, min(int(batch_size), 50))
+
+    def classify_with_timeout_split(items: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], str]:
+        try:
+            return classifier.classify(items), ""
+        except Exception as exc:
+            detail = str(exc)
+            # A large manifest can exceed the OCR worker timeout even though
+            # each image is valid. Split only timeout failures; other provider
+            # errors remain a single durable retryable batch.
+            if len(items) > 1 and "timed out" in detail.casefold():
+                midpoint = max(1, len(items) // 2)
+                merged: dict[str, dict[str, Any]] = {}
+                for part in (items[:midpoint], items[midpoint:]):
+                    if not part:
+                        continue
+                    values, error = classify_with_timeout_split(part)
+                    merged.update(values)
+                    if error:
+                        for item in part:
+                            merged.setdefault(item["post_id"], {"error": error})
+                return merged, ""
+            return {}, detail
+
     while True:
         budget_status = budget.status()
         if budget.limit_mode != "unlimited" and int(budget_status.get("remaining") or 0) <= 0:
@@ -6150,13 +6173,7 @@ def process_pending_ocr_with_budget(
                 store.release_ocr_claim(post["post_id"])
         if not reserved:
             break
-        try:
-            results = classifier.classify(reserved)
-        except Exception as exc:
-            results = {}
-            batch_error = str(exc)
-        else:
-            batch_error = ""
+        results, batch_error = classify_with_timeout_split(reserved)
         for post in reserved:
             try:
                 result = results.get(post["post_id"], {})
@@ -6189,7 +6206,7 @@ def process_pending_ocr_with_budget(
                 )
                 failed += 1
                 budget.finish(success=False)
-        if batch_error:
+        if batch_error and budget.limit_mode != "unlimited":
             break
         if len(posts) < chunk_limit:
             break

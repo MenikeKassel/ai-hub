@@ -24,6 +24,7 @@ EVENT_STATUSES = {"candidate", "active", "completed", "excluded", "archived"}
 NON_EXECUTABLE_WARNINGS = {
     "one_price_limit_suspected",
     "conditional_intraday_entry_unverified",
+    "source_unrecoverable",
 }
 # Primary execution warnings: events carrying any of these tokens are excluded
 # from the primary (executable) long-only return universe, but remain in audit
@@ -36,6 +37,7 @@ PRIMARY_WARNINGS = {
     "source_conflict",
     "secondhand",
     "retrospective",
+    "source_unrecoverable",
 }
 
 EVENT_FIELDS = [

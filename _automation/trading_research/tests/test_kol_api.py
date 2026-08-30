@@ -708,7 +708,9 @@ class ApiTests(unittest.TestCase):
                 [approved_first.json()["event_id"], approved_second.json()["event_id"]],
                 [item.event_id for item in app.state.event_store.load_events()],
             )
-            self.assertEqual([], post_store.list_stock_leads(post_id=post.post_id))
+            approved_leads = post_store.list_stock_leads(post_id=post.post_id, status="confirmed")
+            self.assertEqual(2, len(approved_leads))
+            self.assertEqual({first["symbol"], second["symbol"]}, {item["symbol"] for item in approved_leads})
             self.assertEqual("approved", post_store.get_post(post.post_id)["review_status"])
             self.assertEqual("tracking", market_store.get_instrument(first["symbol"])["lifecycle"])
             self.assertEqual("rejected", rejected.json()["status"])
@@ -1460,6 +1462,7 @@ class ApiTests(unittest.TestCase):
                 response = client.get("/api/system/health")
             self.assertEqual(200, response.status_code, response.text)
             self.assertTrue(response.json()["lightweight"])
+            self.assertIn("reconciliation", response.json())
 
     def test_credential_endpoint_returns_actionable_validation_error(self) -> None:
         class RecordingCredentials:

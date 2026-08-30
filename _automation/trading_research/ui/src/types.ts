@@ -1044,6 +1044,7 @@ export interface Health {
     estimated_days: number
   }
   queue_status?: QueueStatus
+  reconciliation?: ReconciliationStatus
   market_admissions?: {
     total: number
     pending: number
@@ -1132,6 +1133,18 @@ export interface QueueStatus {
   ocr_model: Health['model_queue']
   post_recovery: { total: number; queued: number; running: number; cooldown: number; hydrated: number; terminal: number }
   market_admissions: { total: number; pending: number; staging: number; published: number; failed: number }
+  reconciliation?: ReconciliationStatus
+}
+
+export interface ReconciliationStatus {
+  run_id: string
+  status: 'idle' | 'blocked' | 'completed' | string
+  report_path: string
+  counts: Record<string, unknown>
+  errors: Array<Record<string, unknown>>
+  pending_recommendation_leads: number
+  archive_only_leads: number
+  active_drafts: number
 }
 
 export interface PipelineRefresh {

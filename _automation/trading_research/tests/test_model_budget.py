@@ -9,9 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kol_posts import (  # noqa: E402
     KolPostStore,
+    RuleClassifier,
     RuleResult,
     classify_pending_in_batches,
     normalise_twitter_post,
+    process_pending_ocr_with_budget,
 )
 from model_budget import ModelDailyBudget, OcrDailyBudget  # noqa: E402
 
@@ -115,6 +117,58 @@ class ModelDailyBudgetTests(unittest.TestCase):
             status = unlimited.status()
             self.assertEqual("unlimited", status["limit_mode"])
             self.assertEqual(2, status["attempted"])
+
+    def test_ocr_timeout_batch_is_split_and_resumed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = KolPostStore(root / "posts.db", root / "media")
+            kol_id, _ = store.add_kol("fixture", "fixture")
+            kol = store.get_kol(kol_id)
+            assert kol is not None
+            for index in range(2):
+                post = normalise_twitter_post(
+                    {
+                        "id": f"209810000000000000{index}",
+                        "text": "图片中的推荐",
+                        "url": f"https://x.com/fixture/status/209810000000000000{index}",
+                        "author": {"screenName": "fixture", "name": "fixture"},
+                        "createdAtISO": f"2026-08-2{index + 5}T01:00:00+00:00",
+                        "media": [{"type": "photo", "url": "https://example.invalid/a.jpg"}],
+                        "isRetweet": False,
+                    },
+                    kol,
+                )
+                store.upsert_post(post)
+                path = root / f"{post.post_id}.jpg"
+                path.write_bytes(b"fixture")
+                store.save_local_media(post.post_id, [{"path": str(path), "source_url": "https://example.invalid/a.jpg"}])
+                store.save_rule_classification(
+                    post.post_id,
+                    RuleResult(70, True, [], "", ["fixture"], "ambiguous", "analysis"),
+                )
+
+            class TimeoutClassifier:
+                provider_name = "fixture-ocr"
+
+                def classify(self, posts):
+                    if len(posts) > 1:
+                        raise RuntimeError("RapidOCR batch timed out after 90 seconds")
+                    return {posts[0]["post_id"]: {"text": "fixture OCR"}}
+
+            completed, failed = process_pending_ocr_with_budget(
+                store,
+                TimeoutClassifier(),
+                RuleClassifier({}),
+                daily_limit=1,
+                batch_size=2,
+            )
+
+            self.assertEqual((2, 0), (completed, failed))
+            with store.connect() as db:
+                self.assertEqual(
+                    [("completed", 2)],
+                    [tuple(row) for row in db.execute("SELECT ocr_status,COUNT(*) FROM classifications GROUP BY ocr_status").fetchall()],
+                )
 
 
 if __name__ == "__main__":

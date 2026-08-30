@@ -32,6 +32,21 @@ Expected local listeners:
 - 17:50 — FreeStockDB validation/update (local D: drive).
 - 19:30 — atomic daily market publication through BaoStock and fallbacks.
 
+Historical recommendation reconciliation is a maintenance-only operation. It
+uses a candidate runtime and does not re-review drafts already approved or
+rejected:
+
+```powershell
+python _automation\trading_research\trading_cli.py kol-operational-reconcile `
+  --lead-scope unprocessed-history --history-scope known-gaps `
+  --model-limit-mode unlimited --approval-gate strict-evidence `
+  --apply --report _runtime\trading\restore-reports\kol-operational-reconcile.json
+```
+
+Use `--resume <run_id>` after an external provider failure. The command can
+approve only evidence that is exact in current text/OCR and mapped to an active
+stock in the market master. Non-recommendation mentions remain archive-only.
+
 The daily market publisher is the only market write task. Returns, event
 research, and performance recomputation tasks remain intentionally disabled.
 After a successful first catch-up the mode is `live` with `as_of` set to the

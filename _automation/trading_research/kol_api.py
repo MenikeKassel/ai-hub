@@ -1062,9 +1062,44 @@ def create_app(
         instrument = market_store.get_instrument(current["symbol"])
         if instrument is None:
             raise ValueError("instrument is not available in the market master")
+        canonical_name = str(instrument.get("name") or current.get("security_name") or "")
+        leads = post_store.list_stock_leads(
+            post_id=current["post_id"],
+            symbol=current["symbol"],
+            limit=10,
+        )
+        if not leads:
+            post_store.upsert_stock_lead(
+                {
+                    "post_id": current["post_id"],
+                    "kol_id": post_store.get_post(current["post_id"])["kol_id"],
+                    "symbol": current["symbol"],
+                    "security_name": canonical_name,
+                    "instrument_type": instrument.get("instrument_type") or "stock",
+                    "direction": current["direction"],
+                    "mention_kind": "recommendation",
+                    "evidence_text": current["thesis"],
+                    "extraction_method": "recommendation_draft_approval",
+                    "confidence": current.get("confidence") or 0,
+                    "status": "pending",
+                }
+            )
+            leads = post_store.list_stock_leads(
+                post_id=current["post_id"],
+                symbol=current["symbol"],
+                limit=10,
+            )
+        if leads and leads[0]["status"] != "confirmed":
+            post_store.review_stock_lead(
+                int(leads[0]["id"]),
+                "confirmed",
+                note or "Confirmed during recommendation draft approval.",
+                symbol=current["symbol"],
+                security_name=canonical_name,
+            )
         event_draft = {
             "symbol": current["symbol"],
-            "security_name": current["security_name"] or instrument["name"],
+            "security_name": canonical_name,
             "direction": current["direction"],
             "thesis": current["thesis"],
             "evidence_type": current["evidence_type"],
@@ -3323,6 +3358,7 @@ def create_app(
             "post_recovery": post_store.post_recovery_summary(),
             "market_admissions": market_admissions.summary(),
         }
+        reconciliation = system_reconciliation()
         return {
             **cached_diagnostics,
             "ok": True,
@@ -3365,6 +3401,7 @@ def create_app(
             "media_bytes": int(cached_diagnostics.get("media_bytes") or 0),
             "post_recovery": post_store.post_recovery_summary(),
             "queue_status": queue_status,
+            "reconciliation": reconciliation,
             "model_daily_budget": model_budget,
             "ocr_daily_budget": ocr_budget,
             "model_queue": post_store.model_queue_summary(daily_limit=250),
@@ -3406,6 +3443,7 @@ def create_app(
     @app.get("/api/system/queues")
     def system_queues() -> dict[str, Any]:
         """Return all durable backlogs; this endpoint is read-only and cheap."""
+        reconciliation = system_reconciliation()
         return {
             "ok": True,
             "generated_at": datetime.now(SHANGHAI).isoformat(timespec="seconds"),
@@ -3414,6 +3452,41 @@ def create_app(
             "ocr_model": post_store.model_queue_summary(daily_limit=250, ocr_daily_limit=150),
             "post_recovery": post_store.post_recovery_summary(),
             "market_admissions": market_admissions.summary(),
+            "reconciliation": reconciliation,
+        }
+
+    @app.get("/api/system/reconciliation")
+    def system_reconciliation() -> dict[str, Any]:
+        """Expose the last offline reconciliation without probing providers."""
+        report_dir = config.runtime_root / "restore-reports"
+        reports = sorted(report_dir.glob("kol-operational-reconcile*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        path = reports[0] if reports else report_dir / "kol-operational-reconcile.json"
+        report: dict[str, Any] = {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                report = loaded
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pass
+        with post_store.connect() as db:
+            pending_recommendation = int(db.execute(
+                "SELECT COUNT(*) FROM stock_leads WHERE status='pending' AND mention_kind='recommendation'"
+            ).fetchone()[0])
+            archive_only = int(db.execute(
+                "SELECT COUNT(*) FROM stock_leads WHERE status='pending' AND mention_kind<>'recommendation'"
+            ).fetchone()[0])
+            active_drafts = int(db.execute(
+                "SELECT COUNT(*) FROM recommendation_drafts WHERE status IN ('ready','needs_attention')"
+            ).fetchone()[0])
+        return {
+            "run_id": str(report.get("run_id") or ""),
+            "status": str(report.get("status") or ("completed" if report.get("ok") and report.get("published") else "idle" if not report else "blocked")),
+            "report_path": str(path),
+            "counts": report.get("counts") or {},
+            "errors": report.get("errors") or [],
+            "pending_recommendation_leads": pending_recommendation,
+            "archive_only_leads": archive_only,
+            "active_drafts": active_drafts,
         }
 
     @app.get("/api/pipeline/status")

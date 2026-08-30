@@ -13,6 +13,8 @@ from Git.
 - Idempotent `kol-backup-upgrade` and `kol-draft-materialize` maintenance
   commands for selected backup evidence and saved GLM classifications.
 - Backup-upgrade and multi-source X regression fixtures.
+- Candidate-based `kol-operational-reconcile` maintenance flow for unprocessed
+  historical recommendation leads and known collection gaps.
 
 ### Changed
 

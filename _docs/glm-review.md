@@ -18,6 +18,7 @@ Then inspect the primary implementation areas:
 - `_automation/trading_research/model_budget.py`
 - `_automation/trading_research/kol_posts.py`
 - `_automation/trading_research/trading_cli.py`
+- `_automation/trading_research/kol_operational_reconcile.py`
 - `_automation/trading_research/kol_api.py`
 - `_automation/trading_research/morning_pipeline.py`
 - `_automation/trading_research/ui/src/pages/System.tsx`
@@ -50,6 +51,9 @@ Do not evaluate trading performance or provide investment recommendations.
 - Health polling cannot issue X, Zhihu, or FxTwitter collection requests.
 - Restarting a queue cannot duplicate posts, classifications, admissions, or
   formal events.
+- The operational reconciliation scope is limited to recommendation leads with
+  no approved/rejected draft or formal event; archive-only mentions are not
+  event candidates.
 - Secrets cannot appear in API responses, logs, docs, tests, or Git history.
 
 ## Current evidence and known limitations
@@ -63,10 +67,11 @@ Do not evaluate trading performance or provide investment recommendations.
   virtual environments, and the incomplete market warehouse are excluded.
 - X slot state and request usage are persisted; unconfigured slots remain
   disabled rather than copying a legacy credential.
-- One X run may become `partial` when the only verified identity reaches its
-  90-request cap. Generic per-handle `TwitterAPIError` details need safer status
-  preservation.
-- OCR and model backlogs are deliberately daily-bounded and resumable.
+- X and OCR local policies are explicitly unlimited by user choice; real
+  upstream failures still pause or defer work.
+- The operational reconciliation command processes known gaps and unprocessed
+  historical recommendation leads in a candidate runtime, with strict evidence
+  approval and idempotent resume.
 - Large modules remain a maintainability concern; extracted policy repositories
   are the first step of an incremental split.
 

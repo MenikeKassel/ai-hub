@@ -123,6 +123,7 @@ from market_policy import (
 from model_budget import ModelDailyBudget
 from market_publication import MarketDailyPublisher
 from kol_backup_upgrade import KolBackupUpgrade
+from kol_operational_reconcile import OperationalReconciler
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from kol_performance import DeepSeekPerformanceInterpreter, KolPerformanceService, build_weekly_message
@@ -1580,6 +1581,36 @@ def kol_backup_upgrade(args: argparse.Namespace) -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     if not args.apply:
         report.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def kol_operational_reconcile(args: argparse.Namespace) -> None:
+    report = Path(args.report) if args.report else RUNTIME / "restore-reports" / "kol-operational-reconcile.json"
+    resume_id = "" if not args.resume or args.resume == "latest" else str(args.resume)
+    if args.resume == "latest":
+        candidates = sorted((RUNTIME / "reconcile-candidates").glob("*/kol/posts.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            resume_id = candidates[0].parent.parent.name
+    reconciler = OperationalReconciler(ROOT, runtime_root=RUNTIME, report_path=report, resume_run_id=resume_id)
+    try:
+        payload = reconciler.execute(apply=bool(args.apply), report_path=report)
+        if args.apply and payload.get("ok"):
+            backup = reconciler.publish()
+            payload["published"] = True
+            payload["backup_dir"] = str(backup)
+            reconciler._write_report(report)
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "dry_run": not bool(args.apply),
+            "error": str(exc)[:2000],
+            "report": str(report),
+        }
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2) from exc
+    payload["report"] = str(report)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -5160,6 +5191,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_backup_upgrade.add_argument("--report")
     p_backup_upgrade.add_argument("--apply", action="store_true")
     p_backup_upgrade.set_defaults(func=kol_backup_upgrade)
+
+    p_operational_reconcile = sub.add_parser(
+        "kol-operational-reconcile",
+        help="reconcile unprocessed historical recommendation leads and known gaps",
+    )
+    p_operational_reconcile.add_argument("--lead-scope", choices=["unprocessed-history"], default="unprocessed-history")
+    p_operational_reconcile.add_argument("--history-scope", choices=["known-gaps"], default="known-gaps")
+    p_operational_reconcile.add_argument("--model-limit-mode", choices=["unlimited"], default="unlimited")
+    p_operational_reconcile.add_argument("--approval-gate", choices=["strict-evidence"], default="strict-evidence")
+    p_operational_reconcile.add_argument("--resume", nargs="?", const="latest", default="")
+    p_operational_reconcile.add_argument("--report")
+    p_operational_reconcile.add_argument("--apply", action="store_true")
+    p_operational_reconcile.set_defaults(func=kol_operational_reconcile)
 
     p_draft_materialize = sub.add_parser(
         "kol-draft-materialize",

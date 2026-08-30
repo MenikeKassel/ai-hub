@@ -149,7 +149,7 @@ export default function System() {
         total={tasks.data?.fetch?.total_kols || 0}
         running={fetchRunning}
       />
-      {queues && <div className="scope-note">待处理：X {queues.x.queued + queues.x.running + queues.x.cooldown} 项 / {queues.x.unique_kols} 个账号 · 知乎 {queues.zhihu.queued + queues.zhihu.running + queues.zhihu.cooldown} 项 · OCR {queues.ocr_model?.awaiting_ocr ?? 0} · 模型 {queues.ocr_model?.processable_remaining ?? 0} · 行情准入 {queues.market_admissions.pending}</div>}
+      {queues && <div className="scope-note">待处理：X {queues.x.queued + queues.x.running + queues.x.cooldown} 项 / {queues.x.unique_kols} 个账号 · 知乎 {queues.zhihu.queued + queues.zhihu.running + queues.zhihu.cooldown} 项 · OCR {queues.ocr_model?.awaiting_ocr ?? 0} · 模型 {queues.ocr_model?.processable_remaining ?? 0} · 推荐线索 {queues.reconciliation?.pending_recommendation_leads ?? 0} · 行情准入 {queues.market_admissions.pending}</div>}
     </div>
       <div className="panel task-console">
       <div className="panel-heading"><div><h2>采集恢复</h2><span>先补最近 7 天；AI 503 不会阻塞帖子保存</span></div><button className="secondary-button" disabled={recoveryBusy || !recoveryPreview.data?.x_session_ready} onClick={() => startRecovery.mutate()}><RefreshCw className={recoveryBusy ? 'spin' : ''} size={16} />{recoveryBusy ? '恢复运行中' : '补齐最近 7 天'}</button></div>
@@ -168,6 +168,7 @@ export default function System() {
       <HealthItem icon={RefreshCw} label="Morning pipeline" ok={h?.morning_pipeline_task === 'installed'} value={`Zhihu 06:30、08:05、19:20 / X 07:20、19:00 / 08:45只审核 / ${h?.morning_pipeline_task || '-'}`} />
       <HealthItem icon={Terminal} label="Codex batch review" ok={!!h?.codex_cli} value={h?.codex_cli || 'Codex CLI not found'} />
       <HealthItem icon={RefreshCw} label="候选 AI 每日队列" ok={(h?.model_queue?.manual_attention ?? 0) === 0} value={`待模型 ${h?.model_queue?.processable_remaining ?? 0} / 待OCR ${h?.model_queue?.awaiting_ocr ?? 0} · OCR ${h?.model_queue?.ocr_limit_mode === 'unlimited' ? 'unlimited' : `${h?.ocr_daily_budget?.attempted ?? 0}/${h?.ocr_daily_budget?.daily_limit ?? 150}`} · 模型今日 ${h?.model_daily_budget?.attempted ?? 0}/${h?.model_daily_budget?.daily_limit ?? 250} · 预计 ${h?.model_queue?.estimated_days ?? 0} 天`} />
+      <HealthItem icon={RefreshCw} label="历史推荐线索追平" ok={h?.reconciliation?.status === 'completed'} value={`${h?.reconciliation?.status || 'idle'} · 待推荐线索 ${h?.reconciliation?.pending_recommendation_leads ?? 0} · 活动草稿 ${h?.reconciliation?.active_drafts ?? 0}`} />
       <HealthItem icon={Terminal} label="OpenCode Go review AI" ok={!!h?.codex_cli} value={`${h?.deepseek_model || 'DeepSeek fallback'} / ${h?.deepseek_credentials_configured ? 'configured' : 'optional fallback unavailable'}`} />
       <HealthItem icon={Terminal} label="OCR RapidOCR" ok={!!h?.rapid_ocr_available} value={h?.rapid_ocr_available ? 'local OCR available' : 'run OCR installer'} />
       <HealthItem icon={Terminal} label="OCR experiment" ok value={h?.unlimited_ocr_available ? 'Unlimited-OCR available' : 'optional / not installed'} />

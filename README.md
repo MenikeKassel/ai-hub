@@ -15,6 +15,7 @@ but there is no local volume or interval safeguard; upstream authentication and
 For code review, start with:
 
 - `_docs/glm-review.md`
+- `_docs/kol-operational-reconcile.md`
 - `_docs/architecture-current.md`
 - `_docs/operations-current.md`
 - `CHANGELOG.md`
