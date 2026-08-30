@@ -89,7 +89,7 @@ Register-KolTask -Name "KOL_Morning_Pipeline" -Script $morning -Arguments @("-Re
 
 $classifier = Join-Path $RepoRoot "scripts\kol-post-classify.ps1"
 if (-not (Test-Path -LiteralPath $classifier)) { throw "Required script not found: $classifier" }
-Register-KolTask -Name "KOL_Post_Classify_Daily" -Script $classifier -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-DailyLimit", "250", "-OcrLimit", "150") -Trigger (New-ScheduledTaskTrigger -Daily -At "09:15") -Description "Drain the candidate OCR/AI backlog with persistent daily caps." -Limit (New-TimeSpan -Hours 3)
+Register-KolTask -Name "KOL_Post_Classify_Daily" -Script $classifier -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-DailyLimit", "250", "-OcrLimit", "0") -Trigger (New-ScheduledTaskTrigger -Daily -At "09:15") -Description "Drain the candidate OCR backlog without a local daily cap and the bounded model queue." -Limit (New-TimeSpan -Hours 3)
 
 $hermes = Get-Command hermes.exe -ErrorAction SilentlyContinue
 if ($hermes) {

@@ -944,16 +944,19 @@ export interface XSessionSlot {
   last_error: string
   consecutive_rate_limits: number
   used_24h?: number
-  remaining_24h?: number
+  remaining_24h?: number | null
+  limit_mode?: 'bounded' | 'unlimited' | string
+  session_limit_24h?: number | null
 }
 
 export interface XSessionPolicy {
   enabled: boolean
-  global_limit_24h: number
-  session_limit_24h: number
+  limit_mode?: 'bounded' | 'unlimited' | string
+  global_limit_24h: number | null
+  session_limit_24h: number | null
   min_interval_seconds: number
   global_used_24h: number
-  global_remaining_24h: number
+  global_remaining_24h: number | null
   paused_until: string
   pause_reason: string
   next_slot_id: number
@@ -963,14 +966,16 @@ export interface XSessionPolicy {
 
 export interface PublicBackupHealth {
   enabled: boolean
+  limit_mode?: 'bounded' | 'unlimited' | string
+  public_limit_mode?: 'bounded' | 'unlimited' | string
   provider: string
   adapter_version: string
-  global_limit_24h: number
-  public_limit_24h: number
+  global_limit_24h: number | null
+  public_limit_24h: number | null
   global_used_24h: number
   public_used_24h: number
-  global_remaining_24h: number
-  public_remaining_24h: number
+  global_remaining_24h: number | null
+  public_remaining_24h: number | null
   paused_until: string
   pause_reason: string
 }
@@ -1012,11 +1017,12 @@ export interface Health {
   }
   ocr_daily_budget?: {
     usage_date: string
-    daily_limit: number
+    limit_mode?: 'bounded' | 'unlimited' | string
+    daily_limit: number | null
     attempted: number
     completed: number
     failed: number
-    remaining: number
+    remaining: number | null
     updated_at: string
   }
   model_queue?: {
@@ -1033,7 +1039,8 @@ export interface Health {
     ocr_manual_attention: number
     non_candidate_not_requested: number
     daily_limit: number
-    ocr_daily_limit: number
+    ocr_daily_limit: number | null
+    ocr_limit_mode?: 'bounded' | 'unlimited' | string
     estimated_days: number
   }
   queue_status?: QueueStatus

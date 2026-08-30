@@ -1052,10 +1052,14 @@ class KolPostStore:
                 CREATE TABLE IF NOT EXISTS x_collection_policy (
                     policy_id INTEGER PRIMARY KEY CHECK(policy_id=1),
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    limit_mode TEXT NOT NULL DEFAULT 'unlimited'
+                        CHECK(limit_mode IN ('bounded','unlimited')),
                     global_limit_24h INTEGER NOT NULL DEFAULT 180,
                     session_limit_24h INTEGER NOT NULL DEFAULT 90,
                     min_interval_seconds INTEGER NOT NULL DEFAULT 60,
                     public_enabled INTEGER NOT NULL DEFAULT 1,
+                    public_limit_mode TEXT NOT NULL DEFAULT 'unlimited'
+                        CHECK(public_limit_mode IN ('bounded','unlimited')),
                     public_limit_24h INTEGER NOT NULL DEFAULT 30,
                     next_slot_id INTEGER NOT NULL DEFAULT 1 CHECK(next_slot_id BETWEEN 1 AND 3),
                     paused_until TEXT NOT NULL DEFAULT '',
@@ -1542,6 +1546,8 @@ class KolPostStore:
                     "user_id": "TEXT NOT NULL DEFAULT ''",
                 },
                 "x_collection_policy": {
+                    "limit_mode": "TEXT NOT NULL DEFAULT 'bounded'",
+                    "public_limit_mode": "TEXT NOT NULL DEFAULT 'bounded'",
                     "public_enabled": "INTEGER NOT NULL DEFAULT 1",
                     "public_limit_24h": "INTEGER NOT NULL DEFAULT 30",
                     "public_paused_until": "TEXT NOT NULL DEFAULT ''",
@@ -3552,7 +3558,9 @@ class KolPostStore:
         limit = max(1, int(daily_limit))
         ocr_limit = max(1, int(ocr_daily_limit))
         estimated_model_days = (processable + limit - 1) // limit
-        estimated_ocr_days = (awaiting_ocr + ocr_limit - 1) // ocr_limit
+        ocr_status = OcrDailyBudget(self, daily_limit=ocr_limit).status()
+        ocr_unlimited = str(ocr_status.get("limit_mode") or "unlimited") == "unlimited"
+        estimated_ocr_days = 1 if ocr_unlimited and awaiting_ocr else (awaiting_ocr + ocr_limit - 1) // ocr_limit
         return {
             "candidate_total": sum(counts.values()),
             "completed": counts.get("completed", 0),
@@ -3567,7 +3575,8 @@ class KolPostStore:
             "ocr_manual_attention": ocr_manual_attention,
             "non_candidate_not_requested": non_candidate_pending,
             "daily_limit": limit,
-            "ocr_daily_limit": ocr_limit,
+            "ocr_daily_limit": None if ocr_unlimited else ocr_limit,
+            "ocr_limit_mode": "unlimited" if ocr_unlimited else "bounded",
             "estimated_days": max(estimated_model_days, estimated_ocr_days),
         }
 
@@ -4254,9 +4263,11 @@ class XSessionManager:
     SLOT_IDS = (1, 2, 3)
     SERVICE_PREFIX = "ai-hub/x-session/slot-"
     DEFAULT_POLICY = {
+        "limit_mode": "unlimited",
+        "public_limit_mode": "unlimited",
         "global_limit_24h": 180,
         "session_limit_24h": 90,
-        "min_interval_seconds": 60,
+        "min_interval_seconds": 0,
     }
 
     def __init__(self, store: Any, *, gate_path: Path | None = None):
@@ -4325,12 +4336,14 @@ class XSessionManager:
         with FileLock(str(self.gate_path), timeout=10):
             with self.store.connect() as db:
                 db.execute(
-                    "INSERT OR IGNORE INTO x_collection_policy(policy_id,enabled,global_limit_24h,session_limit_24h,min_interval_seconds,public_enabled,public_limit_24h,next_slot_id,updated_at) VALUES(1,1,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO x_collection_policy(policy_id,enabled,limit_mode,global_limit_24h,session_limit_24h,min_interval_seconds,public_enabled,public_limit_mode,public_limit_24h,next_slot_id,updated_at) VALUES(1,1,?,?,?,?,?,?,?,?,?)",
                     (
+                        self.DEFAULT_POLICY["limit_mode"],
                         self.DEFAULT_POLICY["global_limit_24h"],
                         self.DEFAULT_POLICY["session_limit_24h"],
                         self.DEFAULT_POLICY["min_interval_seconds"],
                         1,
+                        self.DEFAULT_POLICY["public_limit_mode"],
                         30,
                         1,
                         timestamp,
@@ -4517,6 +4530,11 @@ class XSessionManager:
             return self._policy()
         return dict(row)
 
+    @staticmethod
+    def _unlimited(policy: dict[str, Any], source: str = "primary") -> bool:
+        key = "limit_mode" if source == "primary" else "public_limit_mode"
+        return str(policy.get(key) or "bounded").casefold() == "unlimited"
+
     def _recent_usage(self, *, slot_id: int | None = None) -> int:
         cutoff = (self._now() - timedelta(hours=24)).isoformat(timespec="seconds")
         with self.store.connect() as db:
@@ -4543,23 +4561,29 @@ class XSessionManager:
         slots = self.slots()
         for row in slots:
             row["used_24h"] = self._recent_usage(slot_id=int(row["slot_id"]))
-            row["remaining_24h"] = max(0, int(policy["session_limit_24h"]) - row["used_24h"])
+            row["limit_mode"] = str(policy.get("limit_mode") or "bounded")
+            row["session_limit_24h"] = None if self._unlimited(policy) else int(policy["session_limit_24h"])
+            row["remaining_24h"] = None if self._unlimited(policy) else max(0, int(policy["session_limit_24h"]) - row["used_24h"])
         return {
             "enabled": bool(policy["enabled"]),
-            "global_limit_24h": int(policy["global_limit_24h"]),
-            "session_limit_24h": int(policy["session_limit_24h"]),
+            "limit_mode": str(policy.get("limit_mode") or "bounded"),
+            "global_limit_24h": None if self._unlimited(policy) else int(policy["global_limit_24h"]),
+            "session_limit_24h": None if self._unlimited(policy) else int(policy["session_limit_24h"]),
             "min_interval_seconds": int(policy["min_interval_seconds"]),
             "global_used_24h": global_used,
-            "global_remaining_24h": max(0, int(policy["global_limit_24h"]) - global_used),
+            "global_remaining_24h": None if self._unlimited(policy) else max(0, int(policy["global_limit_24h"]) - global_used),
             "paused_until": str(policy.get("paused_until") or "") if paused and paused > now else "",
             "pause_reason": str(policy.get("pause_reason") or ""),
             "public_backup": {
                 "enabled": bool(policy.get("public_enabled", 1)) and bool(policy.get("enabled", 1)),
                 "provider": "fxtwitter",
                 "adapter_version": "x-tweet-fetcher-3.0.0+f057d6b",
-                "limit_24h": int(policy.get("public_limit_24h", 30)),
+                "limit_mode": str(policy.get("public_limit_mode") or "bounded"),
+                "public_limit_mode": str(policy.get("public_limit_mode") or "bounded"),
+                "public_limit_24h": None if self._unlimited(policy, "public") else int(policy.get("public_limit_24h", 30)),
+                "limit_24h": None if self._unlimited(policy, "public") else int(policy.get("public_limit_24h", 30)),
                 "used_24h": public_used,
-                "remaining_24h": max(0, int(policy.get("public_limit_24h", 30)) - public_used),
+                "remaining_24h": None if self._unlimited(policy, "public") else max(0, int(policy.get("public_limit_24h", 30)) - public_used),
                 "paused_until": str(policy.get("public_paused_until") or "") if public_paused and public_paused > now else "",
                 "pause_reason": str(policy.get("public_pause_reason") or ""),
             },
@@ -4567,7 +4591,17 @@ class XSessionManager:
             "slots": slots,
         }
 
-    def set_policy(self, *, enabled: bool | None = None, paused: bool | None = None, reason: str = "") -> dict[str, Any]:
+    def set_policy(
+        self,
+        *,
+        enabled: bool | None = None,
+        paused: bool | None = None,
+        reason: str = "",
+        limit_mode: str | None = None,
+        min_interval_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        if limit_mode is not None and limit_mode not in {"bounded", "unlimited"}:
+            raise ValueError("limit_mode must be bounded or unlimited")
         timestamp = self._timestamp()
         with FileLock(str(self.gate_path), timeout=10):
             with self.store.connect() as db:
@@ -4579,7 +4613,14 @@ class XSessionManager:
                 pause_until = ""
                 if paused:
                     pause_until = (self._now() + timedelta(hours=24)).isoformat(timespec="seconds")
-                db.execute("UPDATE x_collection_policy SET enabled=?,paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1", (new_enabled, pause_until, reason[:2000], timestamp))
+                current_mode = str(current["limit_mode"] or "bounded")
+                new_mode = limit_mode or current_mode
+                current_interval = int(current["min_interval_seconds"] or 0)
+                new_interval = current_interval if min_interval_seconds is None else max(0, int(min_interval_seconds))
+                db.execute(
+                    "UPDATE x_collection_policy SET enabled=?,limit_mode=?,min_interval_seconds=?,paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1",
+                    (new_enabled, new_mode, new_interval, pause_until, reason[:2000], timestamp),
+                )
         return self.policy_status()
 
     def pause_global(self, reason: str, *, seconds: int = 7200) -> None:
@@ -4605,7 +4646,7 @@ class XSessionManager:
         start = int(policy["next_slot_id"])
         ordered = sorted(rows, key=lambda row: ((int(row["slot_id"]) - start) % 3))
         global_used = self._recent_usage()
-        if global_used >= int(policy["global_limit_24h"]):
+        if not self._unlimited(policy) and global_used >= int(policy["global_limit_24h"]):
             self.pause_global("global request budget exhausted", seconds=3600)
             raise XBudgetDeferredError("X global request budget exhausted")
         for row in ordered:
@@ -4623,7 +4664,7 @@ class XSessionManager:
                 continue
             slot_used = self._recent_usage(slot_id=slot_id)
             minimum_cost = 2 if row.get("user_id") else 4
-            if int(policy["session_limit_24h"]) - slot_used < minimum_cost:
+            if not self._unlimited(policy) and int(policy["session_limit_24h"]) - slot_used < minimum_cost:
                 continue
             timestamp = self._timestamp()
             with FileLock(str(self.gate_path), timeout=10):
@@ -4675,7 +4716,10 @@ class XSessionManager:
                         session_used = int(db.execute("SELECT COALESCE(SUM(b.estimated_requests),0) FROM x_request_budget b JOIN x_session_slots s ON s.slot_id=b.slot_id WHERE b.reserved_at>=? AND b.source='primary' AND s.user_id=? AND b.status<>'cancelled'", (cutoff, user_id)).fetchone()[0])
                     else:
                         session_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='primary' AND slot_id=? AND status<>'cancelled'", (cutoff, slot_id)).fetchone()[0])
-                    if global_used + cost > int(policy["global_limit_24h"]) or session_used + cost > int(policy["session_limit_24h"]):
+                    if (
+                        not self._unlimited(policy)
+                        and (global_used + cost > int(policy["global_limit_24h"]) or session_used + cost > int(policy["session_limit_24h"]))
+                    ):
                         until = (self._now() + timedelta(hours=1)).isoformat(timespec="seconds")
                         db.execute("UPDATE x_collection_policy SET paused_until=?,pause_reason=?,updated_at=? WHERE policy_id=1", (until, "X request budget exhausted", self._timestamp()))
                         raise XBudgetDeferredError("X request budget exhausted")
@@ -4685,6 +4729,8 @@ class XSessionManager:
                     else:
                         latest_slot = db.execute("SELECT MAX(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND source='primary' AND slot_id=?", (cutoff, slot_id)).fetchone()[0]
                     for value in (latest, latest_slot):
+                        if self._unlimited(policy):
+                            break
                         parsed = self._parse_time(str(value or ""))
                         if parsed:
                             wait_seconds = max(wait_seconds, int(policy["min_interval_seconds"]) - (self._now() - parsed).total_seconds())
@@ -4766,8 +4812,8 @@ class PublicBackupGate:
         with self.store.connect() as db:
             row = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
         return dict(row) if row else {
-            "enabled": 1, "global_limit_24h": 180, "public_enabled": 1,
-            "public_limit_24h": 30, "min_interval_seconds": 60,
+            "enabled": 1, "limit_mode": "unlimited", "global_limit_24h": 180, "public_enabled": 1,
+            "public_limit_mode": "unlimited", "public_limit_24h": 30, "min_interval_seconds": 0,
             "paused_until": "", "public_paused_until": "",
         }
 
@@ -4783,12 +4829,14 @@ class PublicBackupGate:
             "enabled": bool(policy.get("public_enabled", 1)) and bool(policy.get("enabled", 1)),
             "provider": "fxtwitter",
             "adapter_version": "x-tweet-fetcher-3.0.0+f057d6b",
-            "global_limit_24h": int(policy.get("global_limit_24h", 180)),
-            "public_limit_24h": int(policy.get("public_limit_24h", 30)),
+            "limit_mode": str(policy.get("limit_mode") or "bounded"),
+            "public_limit_mode": str(policy.get("public_limit_mode") or "bounded"),
+            "global_limit_24h": None if XSessionManager._unlimited(policy, "primary") else int(policy.get("global_limit_24h", 180)),
+            "public_limit_24h": None if XSessionManager._unlimited(policy, "public") else int(policy.get("public_limit_24h", 30)),
             "global_used_24h": global_used,
             "public_used_24h": public_used,
-            "global_remaining_24h": max(0, int(policy.get("global_limit_24h", 180)) - global_used),
-            "public_remaining_24h": max(0, int(policy.get("public_limit_24h", 30)) - public_used),
+            "global_remaining_24h": None if XSessionManager._unlimited(policy, "primary") else max(0, int(policy.get("global_limit_24h", 180)) - global_used),
+            "public_remaining_24h": None if XSessionManager._unlimited(policy, "public") else max(0, int(policy.get("public_limit_24h", 30)) - public_used),
             "paused_until": str(policy.get("public_paused_until") or "") if paused and paused > now else "",
             "pause_reason": str(policy.get("public_pause_reason") or ""),
         }
@@ -4812,9 +4860,9 @@ class PublicBackupGate:
                 with self.store.connect() as db:
                     global_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0])
                     public_used = int(db.execute("SELECT COALESCE(SUM(estimated_requests),0) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0])
-                    if global_used + cost > int(policy.get("global_limit_24h", 180)):
+                    if not XSessionManager._unlimited(policy, "primary") and global_used + cost > int(policy.get("global_limit_24h", 180)):
                         raise PublicBackupDeferredError("X global request budget exhausted")
-                    if public_used + cost > int(policy.get("public_limit_24h", 30)):
+                    if not XSessionManager._unlimited(policy, "public") and public_used + cost > int(policy.get("public_limit_24h", 30)):
                         oldest = db.execute("SELECT MIN(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND source='public' AND status<>'cancelled'", (cutoff,)).fetchone()[0]
                         reset = XSessionManager._parse_time(str(oldest or "")) or now
                         until = max(now + timedelta(hours=2), reset + timedelta(hours=24))
@@ -4822,7 +4870,7 @@ class PublicBackupGate:
                         raise PublicBackupDeferredError("public X backup budget exhausted")
                     latest = db.execute("SELECT MAX(reserved_at) FROM x_request_budget WHERE reserved_at>=? AND status<>'cancelled'", (cutoff,)).fetchone()[0]
                     parsed = XSessionManager._parse_time(str(latest or ""))
-                    if parsed:
+                    if parsed and not XSessionManager._unlimited(policy, "public"):
                         wait_seconds = max(0.0, int(policy.get("min_interval_seconds", 60)) - (now - parsed).total_seconds())
                     if wait_seconds <= 0:
                         cursor = db.execute("INSERT INTO x_request_budget(slot_id,source,batch_key,operation,estimated_requests,reserved_at) VALUES(NULL,'public',?,?,?,?)", (batch_key, operation, cost, now.isoformat(timespec="seconds")))
@@ -4843,7 +4891,17 @@ class PublicBackupGate:
             with self.store.connect() as db:
                 db.execute("UPDATE x_collection_policy SET public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1", (until, reason[:2000], self._now().isoformat(timespec="seconds")))
 
-    def set_policy(self, *, enabled: bool | None = None, paused: bool | None = None, reason: str = "") -> dict[str, Any]:
+    def set_policy(
+        self,
+        *,
+        enabled: bool | None = None,
+        paused: bool | None = None,
+        reason: str = "",
+        limit_mode: str | None = None,
+        min_interval_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        if limit_mode is not None and limit_mode not in {"bounded", "unlimited"}:
+            raise ValueError("limit_mode must be bounded or unlimited")
         with FileLock(str(self.gate_path), timeout=10):
             with self.store.connect() as db:
                 current = db.execute("SELECT * FROM x_collection_policy WHERE policy_id=1").fetchone()
@@ -4858,7 +4916,14 @@ class PublicBackupGate:
                 elif paused is False:
                     pause_until = ""
                     pause_reason = ""
-                db.execute("UPDATE x_collection_policy SET public_enabled=?,public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1", (public_enabled, pause_until, pause_reason[:2000], self._now().isoformat(timespec="seconds")))
+                current_mode = str(current["public_limit_mode"] or "bounded")
+                new_mode = limit_mode or current_mode
+                current_interval = int(current["min_interval_seconds"] or 0)
+                new_interval = current_interval if min_interval_seconds is None else max(0, int(min_interval_seconds))
+                db.execute(
+                    "UPDATE x_collection_policy SET public_enabled=?,public_limit_mode=?,min_interval_seconds=?,public_paused_until=?,public_pause_reason=?,updated_at=? WHERE policy_id=1",
+                    (public_enabled, new_mode, new_interval, pause_until, pause_reason[:2000], self._now().isoformat(timespec="seconds")),
+                )
         return self.status()
 
 
@@ -6062,13 +6127,16 @@ def process_pending_ocr_with_budget(
     daily_limit: int = 150,
     batch_size: int = 50,
 ) -> tuple[int, int]:
-    """Process OCR in resumable 50-item chunks under a persistent daily cap."""
-    budget = OcrDailyBudget(store, daily_limit=daily_limit)
+    """Process OCR in resumable 50-item chunks under persistent accounting."""
+    budget = OcrDailyBudget(store, daily_limit=daily_limit, limit_mode="unlimited")
     completed = failed = 0
     chunk_limit = max(1, min(int(batch_size), 50))
-    while budget.status()["remaining"] > 0 and completed + failed < max(1, int(daily_limit)):
-        remaining_budget = min(
-            int(budget.status()["remaining"]),
+    while True:
+        budget_status = budget.status()
+        if budget.limit_mode != "unlimited" and int(budget_status.get("remaining") or 0) <= 0:
+            break
+        remaining_budget = chunk_limit if budget.limit_mode == "unlimited" else min(
+            int(budget_status["remaining"]),
             max(1, int(daily_limit)) - completed - failed,
         )
         posts = store.claim_posts_for_ocr(min(chunk_limit, remaining_budget))

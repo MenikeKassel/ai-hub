@@ -13,7 +13,7 @@ from kol_posts import (  # noqa: E402
     classify_pending_in_batches,
     normalise_twitter_post,
 )
-from model_budget import ModelDailyBudget  # noqa: E402
+from model_budget import ModelDailyBudget, OcrDailyBudget  # noqa: E402
 
 
 class ModelDailyBudgetTests(unittest.TestCase):
@@ -85,6 +85,22 @@ class ModelDailyBudgetTests(unittest.TestCase):
             self.assertEqual((1, 0), (completed, failed))
             self.assertEqual(1, store.model_queue_summary(daily_limit=1)["not_requested"])
             self.assertEqual(0, ModelDailyBudget(store, daily_limit=1).status()["remaining"])
+
+    def test_ocr_unlimited_mode_keeps_audit_counts_without_remaining_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            budget = OcrDailyBudget(store, daily_limit=1, limit_mode="unlimited")
+
+            for _ in range(3):
+                self.assertTrue(budget.reserve())
+                budget.finish(success=True)
+
+            status = budget.status()
+            self.assertEqual("unlimited", status["limit_mode"])
+            self.assertIsNone(status["daily_limit"])
+            self.assertIsNone(status["remaining"])
+            self.assertEqual(3, status["attempted"])
+            self.assertEqual(3, status["completed"])
 
 
 if __name__ == "__main__":

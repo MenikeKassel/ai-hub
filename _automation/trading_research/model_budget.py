@@ -92,11 +92,14 @@ class ModelDailyBudget:
 
 
 class OcrDailyBudget:
-    """Persistent daily cap for local OCR items, separate from model usage."""
+    """Persistent OCR accounting with an explicit bounded/unlimited mode."""
 
-    def __init__(self, store: Any, *, daily_limit: int = 150):
+    def __init__(self, store: Any, *, daily_limit: int = 150, limit_mode: str = "unlimited"):
         self.store = store
         self.daily_limit = max(1, int(daily_limit))
+        if limit_mode not in {"bounded", "unlimited"}:
+            raise ValueError("limit_mode must be bounded or unlimited")
+        self.limit_mode = limit_mode
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
@@ -105,6 +108,8 @@ class OcrDailyBudget:
                 """
                 CREATE TABLE IF NOT EXISTS ocr_daily_usage(
                     usage_date TEXT PRIMARY KEY,
+                    limit_mode TEXT NOT NULL DEFAULT 'bounded'
+                        CHECK(limit_mode IN ('bounded','unlimited')),
                     daily_limit INTEGER NOT NULL,
                     attempted INTEGER NOT NULL DEFAULT 0,
                     completed INTEGER NOT NULL DEFAULT 0,
@@ -113,6 +118,9 @@ class OcrDailyBudget:
                 );
                 """
             )
+            existing = {row[1] for row in db.execute("PRAGMA table_info(ocr_daily_usage)").fetchall()}
+            if "limit_mode" not in existing:
+                db.execute("ALTER TABLE ocr_daily_usage ADD COLUMN limit_mode TEXT NOT NULL DEFAULT 'bounded'")
 
     @staticmethod
     def usage_date() -> str:
@@ -124,15 +132,22 @@ class OcrDailyBudget:
             row = db.execute("SELECT * FROM ocr_daily_usage WHERE usage_date=?", (usage_date,)).fetchone()
         value = dict(row) if row else {
             "usage_date": usage_date,
+            "limit_mode": self.limit_mode,
             "daily_limit": self.daily_limit,
             "attempted": 0,
             "completed": 0,
             "failed": 0,
             "updated_at": "",
         }
+        # The caller's policy is authoritative for the current run.  This
+        # lets an unlimited run resume a legacy bounded row without first
+        # hitting the old row's remaining counter; reserve() persists the
+        # selected mode on the next attempt.
+        mode = self.limit_mode
+        value["limit_mode"] = mode
         effective_limit = max(1, int(value.get("daily_limit") or self.daily_limit))
-        value["daily_limit"] = effective_limit
-        value["remaining"] = max(0, effective_limit - int(value.get("attempted") or 0))
+        value["daily_limit"] = None if mode == "unlimited" else effective_limit
+        value["remaining"] = None if mode == "unlimited" else max(0, effective_limit - int(value.get("attempted") or 0))
         return value
 
     def reserve(self) -> bool:
@@ -141,13 +156,13 @@ class OcrDailyBudget:
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                "INSERT OR IGNORE INTO ocr_daily_usage(usage_date,daily_limit,updated_at) VALUES(?,?,?)",
-                (usage_date, self.daily_limit, timestamp),
+                "INSERT OR IGNORE INTO ocr_daily_usage(usage_date,limit_mode,daily_limit,updated_at) VALUES(?,?,?,?)",
+                (usage_date, self.limit_mode, self.daily_limit, timestamp),
             )
             cursor = db.execute(
-                "UPDATE ocr_daily_usage SET daily_limit=?,attempted=attempted+1,updated_at=? "
-                "WHERE usage_date=? AND attempted<daily_limit",
-                (self.daily_limit, timestamp, usage_date),
+                "UPDATE ocr_daily_usage SET limit_mode=?,daily_limit=?,attempted=attempted+1,updated_at=? "
+                "WHERE usage_date=? AND (limit_mode='unlimited' OR attempted<daily_limit)",
+                (self.limit_mode, self.daily_limit, timestamp, usage_date),
             )
         return cursor.rowcount == 1
 

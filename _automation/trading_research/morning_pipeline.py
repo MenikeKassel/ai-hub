@@ -96,9 +96,14 @@ class MorningPipeline:
         stages["model_daily_used"] = int(budget_status["attempted"])
         stages["model_daily_remaining"] = int(budget_status["remaining"])
         ocr_budget_status = self.ocr_budget.status()
-        stages["ocr_daily_limit"] = int(ocr_budget_status["daily_limit"])
+        stages["ocr_limit_mode"] = str(ocr_budget_status.get("limit_mode") or "bounded")
+        stages["ocr_daily_limit"] = (
+            None if stages["ocr_limit_mode"] == "unlimited" else int(ocr_budget_status["daily_limit"] or 0)
+        )
         stages["ocr_daily_used"] = int(ocr_budget_status["attempted"])
-        stages["ocr_daily_remaining"] = int(ocr_budget_status["remaining"])
+        stages["ocr_daily_remaining"] = (
+            None if stages["ocr_limit_mode"] == "unlimited" else int(ocr_budget_status["remaining"] or 0)
+        )
         errors: list[str] = []
         try:
             self.drafts.update_morning_run(
@@ -496,7 +501,13 @@ class MorningPipeline:
         stages["model_daily_remaining"] = int(budget_status["remaining"])
         ocr_budget_status = self.ocr_budget.status()
         stages["ocr_daily_used"] = int(ocr_budget_status["attempted"])
-        stages["ocr_daily_remaining"] = int(ocr_budget_status["remaining"])
+        stages["ocr_limit_mode"] = str(ocr_budget_status.get("limit_mode") or "bounded")
+        stages["ocr_daily_limit"] = (
+            None if stages["ocr_limit_mode"] == "unlimited" else int(ocr_budget_status["daily_limit"] or 0)
+        )
+        stages["ocr_daily_remaining"] = (
+            None if stages["ocr_limit_mode"] == "unlimited" else int(ocr_budget_status["remaining"] or 0)
+        )
 
     def _pending_candidates(self) -> list[dict[str, Any]]:
         with self.post_store.connect() as db:

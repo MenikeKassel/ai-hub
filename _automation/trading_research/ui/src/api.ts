@@ -178,10 +178,10 @@ export const api = {
     request<XSessionSlot>(`/api/system/x-sessions/${slotId}`, {
       method: 'PATCH', body: JSON.stringify({ status, reason }),
     }),
-  patchXPolicy: (value: { enabled?: boolean; paused?: boolean; reason?: string }) =>
+  patchXPolicy: (value: { enabled?: boolean; paused?: boolean; limit_mode?: 'bounded' | 'unlimited'; min_interval_seconds?: number; reason?: string }) =>
     request<XSessionPolicy>('/api/system/x-policy', { method: 'PATCH', body: JSON.stringify(value) }),
   publicBackup: () => request<PublicBackupHealth>('/api/system/public-backup'),
-  patchPublicBackup: (value: { enabled?: boolean; paused?: boolean; reason?: string }) =>
+  patchPublicBackup: (value: { enabled?: boolean; paused?: boolean; limit_mode?: 'bounded' | 'unlimited'; min_interval_seconds?: number; reason?: string }) =>
     request<PublicBackupHealth>('/api/system/public-backup', { method: 'PATCH', body: JSON.stringify(value) }),
   saveNitterCredentials: (authToken: string, ct0: string) =>
     request('/api/system/nitter-credentials', {

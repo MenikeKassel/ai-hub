@@ -197,12 +197,16 @@ class XSessionStatusRequest(BaseModel):
 class XCollectionPolicyRequest(BaseModel):
     enabled: bool | None = None
     paused: bool | None = None
+    limit_mode: str | None = Field(default=None, pattern="^(bounded|unlimited)$")
+    min_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
     reason: str = Field(default="", max_length=2000)
 
 
 class PublicBackupPolicyRequest(BaseModel):
     enabled: bool | None = None
     paused: bool | None = None
+    limit_mode: str | None = Field(default=None, pattern="^(bounded|unlimited)$")
+    min_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
     reason: str = Field(default="", max_length=2000)
 
 
@@ -3503,9 +3507,18 @@ def create_app(
 
     @app.patch("/api/system/x-policy")
     def patch_x_policy(body: XCollectionPolicyRequest) -> dict[str, Any]:
-        if body.enabled is None and body.paused is None:
-            raise HTTPException(status_code=422, detail="enabled or paused is required")
-        return x_sessions.set_policy(enabled=body.enabled, paused=body.paused, reason=body.reason)
+        if body.enabled is None and body.paused is None and body.limit_mode is None and body.min_interval_seconds is None:
+            raise HTTPException(status_code=422, detail="policy change is required")
+        try:
+            return x_sessions.set_policy(
+                enabled=body.enabled,
+                paused=body.paused,
+                reason=body.reason,
+                limit_mode=body.limit_mode,
+                min_interval_seconds=body.min_interval_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/system/public-backup")
     def public_backup_status() -> dict[str, Any]:
@@ -3513,9 +3526,18 @@ def create_app(
 
     @app.patch("/api/system/public-backup")
     def patch_public_backup(body: PublicBackupPolicyRequest) -> dict[str, Any]:
-        if body.enabled is None and body.paused is None:
-            raise HTTPException(status_code=422, detail="enabled or paused is required")
-        return public_backup.set_policy(enabled=body.enabled, paused=body.paused, reason=body.reason)
+        if body.enabled is None and body.paused is None and body.limit_mode is None and body.min_interval_seconds is None:
+            raise HTTPException(status_code=422, detail="policy change is required")
+        try:
+            return public_backup.set_policy(
+                enabled=body.enabled,
+                paused=body.paused,
+                reason=body.reason,
+                limit_mode=body.limit_mode,
+                min_interval_seconds=body.min_interval_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/api/system/twitter-credentials")
     def save_twitter_credentials(body: TwitterCredentialRequest) -> dict[str, bool]:
