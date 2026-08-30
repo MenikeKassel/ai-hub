@@ -161,8 +161,8 @@ class OcrDailyBudget:
             )
             cursor = db.execute(
                 "UPDATE ocr_daily_usage SET limit_mode=?,daily_limit=?,attempted=attempted+1,updated_at=? "
-                "WHERE usage_date=? AND (limit_mode='unlimited' OR attempted<daily_limit)",
-                (self.limit_mode, self.daily_limit, timestamp, usage_date),
+                "WHERE usage_date=? AND (?='unlimited' OR attempted<daily_limit)",
+                (self.limit_mode, self.daily_limit, timestamp, usage_date, self.limit_mode),
             )
         return cursor.rowcount == 1
 

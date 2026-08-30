@@ -102,6 +102,20 @@ class ModelDailyBudgetTests(unittest.TestCase):
             self.assertEqual(3, status["attempted"])
             self.assertEqual(3, status["completed"])
 
+    def test_ocr_unlimited_run_can_resume_a_legacy_exhausted_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            bounded = OcrDailyBudget(store, daily_limit=1, limit_mode="bounded")
+            self.assertTrue(bounded.reserve())
+            bounded.finish(success=False)
+
+            unlimited = OcrDailyBudget(store, daily_limit=1, limit_mode="unlimited")
+            self.assertTrue(unlimited.reserve())
+            unlimited.finish(success=True)
+            status = unlimited.status()
+            self.assertEqual("unlimited", status["limit_mode"])
+            self.assertEqual(2, status["attempted"])
+
 
 if __name__ == "__main__":
     unittest.main()
