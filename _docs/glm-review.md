@@ -1,6 +1,6 @@
 # GLM review entrypoint
 
-Review target: ai-hub 3.1.0, local `main` baseline prepared on 2026-08-29.
+Review target: ai-hub 3.2.0, branch `codex/backup-upgrade-20260830` prepared on 2026-08-30.
 
 ## Read in this order
 
@@ -21,6 +21,8 @@ Then inspect the primary implementation areas:
 - `_automation/trading_research/kol_api.py`
 - `_automation/trading_research/morning_pipeline.py`
 - `_automation/trading_research/ui/src/pages/System.tsx`
+- `_automation/trading_research/tests/test_x_multisource.py`
+- `_automation/trading_research/tests/test_kol_backup_upgrade.py`
 
 ## Review objectives
 
@@ -40,6 +42,8 @@ Do not evaluate trading performance or provide investment recommendations.
 - Runtime/private data is absent from Git.
 - Daily market publication is atomic and source-audited; returns and research
   writes remain blocked by policy.
+- X primary and public-backup modes are explicitly unlimited by user choice;
+  the request ledger and real upstream failure handling remain in scope.
 - Confirming a stock lead cannot publish incomplete market data.
 - Existing full post content cannot be replaced by a public/recovery stub.
 - X rate limiting cannot be bypassed by switching sessions or fallback sources.
@@ -53,8 +57,10 @@ Do not evaluate trading performance or provide investment recommendations.
 - The console is consolidated on 8123. Market mode is live through the latest
   completed close (`2026-08-28`); returns/research refresh writes return 409.
 - Published market coverage has 651 complete raw/qfq series; one confirmed
-  admission remains pending and four newly discovered symbols await the next
-  daily publication.
+  admission remains pending and newly discovered symbols remain outside the
+  formal manifest until the next atomic publication.
+- Backup upgrade restores selected audit/media evidence only; old source code,
+  virtual environments, and the incomplete market warehouse are excluded.
 - X slot state and request usage are persisted; unconfigured slots remain
   disabled rather than copying a legacy credential.
 - One X run may become `partial` when the only verified identity reaches its

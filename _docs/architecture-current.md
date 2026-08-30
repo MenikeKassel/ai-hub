@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 returns and research update flags stay disabled. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-08-29. Source version: 3.1.0.
+Status date: 2026-08-30. Source version: 3.2.0.
 
 ## Purpose and boundary
 
@@ -31,6 +31,15 @@ CSV / FreeStockDB 7899 / BaoStock ─> candidate validation ─> market manifest
 FastAPI + built React UI: 127.0.0.1:8123
 Nitter shadow service:    127.0.0.1:9377
 ```
+
+X requests use explicit `limit_mode=unlimited` in the current runtime. The
+ledger, batch lease, and provider failure state remain auditable, while local
+volume and interval gates are disabled by user choice. A real upstream 429 or
+authentication challenge still pauses the source.
+
+OCR also uses an explicit unlimited local policy. It remains durable and
+resumable, commits at most 50 items per batch, and records provider or process
+failures; unlimited mode does not bypass provider-side limits.
 
 ## Source layout
 
@@ -77,8 +86,8 @@ Ignored local state:
   identities rotate.
 - One batch leases one session. A failed batch is not continued on another
   session to bypass platform limits.
-- The global rolling limit is 180 estimated requests per 24 hours; one identity
-  is limited to 90. Increasing session count does not raise the global limit.
+- The current runtime is `limit_mode=unlimited`; legacy numeric limits remain
+  only for bounded-mode compatibility and audit display.
 - Authentication, platform rate limiting, provider errors, and local budget
   deferral are separate states. Queues are resumable.
 - The public FxTwitter adapter is single-post only and cannot replace timeline

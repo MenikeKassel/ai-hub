@@ -8,6 +8,7 @@ current machine.
 - `glm-review.md` — entrypoint and review contract for GLM or another reviewer.
 - `architecture-current.md` — current components, data flow, and invariants.
 - `operations-current.md` — startup, health, tasks, tests, and recovery.
+- `backup-upgrade-20260830.md` — selected backup merge, provenance, and rollback record.
 - `../README.md` — repository purpose and quick start.
 - `../CHANGELOG.md` — versioned behavior changes.
 - `../SECURITY.md` — security and disclosure boundary.

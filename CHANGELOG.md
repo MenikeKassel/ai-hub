@@ -4,6 +4,34 @@ All notable source and operational changes are recorded here. Runtime data,
 credentials, databases, media, and generated reports are deliberately excluded
 from Git.
 
+## 3.2.0 - 2026-08-30
+
+### Added
+
+- Explicit unlimited X primary/public-backup mode with request accounting,
+  batch leases, authentication handling, and real-429 cooling retained.
+- Idempotent `kol-backup-upgrade` and `kol-draft-materialize` maintenance
+  commands for selected backup evidence and saved GLM classifications.
+- Backup-upgrade and multi-source X regression fixtures.
+
+### Changed
+
+- Restored event/audit history and missing media only when the backup path is
+  absent from the current runtime; current content and conflicting files remain
+  authoritative.
+- System API and UI report unlimited mode explicitly instead of displaying fake
+  remaining quotas or hard-coded per-session limits.
+- OCR backlog throughput is explicitly unlimited locally; durable 50-item
+  batching and failure accounting remain active.
+- The scheduled classifier now passes `--ocr-limit 0` to make the unlimited
+  OCR policy explicit; bounded-mode callers remain supported.
+
+### Security
+
+- Unlimited mode intentionally removes local volume and interval safeguards.
+  Authentication failures and upstream 429 responses still stop or cool down
+  the affected source; this mode does not guarantee account safety.
+
 ## 3.1.0 - 2026-08-29
 
 ### Added

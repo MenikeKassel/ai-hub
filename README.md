@@ -2,10 +2,15 @@
 
 Personal AI workspace source repository.
 
-Current source version: **3.1.0**. The KOL research console is consolidated at
+Current source version: **3.2.0**. The KOL research console is consolidated at
 `http://127.0.0.1:8123/#/kols`; daily market data is published atomically
 through the latest completed close (`2026-08-28`). Returns and research writes
 remain disabled.
+
+X primary sessions and the cookie-free public-post fallback are currently in
+explicit `unlimited` mode by user choice. The request ledger remains for audit,
+but there is no local volume or interval safeguard; upstream authentication and
+429 handling still stop the affected source.
 
 For code review, start with:
 
@@ -32,13 +37,18 @@ $env:AI_HUB_HOME = "C:\path\to\ai-hub"   # 示例:指向仓库根,按实际位�
 ```text
 X / Zhihu public evidence
 -> durable local post collection
--> rules / OCR / bounded model classification
+-> rules / OCR (unlimited local queue) / bounded model classification
 -> human review and formal event audit
 -> daily market context and frozen return display
 ```
 
 Hermes capture remains a separate optional workflow. Its real configuration is
 local-only; Git contains `config.example.yaml`.
+
+OCR backlog processing is explicitly unlimited locally by user choice: no daily
+item cap stops the queue. Work remains durable and resumable in 50-item batches,
+with provider/process failures recorded for retry or manual attention. This does
+not bypass provider-side limits.
 
 ## Current v1 Focus
 
@@ -124,8 +134,16 @@ Install the KOL-to-stock and market data tasks:
 & "$env:AI_HUB_HOME\scripts\install-kol-recovery-tasks.ps1"
 ```
 
-Historical mode intentionally does not install market update, return tracking,
-or research recomputation tasks.
+Live mode installs only the 17:50 FreeStockDB validation and 19:30 atomic
+market publication tasks; return tracking and research recomputation remain
+disabled.
+
+Preview the selected backup upgrade with:
+
+```powershell
+python "$env:AI_HUB_HOME\_automation\trading_research\trading_cli.py" kol-backup-upgrade `
+  --source "D:\重装备份\02_C盘项目恢复\aiworkspace\ai-hub"
+```
 
 The console now includes `Stock Leads` and `Market Data`. KOL posts, reviews,
 approved events, returns, and market data stay local and do not enter Notion or

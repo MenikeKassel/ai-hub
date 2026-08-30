@@ -55,7 +55,10 @@ python trading_cli.py kol-method-research-run --pending
 python trading_cli.py kol-post-doctor
 python trading_cli.py kol-post-fetch --backfill 100
 python trading_cli.py kol-post-fetch --as-of 2026-07-13 --notify
-python trading_cli.py kol-post-classify --pending --daily-limit 250 --ocr-limit 150
+python trading_cli.py kol-post-classify --pending --daily-limit 250 --ocr-limit 0
+
+OCR uses the current unlimited local policy (`--ocr-limit 0`); the option is
+kept only for bounded-mode compatibility and audit metadata.
 python trading_cli.py kol-ai-queue-maintain --daily-limit 250 --apply
 python trading_cli.py kol-review-agent-doctor
 python trading_cli.py kol-review-agent-run --mode shadow --max-runtime 25

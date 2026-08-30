@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-08-29.
+Status date: 2026-08-30.
 
 ## Start and inspect
 
@@ -25,7 +25,8 @@ Expected local listeners:
 - 07:20 — X morning collection.
 - 08:05 — Zhihu refresh.
 - 08:45 — review-only morning finalization.
-- 09:15 — bounded OCR/model backlog.
+- 09:15 — OCR backlog (unlimited local queue, 50-item batches) and bounded model
+  classification.
 - 19:00 — X evening collection.
 - 19:20 — Zhihu evening collection.
 - 17:50 — FreeStockDB validation/update (local D: drive).
@@ -36,6 +37,9 @@ research, and performance recomputation tasks remain intentionally disabled.
 After a successful first catch-up the mode is `live` with `as_of` set to the
 latest completed trading day; `returns_update_enabled` and
 `research_update_enabled` remain `false`.
+
+OCR has no local daily quota. Inspect its durable queue status and error fields
+for provider failures; unlimited mode is not a provider-side limit bypass.
 
 ## Health interpretation
 
@@ -70,6 +74,31 @@ python _automation\trading_research\trading_cli.py market-daily-publish `
 The command builds and validates an isolated candidate, then atomically swaps
 the market directory. A failed run leaves the prior data and `as_of` unchanged.
 Regular returns/research refresh calls continue to return HTTP 409 by policy.
+
+## Backup evidence upgrade
+
+Preview or apply only the selected high-value backup material:
+
+```powershell
+python _automation\trading_research\trading_cli.py kol-backup-upgrade `
+  --source "D:\重装备份\02_C盘项目恢复\aiworkspace\ai-hub" `
+  --report _runtime\trading\restore-reports\kol-backup-upgrade.json
+```
+
+The command never merges old source code, virtual environments, private config,
+or the incomplete backup market warehouse. It copies absent media only and
+merges audit logs by canonical JSON hash.
+
+Saved GLM classifications can be made visible to human review without another
+model call:
+
+```powershell
+python _automation\trading_research\trading_cli.py kol-draft-materialize `
+  --model glm-zcode --queue-scope backlog --review-date auto --apply
+```
+
+This creates `ready`/`needs_attention` backlog drafts only; it never approves
+them or creates formal events.
 
 ## Tests
 
