@@ -122,6 +122,7 @@ from market_policy import (
 )
 from model_budget import ModelDailyBudget
 from market_publication import MarketDailyPublisher
+from kol_backup_upgrade import KolBackupUpgrade
 from recommendation_drafts import RecommendationDraftRepository, review_window_utc
 from recommendation_processing import materialize_recommendation_drafts
 from kol_performance import DeepSeekPerformanceInterpreter, KolPerformanceService, build_weekly_message
@@ -1561,6 +1562,27 @@ def kol_post_recovery(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+def kol_backup_upgrade(args: argparse.Namespace) -> None:
+    source = Path(args.source).resolve()
+    if not source.is_dir():
+        raise SystemExit(f"backup source does not exist: {source}")
+    upgrade = KolBackupUpgrade(ROOT, source, backup_root=ROOT.parent / "_kol-repair-backups")
+    report = Path(args.report) if args.report else RUNTIME / "restore-reports" / "kol-backup-upgrade.json"
+    try:
+        payload = upgrade.apply(report_path=report) if args.apply else upgrade.preview()
+    except Exception as exc:
+        payload = {"ok": False, "dry_run": bool(not args.apply), "error": str(exc)[:2000], "source_root": str(source)}
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2) from exc
+    payload["report"] = str(report)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    if not args.apply:
+        report.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def kol_fetch_queue_compact(args: argparse.Namespace) -> None:
     store = _post_store()
     cutoff = datetime.now(SHANGHAI) - timedelta(hours=max(1, args.older_than_hours))
@@ -1977,6 +1999,7 @@ def _run_recommendation_rules_repair(
     post_ids: list[str],
     *,
     review_date: str,
+    queue_scope: str | None = None,
 ) -> dict[str, Any]:
     market = _market_store()
     aliases = _classification_aliases()
@@ -1992,7 +2015,7 @@ def _run_recommendation_rules_repair(
             classifier,
             post_id,
             instruments=market.instrument_map(),
-            queue_scope=_repair_queue_scope(post, review_date),
+            queue_scope=queue_scope or _repair_queue_scope(post, review_date),
             review_date=review_date,
             rules_first=True,
         )
@@ -2190,6 +2213,56 @@ def kol_recommendation_repair(args: argparse.Namespace) -> None:
         result.pop("results", None)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["ok"]:
+        raise SystemExit(2)
+
+
+def kol_draft_materialize(args: argparse.Namespace) -> None:
+    store = _post_store()
+    model_name = str(args.model or "glm-zcode").strip()
+    review_date = date.today().isoformat() if args.review_date in {"", "auto"} else date.fromisoformat(args.review_date).isoformat()
+    queue_scope = str(args.queue_scope or "backlog")
+    with store.connect() as db:
+        rows = db.execute(
+            """
+            SELECT p.post_id
+            FROM posts p JOIN classifications c ON c.post_id=p.post_id
+            WHERE p.review_status='pending' AND c.is_candidate=1
+              AND c.model_name=? AND c.model_status='completed'
+              AND c.draft_generation_status IN ('pending','failed')
+            ORDER BY p.posted_at_utc,p.post_id
+            """,
+            (model_name,),
+        ).fetchall()
+    post_ids = [str(row[0]) for row in rows]
+    if args.limit > 0:
+        post_ids = post_ids[: args.limit]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "dry_run": not bool(args.apply),
+        "model": model_name,
+        "queue_scope": queue_scope,
+        "review_date": review_date,
+        "eligible": len(post_ids),
+        "processed": 0,
+        "counts": {},
+        "drafts_created": 0,
+    }
+    if args.apply and post_ids:
+        result = _run_recommendation_rules_repair(
+            store,
+            post_ids,
+            review_date=review_date,
+            queue_scope=queue_scope,
+        )
+        payload.update({
+            "processed": result["processed"],
+            "counts": result["counts"],
+            "drafts_created": result["counts"].get("drafts_created", 0),
+            "errors": result.get("errors", []),
+        })
+        payload["ok"] = not bool(payload.get("errors"))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not payload["ok"]:
         raise SystemExit(2)
 
 
@@ -5079,6 +5152,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_post_recovery.add_argument("--apply", action="store_true")
     p_post_recovery.set_defaults(func=kol_post_recovery)
 
+    p_backup_upgrade = sub.add_parser(
+        "kol-backup-upgrade",
+        help="preview or apply the selected high-value backup merge",
+    )
+    p_backup_upgrade.add_argument("--source", required=True)
+    p_backup_upgrade.add_argument("--report")
+    p_backup_upgrade.add_argument("--apply", action="store_true")
+    p_backup_upgrade.set_defaults(func=kol_backup_upgrade)
+
+    p_draft_materialize = sub.add_parser(
+        "kol-draft-materialize",
+        help="materialize saved model payloads into the human review queue",
+    )
+    p_draft_materialize.add_argument("--model", default="glm-zcode")
+    p_draft_materialize.add_argument("--queue-scope", choices=["backlog", "morning"], default="backlog")
+    p_draft_materialize.add_argument("--review-date", default="auto")
+    p_draft_materialize.add_argument("--limit", type=int, default=0)
+    p_draft_materialize.add_argument("--apply", action="store_true")
+    p_draft_materialize.set_defaults(func=kol_draft_materialize)
+
     p_queue_compact = sub.add_parser("kol-fetch-queue-compact", help="archive superseded legacy fetch batches")
     p_queue_compact.add_argument("--older-than-hours", type=int, default=48)
     p_queue_compact.set_defaults(func=kol_fetch_queue_compact)
@@ -5157,7 +5250,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_post_classify = sub.add_parser("kol-post-classify", help="classify pending candidate posts")
     p_post_classify.add_argument("--pending", action="store_true")
-    p_post_classify.add_argument("--ocr-limit", type=int, default=50)
+    p_post_classify.add_argument(
+        "--ocr-limit",
+        type=int,
+        default=0,
+        help="legacy bounded-mode OCR daily limit; 0 uses the current unlimited OCR policy",
+    )
     p_post_classify.add_argument("--skip-codex", action="store_true")
     p_post_classify.add_argument("--limit", type=int, default=0, help="0 processes the durable queue until empty")
     p_post_classify.add_argument("--daily-limit", type=int, default=250)

@@ -35,10 +35,12 @@ try {
     try {
         & $python @arguments 1> $stdoutPath 2> $stderrPath
         $exitCode = $LASTEXITCODE
-        $stdout = [string](if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" })
-        $stderr = [string](if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" })
-        if ($stdout.Trim()) { Write-MarketLog $stdout.Trim() }
-        if ($stderr.Trim()) { Write-MarketLog ("stderr: " + $stderr.Trim()) }
+        if (Test-Path -LiteralPath $stdoutPath) { $stdout = Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { $stdout = "" }
+        if (Test-Path -LiteralPath $stderrPath) { $stderr = Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { $stderr = "" }
+        $stdout = [string]$stdout
+        $stderr = [string]$stderr
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-MarketLog $stdout.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-MarketLog ("stderr: " + $stderr.Trim()) }
     } finally {
         Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
     }
