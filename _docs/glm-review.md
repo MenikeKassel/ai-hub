@@ -1,6 +1,6 @@
 # GLM review entrypoint
 
-Review target: ai-hub 3.2.0, branch `codex/backup-upgrade-20260830` prepared on 2026-08-30.
+Review target: ai-hub 3.2.1, branch `codex/backup-upgrade-20260830` prepared on 2026-09-04.
 
 ## Read in this order
 

@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 returns and research update flags stay disabled. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-08-30. Source version: 3.2.0.
+Status date: 2026-09-04. Source version: 3.2.1.
 
 ## Purpose and boundary
 

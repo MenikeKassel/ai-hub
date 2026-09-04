@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
@@ -5154,9 +5155,22 @@ class TwitterCliProvider:
         self._direct_client_slot: int | None = None
         self._direct_user_ids: dict[str, str] = {}
 
+    def _configure_direct_client_environment(self) -> None:
+        """Apply the configured proxy before twitter-cli creates its shared session.
+
+        The guarded session-pool path imports ``TwitterClient`` directly instead
+        of spawning ``twitter.exe``.  twitter-cli reads ``TWITTER_PROXY`` only
+        when its process-wide curl session is first constructed, so passing the
+        proxy solely to the subprocess environment leaves this path attempting
+        an unavailable direct connection.
+        """
+        if self.proxy_url:
+            os.environ["TWITTER_PROXY"] = self.proxy_url
+
     def _direct_client_for_slot(self, slot_id: int) -> Any:
         if self._direct_client is not None and self._direct_client_slot == slot_id:
             return self._direct_client
+        self._configure_direct_client_environment()
         site_packages = Path(
             os.environ.get(
                 "TWITTER_CLI_SITE_PACKAGES",
@@ -5840,8 +5854,22 @@ def download_images(
         if not url.startswith(("https://", "http://")):
             continue
         request = urllib.request.Request(url, headers={"User-Agent": "ai-hub-kol-research/2.0"})
+        host = (urllib.parse.urlparse(url).hostname or "").casefold()
+        proxy_url = os.environ.get("KOL_X_PROXY", "http://127.0.0.1:7897").strip()
+        opener = (
+            urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            )
+            if proxy_url and (host == "twimg.com" or host.endswith(".twimg.com"))
+            else None
+        )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_context = (
+                opener.open(request, timeout=timeout)
+                if opener is not None
+                else urllib.request.urlopen(request, timeout=timeout)
+            )
+            with response_context as response:
                 content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0]
                 if not content_type.startswith("image/"):
                     errors.append(f"{url}: non-image response")

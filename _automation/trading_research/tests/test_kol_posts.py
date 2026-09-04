@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ from kol_posts import (  # noqa: E402
     TwitterProviderError,
     TwitterRateLimitError,
     XSessionManager,
+    download_images,
     FxTwitterPublicPostProvider,
     PublicBackupGate,
     PublicBackupNotFoundError,
@@ -891,6 +893,49 @@ class ProviderAndFetchTests(unittest.TestCase):
         self.assertNotIn("secret-auth", " ".join(calls[0][0]))
         self.assertEqual("secret-auth", calls[0][1]["env"]["TWITTER_AUTH_TOKEN"])
         self.assertEqual("http://127.0.0.1:7897", calls[0][1]["env"]["TWITTER_PROXY"])
+
+    def test_twitter_session_pool_configures_proxy_for_direct_client(self) -> None:
+        provider = TwitterCliProvider(
+            "twitter",
+            proxy_url="http://127.0.0.1:7897",
+            session_manager=object(),
+        )
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TWITTER_PROXY", None)
+            provider._configure_direct_client_environment()
+            self.assertEqual("http://127.0.0.1:7897", os.environ["TWITTER_PROXY"])
+
+    def test_twitter_media_download_uses_x_proxy(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"fixture-image"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = KolPostStore(root / "posts.db", root / "media")
+            initialize_seed_kols(store)
+            post = normalise_twitter_post(tweet_payload(), store.get_kol_by_handle("WwQQ129146"))
+            opener = unittest.mock.MagicMock()
+            opener.open.return_value = FakeResponse()
+            with (
+                patch.dict(os.environ, {"KOL_X_PROXY": "http://127.0.0.1:7897"}),
+                patch("kol_posts.urllib.request.build_opener", return_value=opener) as build_opener,
+            ):
+                saved, errors = download_images(post, root / "media")
+
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(saved))
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertEqual("http://127.0.0.1:7897", proxy_handler.proxies["https"])
 
     def test_daily_fetch_is_idempotent(self) -> None:
         class Provider:

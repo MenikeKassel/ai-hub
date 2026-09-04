@@ -6,9 +6,10 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as clock_time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from filelock import FileLock
 
@@ -72,19 +73,30 @@ def _coverage_end_dates(store: MarketStore) -> tuple[dict[str, str], dict[str, s
 class MarketDailyPublisher:
     """Build and atomically publish a latest-completed daily market snapshot."""
 
-    def __init__(self, market_root: Path, post_store: Any, *, free_stockdb_url: str = "http://127.0.0.1:7899"):
+    def __init__(
+        self,
+        market_root: Path,
+        post_store: Any,
+        *,
+        free_stockdb_url: str = "http://127.0.0.1:7899",
+        now_provider: Callable[[], datetime] | None = None,
+    ):
         self.market_root = Path(market_root)
         self.post_store = post_store
         self.free_stockdb_url = free_stockdb_url
+        self.now_provider = now_provider or (lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
 
     def resolve_target_date(self, requested: str) -> date:
         if requested and requested != "auto":
             return date.fromisoformat(requested)
+        current = self.now_provider().astimezone(ZoneInfo("Asia/Shanghai"))
         provider = BaoStockMarketProvider()
         try:
-            values = provider.fetch_calendar(date.today() - timedelta(days=730), date.today())
+            values = provider.fetch_calendar(current.date() - timedelta(days=730), current.date())
         finally:
             provider.close()
+        if current.time() < clock_time(17, 0):
+            values = [value for value in values if value < current.date()]
         if not values:
             raise RuntimeError("BaoStock returned no completed trading date")
         return max(values)

@@ -2,7 +2,7 @@
 
 Personal AI workspace source repository.
 
-Current source version: **3.2.0**. The KOL research console is consolidated at
+Current source version: **3.2.1**. The KOL research console is consolidated at
 `http://127.0.0.1:8123/#/kols`; daily market data is published atomically
 through the latest completed close (`2026-08-28`). Returns and research writes
 remain disabled.

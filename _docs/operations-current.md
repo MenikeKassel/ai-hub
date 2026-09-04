@@ -90,6 +90,11 @@ The command builds and validates an isolated candidate, then atomically swaps
 the market directory. A failed run leaves the prior data and `as_of` unchanged.
 Regular returns/research refresh calls continue to return HTTP 409 by policy.
 
+The publisher uses the latest completed trading day for `--as-of auto`; before
+17:00 it deliberately excludes the current calendar day. If public fallbacks
+are needed behind the local proxy, set `KOL_MARKET_PROXY` before running the
+task; the scheduled script defaults to `http://127.0.0.1:7897`.
+
 ## Backup evidence upgrade
 
 Preview or apply only the selected high-value backup material:

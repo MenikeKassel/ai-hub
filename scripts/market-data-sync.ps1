@@ -28,6 +28,18 @@ try {
     if (-not (Test-Path -LiteralPath $python)) { throw "Trading Python not found: $python" }
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
+    $marketProxy = if ($env:KOL_MARKET_PROXY) {
+        $env:KOL_MARKET_PROXY
+    } elseif ($env:KOL_X_PROXY) {
+        $env:KOL_X_PROXY
+    } else {
+        "http://127.0.0.1:7897"
+    }
+    if ($marketProxy) {
+        $env:HTTP_PROXY = $marketProxy
+        $env:HTTPS_PROXY = $marketProxy
+        $env:NO_PROXY = "127.0.0.1,localhost"
+    }
     $report = Join-Path $RepoRoot "_runtime\trading\restore-reports\market-daily-publish-task.json"
     $arguments = @($cli, "market-daily-publish", "--as-of", $(if ($AsOf) { $AsOf } else { "auto" }), "--apply", "--report", $report)
     $stdoutPath = Join-Path $logDirectory (".market-sync-" + [guid]::NewGuid().ToString("N") + ".out")

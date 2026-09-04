@@ -4,6 +4,22 @@ All notable source and operational changes are recorded here. Runtime data,
 credentials, databases, media, and generated reports are deliberately excluded
 from Git.
 
+## 3.2.1 - 2026-09-04
+
+### Fixed
+
+- X session-pool requests and `twimg.com` media downloads now honor the
+  configured local proxy, matching the subprocess reader path.
+- Market fallback tasks inherit the configured proxy for AKShare/Eastmoney
+  access while keeping loopback FreeStockDB traffic local.
+- `market-daily-publish --as-of auto` excludes the current trading day before
+  17:00, preventing premature publication during the opening session.
+
+### Compatibility
+
+- API routes, CLI arguments, database schemas, queue semantics, and publication
+  rollback behavior remain unchanged; the version bump is source metadata only.
+
 ## 3.2.0 - 2026-08-30
 
 ### Added

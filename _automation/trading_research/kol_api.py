@@ -555,7 +555,7 @@ def create_app(
             discovery_scorer_error = str(exc)
             logger.warning("Discovery AI scoring is unavailable: %s", exc)
 
-    app = FastAPI(title="KOL Research Console", version="3.0.0")
+    app = FastAPI(title="KOL Research Console", version="3.2.1")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
     app.state.settings = config
     app.state.post_store = post_store
