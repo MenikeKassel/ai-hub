@@ -1,6 +1,8 @@
 ---
 name: hermes-capture
 description: Operate the optional Hermes capture pipeline for explicit capture commands.
+version: 2.0.0
+source: This file is the canonical source (`_skills/hermes-capture`). Installed Hermes copies are deployment output produced by `scripts/install-hermes-capture.ps1`; never edit the installed copy as a second version. Historic installed content referencing E:/F: drive paths, `/wiki`, `/kb-status`, or the terminated second-brain Knowledge OS is obsolete and must not be restored.
 ---
 
 # Hermes Capture

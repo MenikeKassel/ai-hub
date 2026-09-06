@@ -1,6 +1,8 @@
 ---
 name: kol-research-operator
 description: Operate the local KOL research audit console through its deterministic Hermes operator.
+version: 2.0.0
+source: This file is the canonical source (`_skills/kol-research-operator`). Installed Hermes copies are deployment output produced by `scripts/install-hermes-kol-research.ps1`; never edit the installed copy as a second version.
 ---
 
 # KOL Research Operator
@@ -23,6 +25,10 @@ Use only the native `kol_operator` tool. The console is served at
   error. Do not improvise commands or retry repeatedly.
 - Collection is Codex-independent. AI failure does not invalidate saved posts.
 - Never approve or reject without the explicit draft ID and user instruction.
+- A background action returning `triggered` means accepted for background
+  execution, not completed: track it through `status`/`doctor` and verify the
+  final result against the user's completion criteria. If the task can no
+  longer be observed, report the current state and the missing evidence.
 
 ## Start state machine
 
@@ -30,7 +36,11 @@ Use only the native `kol_operator` tool. The console is served at
 2. If `running=true`, report the existing 8123 URL.
 3. If `running=false`, call `start` once.
 4. Report `started` or `already_running` as success.
-5. Report `startup_failed/port_conflict/unhealthy` and stop.
+5. Report `startup_failed/port_conflict/unhealthy` and stop the native
+   operation and any repeated start. Stop here means stopping this operation,
+   not ending the whole request: hand the structured error to
+   `delegate-to-codex` per the boundary rule above, keep the task in an
+   unfinished state, and report that state to the user.
 
 The compact rule is: `status -> running=false: call start once`.
 After a start error, never use `terminal` or `read_file`; use

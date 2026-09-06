@@ -45,7 +45,10 @@ if ($skillContent.Contains("??")) {
 
 New-Item -ItemType Directory -Force -Path $skillTargetDir | Out-Null
 Copy-Item -LiteralPath $skillSource -Destination $skillTarget -Force
-Write-Host "Installed Hermes skill: $skillTarget"
+$srcHash = (Get-FileHash -LiteralPath $skillSource -Algorithm SHA256).Hash
+$tgtHash = (Get-FileHash -LiteralPath $skillTarget -Algorithm SHA256).Hash
+if ($srcHash -ne $tgtHash) { throw "Skill deploy verification failed (hash mismatch): $skillTarget" }
+Write-Host "Installed and verified Hermes skill: $skillTarget"
 
 New-Item -ItemType Directory -Force -Path $pluginTargetDir | Out-Null
 $pluginManifestContent = @"
