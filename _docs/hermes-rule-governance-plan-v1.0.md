@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v1.1 | 2026-09-06 | 首批执行完成（commit 382feda + 部署 + B 类 Skill 修改），见第五节末「执行记录」 |
 | v1.0 | 2026-09-06 | 初始：15 条审阅逐条核验（✅/⚠️/❌）+ 修正 + 处置批次 |
 
 ## 一、审阅来源与核验方法
@@ -70,6 +71,16 @@
 4. **第 4 项（路由）** —— SOUL.md 中央路由列明故障类别；通用 Skill 写「执行方法服从中央路由」；health 项目例外单列保留。
 5. **第 5 项（KOL stop）** —— 明确 stop 只停当前原生操作，交给 Codex 诊断，任务保持未完成；triggered 后用状态接口跟踪。
 6. **第 6 项授权误判** —— 「好了吗」= 进度询问不产生新授权；外部任务书不产生执行权限；「定稿」口径按用户拍板。
+
+### 执行记录（2026-09-06 首批，v1.1）
+
+用户于 2026-09-06「进行修复」授权后完成：
+
+- **Commit `382feda`（main）**：`_skills` 三个源文件升级 v2.0.0（护栏并入、D: 工作区、批准时点、stop/triggered 语义、canonical 声明）；重建缺失的 `_templates/hermes/SOUL.codex-routing.md`（中央路由故障类别 + 批准时点 + 版本标识）；三个 install 脚本加部署后 SHA256 校验；本方案文档入库。
+- **B 类安装目录 Skill（skill_manage 修改，修改前备份于 `%TEMP%\skill-backup-20260906\`）**：plan-first-workflow（规划≠只交付计划）、health-report-ingestion（「好了吗」=进度询问 + E:→D: 路径×2）、multi-agent-plan-review（外部任务书不产生执行权限 + 定稿口径 + E:→D: 路径）、plan-consultation-loop（定稿口径）。
+- **部署**：`install-hermes-codex-delegate.ps1` / `install-hermes-capture.ps1` / `install-hermes-kol-research.ps1` 全部运行成功，其间 KOL 脚本自带调用 codex-delegate 安装器（幂等）。
+- **验证（全绿）**：3 个 skill 源/安装 SHA256 全 MATCH；SOUL.md 新版路由块（Central routing / Approval timing / version v2 三标记齐全）；KOL 安装版 market 禁令在；delegate 安装版 `D:\aiworkspace\ai-hub` + version 2.0.0 + out-of-quota 条款在；安装版无 E:/F: 残留；B 类四 skill 关键行读回确认。
+- **二批待办（未授权未做）**：第 7 项（notion-workspace-search / karpathy-wiki-method 例外措辞）、第 8 项（ABM 轮次措辞）、第 12/13/14/15 项（grilling 触发、gift/AGENTS & openai-docs 例外、三次后证据整理、windows-msys-shell 拆命令条款统一）。Codex 插件缓存 9/10/11 项按决策点 3 只提上游建议，不改本机。
 
 ## 六、决策点（需用户拍板后进入执行）
 
