@@ -1,16 +1,23 @@
 ---
 name: delegate-to-codex
-description: Delegate complex Hermes implementation and diagnosis to the local Codex tool. Use for code changes, debugging and repair, multi-file or batch work, Git work, system integration, and other multi-step tasks that require tools or sustained execution. Do not use for ordinary conversation, simple lookups, or the existing capture commands such as /clip, /idea, /readlater, /auto, /log, /kol, /event, /concept, and /holding.
-version: 2.0.0
+description: Delegate complex implementation and diagnosis to the local Codex tool — only after the user's explicit prior approval. Use for code changes, debugging and repair, multi-file or batch work, Git work, system integration, and other multi-step tasks that require tools or sustained execution. Do not use for ordinary conversation, simple lookups, or the existing capture commands such as /clip, /idea, /readlater, /auto, /log, /kol, /event, /concept, and /holding.
+version: 3.0.0
 source: This file is the canonical source (`_skills/delegate-to-codex`). Installed Hermes copies are deployment output produced by `scripts/install-hermes-codex-delegate.ps1`; never edit the installed copy as a second version, and never copy installed content back into this file.
 ---
 
 # Delegate To Codex
 
-Use only the native `codex_delegate` tool for code changes, debugging, Git,
-multi-file work, automation, and system integration. Hermes remains the
-conversation layer; Codex owns implementation, testing, and reporting.
-Execution method obeys the central routing block in `SOUL.md`
+**User gate (2026-09-13): every Codex delegation requires the user's explicit
+prior approval.** Before asking, prepare: the task, why Codex is needed instead
+of Hermes/direct tools, the expected usage, and the alternative. Only the
+approved scope may run; re-apply when the scope grows. While waiting for
+approval, non-quota preparation (reading, inspecting, drafting) is allowed.
+Complex tasks default to Hermes doing them directly — no automatic delegation.
+
+Once approved, use only the native `codex_delegate` tool for code changes,
+debugging, Git, multi-file work, automation, and system integration. Hermes
+remains the conversation layer; Codex owns implementation, testing, and
+reporting. Execution method obeys the central routing block in `SOUL.md`
 (`<!-- ai-hub:codex-routing -->`); this skill defines the Codex entry, and
 generic skills must not define a second execution entry.
 

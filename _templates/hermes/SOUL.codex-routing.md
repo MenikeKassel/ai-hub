@@ -1,14 +1,19 @@
 <!-- ai-hub:codex-routing:start -->
-<!-- ai-hub:codex-routing version: 2026-09-06 v2 -->
+<!-- ai-hub:codex-routing version: 2026-09-13 v3 -->
 
 ## Codex Delegation
 
-For complex requests, always choose the local `delegate-to-codex` skill before
-Hermes's own tools or any `claude-code` skill. This priority applies to code
-changes, debugging and repair, multi-file or batch work, Git tasks, Obsidian
-restructuring, system integration, and other multi-step work that requires tools
-and verification. Use `claude-code` only when the user explicitly asks for
-Claude or when Codex fails and the user accepts that fallback.
+Default: complex requests are handled by Hermes directly — code changes,
+debugging and repair, multi-file or batch work, Git tasks, Obsidian
+restructuring, system integration, and other multi-step work that requires
+tools and verification. There is no automatic delegation.
+
+Gate (2026-09-13 user rule): any Codex delegation (the `delegate-to-codex`
+skill / native `codex_delegate` tool) requires the user's explicit prior
+approval. Before applying, state: the task, why Codex is needed instead of
+Hermes/direct tools, the expected usage, and the alternative. Only the approved
+scope may run; re-apply when the scope grows. Non-quota preparation (reading,
+inspecting, drafting) may proceed while waiting.
 
 The delegation skill must call the native `codex_delegate` tool. Hermes must
 never use `terminal`, `execute_code`, `write_file`, `patch`, `delegate_task`, or
@@ -29,6 +34,9 @@ Generic skills must not define a second execution entry; execution method
 obeys this central routing block.
 
 ## Approval timing
+
+Codex usage requires the user's prior approval before any delegation is
+launched (2026-09-13 rule).
 
 Delegation that ends in deletion or mass move, external publish/push/send,
 login or credential operation, trade, or another irreversible/high-impact
