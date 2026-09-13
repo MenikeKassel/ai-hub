@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-08-29.
+Status date: 2026-09-11.
 
 ## Start and inspect
 
@@ -26,16 +26,18 @@ Expected local listeners:
 - 08:05 — Zhihu refresh.
 - 08:45 — review-only morning finalization.
 - 09:15 — bounded OCR/model backlog.
+- 17:50 — FreeStockDB validation/update (local D: drive).
 - 19:00 — X evening collection.
 - 19:20 — Zhihu evening collection.
-- 17:50 — FreeStockDB validation/update (local D: drive).
 - 19:30 — atomic daily market publication through BaoStock and fallbacks.
+- After a successful market publication — audited KOL event return update.
+- 23:30 — fallback return update if the publication-triggered run did not occur.
 
-The daily market publisher is the only market write task. Returns, event
-research, and performance recomputation tasks remain intentionally disabled.
+The daily market publisher and KOL return tracker are the scheduled market write tasks. Event
+research and performance recomputation remain manual.
 After a successful first catch-up the mode is `live` with `as_of` set to the
 latest completed trading day; `returns_update_enabled` and
-`research_update_enabled` remain `false`.
+`market_update_enabled` are `true`, while `research_update_enabled` remains `false`.
 
 ## Health interpretation
 
@@ -69,7 +71,30 @@ python _automation\trading_research\trading_cli.py market-daily-publish `
 
 The command builds and validates an isolated candidate, then atomically swaps
 the market directory. A failed run leaves the prior data and `as_of` unchanged.
-Regular returns/research refresh calls continue to return HTTP 409 by policy.
+If a run completed the candidate but failed during the final swap, validate it
+again and promote it without repeating the provider downloads:
+
+```powershell
+python _automation\trading_research\trading_cli.py market-daily-publish `
+  --promote-candidate D:\aiworkspace\ai-hub\_runtime\trading\market-live-candidate-YYYYMMDD-HHMMSS `
+  --apply --report _runtime\trading\restore-reports\market-daily-publish-repair-promote.json
+```
+
+Recovery promotion verifies the manifest digest, all raw/qfq end dates, the
+active symbol set, and the research/board table contents before the swap. The
+PowerShell task wrapper retains child stdout and stderr logs after any failure
+under `_runtime/trading/market-task-logs`, outside the atomically swapped market
+directory so open log handles cannot block publication on Windows.
+
+FreeStockDB uses the vendor Windows v0.3.5 client. Its HTTP responses are
+MessagePack. The update manager stages and verifies both `data` and `data1`,
+removes the vendor `disable` marker before each pass, then swaps both databases
+together. Acceptance requires current smoke symbols, at least 90% market
+cross-section coverage, and a matching external price sample.
+
+Event research refresh remains manual. Return updates run after the daily market
+publication; a return-affecting event amendment is rejected before mutation if
+return updates have been disabled operationally.
 
 ## Tests
 

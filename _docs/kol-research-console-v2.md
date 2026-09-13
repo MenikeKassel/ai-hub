@@ -5,7 +5,8 @@
 - URL: `http://127.0.0.1:8123`
 - Start: `scripts\start-kol-ui.ps1`
 - Daily post task: `KOL_Post_Fetch_Daily`, every day at 19:00
-- Daily return task: `KOL_Return_Tracker_Daily`, weekdays at 20:00
+- Daily return task: `KOL_Return_Tracker_Daily`, triggered after successful
+  market publication with a weekday 23:30 fallback
 - Nitter start task: `KOL_Nitter_Start`, at user logon
 - Nitter URL: `http://127.0.0.1:9377`
 - Post database: `_runtime\trading\kol\posts.db`

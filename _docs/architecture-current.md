@@ -4,10 +4,10 @@ The market boundary is now a daily, atomic publication boundary. BaoStock is
 the primary source; FreeStockDB remains the local supplementary reader and
 Tencent/AKShare are fallbacks for symbols BaoStock cannot serve. Publication
 sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
-returns and research update flags stay disabled. Candidate directories and the
+`returns_update_enabled=true` and `research_update_enabled=false`. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-08-29. Source version: 3.1.0.
+Status date: 2026-09-09. Source version: 3.1.0.
 
 ## Purpose and boundary
 
@@ -64,8 +64,8 @@ Ignored local state:
 
 - `recovery-mode.json` defines `mode=live`, the latest completed close, and
   `publication_mode=atomic_daily`.
-- The guarded daily publisher may write market data; returns and research
-  refresh APIs remain HTTP 409.
+- The guarded daily publisher may write market data. The weekday return tracker
+  runs after publication; event research stays manual.
 - Confirmed leads enter `market_symbol_admissions`; they do not directly change
   formal market coverage.
 - A symbol is published only after raw and qfq daily series both pass the cutoff

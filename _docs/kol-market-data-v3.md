@@ -115,7 +115,8 @@ are preserved.
 
 - `KOL_Post_Fetch_Daily`: 19:00, fetch and transparent rules.
 - `Market_Data_Sync_Daily`: weekdays 19:30.
-- `KOL_Return_Tracker_Daily`: weekdays 20:00.
+- `KOL_Return_Tracker_Daily`: triggered after successful market publication,
+  with a weekday 23:30 fallback.
 - `KOL_Post_Classify_Daily`: 20:20, local OCR first and durable sequential Codex fallback.
 - `Research_Data_Digest_Daily`: 20:40, one normal Feishu summary.
 - `Market_Data_Weekly`: Sunday 10:00.
