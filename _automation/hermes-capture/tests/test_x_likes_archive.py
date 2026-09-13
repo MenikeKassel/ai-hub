@@ -46,28 +46,40 @@ class ArchiveTests(unittest.TestCase):
     def test_full_render_preserves_source_maps_history_and_is_byte_reproducible(self):
         before = [archive.sha256(p) for p in (self.merged, self.bird)]
         report = archive.emit(self.merged, self.bird, self.out, expected_main=1)
-        full = json.loads((self.out / "archive/likes_full.jsonl").read_text(encoding="utf-8"))
-        self.assertEqual(full.pop("_prov"), self.prov)
-        self.assertEqual(full, self.item)
+        full = [json.loads(line) for line in (self.out / "archive/likes_full.jsonl").read_text(encoding="utf-8").splitlines()]
+        snapshot = full[0]
+        self.assertEqual(snapshot.pop("_prov"), self.prov)
+        self.assertEqual(snapshot, self.item)
+        self.assertEqual([record["id"] for record in full], ["123", "456"])
+        self.assertEqual(full[1]["_source"], "birdbear-2025-10")
         history = json.loads((self.out / "archive/likes_extras_birdbear_only.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(history["id"], "456")
         self.assertEqual(history["created_at"], "2026-09-13 01:00:00 +08:00")
         self.assertEqual(history["media"][0]["original"], "https://example.com/b.jpg")
         self.assertEqual(history["_source"], "birdbear-2025-10")
         self.assertTrue(report["ok"])
-        self.assertEqual(report["monthly_sections"], 1)
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["snapshot_total"], 1)
+        self.assertEqual(report["historical_total"], 1)
+        self.assertEqual(report["monthly_sections"], 2)
+        self.assertTrue(report["checks"]["historical_in_main"])
         monthly = (self.out / "vault-staging/全文/2026-09.md").read_text(encoding="utf-8")
         self.assertIn(r"> \#\# fake heading", monthly)
         self.assertNotIn('<a id="bad">', monthly)
-        self.assertNotIn("history", monthly)
+        self.assertIn("> history", monthly)
+        self.assertIn("historical_birdbear_only", monthly)
         self.assertIn("staging_only: true", monthly)
         import csv
         with (self.out / "vault-staging/索引.csv").open(encoding="utf-8", newline="") as handle:
             rows = list(csv.reader(handle))
-        self.assertEqual(rows[1][2], self.item["name"])
-        self.assertEqual(rows[1][7], "0")  # animated GIF is not counted as video
-        self.assertEqual(rows[1][10], "")
-        self.assertNotIn("\n", rows[1][5])
+        self.assertEqual(len(rows), 3)
+        snapshot_row = next(row for row in rows[1:] if row[3] == "@test_user")
+        history_row = next(row for row in rows[1:] if row[3] == "@old")
+        self.assertEqual(snapshot_row[2], self.item["name"])
+        self.assertEqual(snapshot_row[7], "0")  # animated GIF is not counted as video
+        self.assertEqual(snapshot_row[10], "")
+        self.assertNotIn("\n", snapshot_row[5])
+        self.assertEqual(history_row[11], "historical_birdbear_only")
         hashes = {p.relative_to(self.out): archive.sha256(p) for p in self.out.rglob("*") if p.is_file()}
         archive.emit(self.merged, self.bird, self.out, expected_main=1)
         self.assertEqual(hashes, {p.relative_to(self.out): archive.sha256(p) for p in self.out.rglob("*") if p.is_file()})

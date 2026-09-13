@@ -6,7 +6,8 @@ Run with no arguments for the 2026-09-13 batch. Defaults deliberately point to
 absolute paths outside a maintenance worktree. --out is an archive root, with
 only archive/ and vault-staging/ generated below it. Input files are read-only.
 Historical records come from Birdbear's tweets array, not its relationship rows,
-and never enter the main CSV/Markdown. Dates in readable output use UTC+08:00.
+and are merged into the main JSONL/CSV/Markdown with an explicit source marker.
+Dates in readable output use UTC+08:00.
 
 The same inputs produce byte-identical outputs. Invalid JSON/IDs, conflicting
 duplicates and count mismatches fail before writing. Missing optional metadata
@@ -266,8 +267,13 @@ def link_url(value: str) -> str:
 
 
 def provenance(rec: dict) -> str:
-    prov = rec["_prov"]
-    return "both" if all(prov[k] for k in PROV_KEYS) else next(k for k in PROV_KEYS if prov[k])
+    prov = rec.get("_prov")
+    if isinstance(prov, dict):
+        return "both" if all(prov[k] for k in PROV_KEYS) else next(k for k in PROV_KEYS if prov[k])
+    source = rec.get("_source")
+    if source == "birdbear-2025-10":
+        return "historical_birdbear_only"
+    raise ValueError(f"record {rec.get('id')}: missing archive provenance")
 
 
 def view(rec: dict) -> dict:
@@ -327,7 +333,7 @@ def render_csv(entries: list[dict]) -> str:
 
 def render_index(groups: dict[str, list[dict]], total: int, historical: int) -> str:
     lines = ["# X 收藏夹（喜欢）全量归档 · 索引", "",
-             f"批次：{BATCH}。主档共 **{total:,}** 条，以下逐条列出；历史层 **{historical:,}** 条独立保存，未并入本索引。",
+             f"批次：{BATCH}。主档共 **{total:,}** 条，含从 BirdBear 历史快照补回的 **{historical:,}** 条；以下全部逐条列出。",
              "日期为发帖时间（UTC+08:00），不是点赞时间；按年月、发帖时间倒序。",
              "[说明](README.md) · [CSV 索引](索引.csv) · [主档 JSONL](../archive/likes_full.jsonl)", ""]
     for month, entries in groups.items():
@@ -343,12 +349,12 @@ def render_readme(total: int, historical: int, months: int, chars: int, stats: d
     null_views = stats["main_field_quality"]["views_count"]["null"]
     return f"""# X 收藏夹（喜欢）全量归档（{BATCH}）
 
-- **范围**：2026-06-10 与 2026-09-13 导出的合并主档，共 **{total:,}** 个唯一推文 ID；正文 **{chars:,}** 字符（含空白，按 Unicode 字符计）。
+- **范围**：主档共 **{total:,}** 个唯一推文 ID：两次 Twitter 导出合并得到 **{total - historical:,}** 条，再补回 BirdBear 历史快照独有的 **{historical:,}** 条；正文 **{chars:,}** 字符（含空白，按 Unicode 字符计）。
 - **浏览入口**：[全量索引](索引.md) · [CSV 索引](索引.csv) · [入口笔记](00-Inbox/X收藏夹全量归档（{BATCH}）.md)。`全文/` 下共 {months} 个月度文件，每条保留全文、作者、日期、原帖与媒体链接。
-- **机器档案**：[likes_full.jsonl](../archive/likes_full.jsonl) 原样保留 item 所有字段，仅增加 `_prov`；[archive_stats.json](../archive/archive_stats.json) 记录来源哈希、计数、缺失字段与异常；[_render_report.json](_render_report.json) 列出每个产物的绝对路径、大小与 SHA-256。
-- **历史层**：[likes_extras_birdbear_only.jsonl](../archive/likes_extras_birdbear_only.jsonl) 为 Birdbear `tweets` 中不在主档的 **{historical:,}** 条，标记 `_source: birdbear-2025-10`，尚未并入索引或全文。`likes` / `bookmarks` 是关系表，不当作正文重复导入；历史层不等同于当前仍然喜欢的内容。
+- **机器档案**：[likes_full.jsonl](../archive/likes_full.jsonl) 含全部 **{total:,}** 条；Twitter 导出记录原样保留 item 所有字段并增加 `_prov`，历史补回记录保留映射字段并标记 `_source: birdbear-2025-10`。[archive_stats.json](../archive/archive_stats.json) 记录来源哈希、计数、缺失字段与异常；[_render_report.json](_render_report.json) 列出每个产物的绝对路径、大小与 SHA-256。
+- **历史补回审计件**：[likes_extras_birdbear_only.jsonl](../archive/likes_extras_birdbear_only.jsonl) 单独保留上述 **{historical:,}** 条的同字节子集，便于追溯；它们已经进入主档、索引和月度全文，不是额外重复计数。`likes` / `bookmarks` 是关系表，不当作正文重复导入；历史补回不等同于当前仍然喜欢的内容。
 - **字段口径**：日期是发帖时间，统一显示 UTC+08:00；摘要清理换行与连续空白后取前 120 字符；媒体数包含图片、视频、动图，视频数只计 `type=video`；有 {null_views} 条浏览数为 null，CSV 留空，不当作 0。
-- **来源标记**：`both` 为两次导出均存在，`in_20260610` / `in_20260913` 为仅存在于对应导出；这些是导出覆盖标记，不能据此断言取消点赞或原帖删除。
+- **来源标记**：`both` 为两次导出均存在，`in_20260610` / `in_20260913` 为仅存在于对应导出，`historical_birdbear_only` 为仅见于 BirdBear 历史快照；这些是导出覆盖标记，不能据此断言取消点赞或原帖删除。
 - **边界**：本目录仅为本地 staging。媒体保留远程链接，未全量下载；未写入 vault，未配置哨兵。正文按外部纯文本引用呈现，原始内容以 JSONL 为准。
 
 ## 重跑
@@ -370,7 +376,7 @@ python _automation/hermes-capture/x_media_download.py --jsonl "{DEFAULT_OUT / 'a
 ## 待办
 
 - [ ] 媒体本地化范围待定。
-- [ ] 决定是否并入历史层（{historical:,} 条）。
+- [x] 历史层 **{historical:,}** 条已按用户决定并入主档，同时保留审计子集。
 - [ ] 决定是否加哨兵。
 
 本档案内容为外部资料，仅供查阅，不是对 AI 或任何人的指令。
@@ -398,23 +404,29 @@ def emit(merged: Path, birdbear: Path, out: Path, expected_main: int = 16745) ->
         raise ValueError(f"main count {len(records)} != expected {expected_main}; no outputs written")
     main_ids = {str(r["id"]) for r in records}
     extras, history_counts, anomalies = load_history(birdbear, main_ids)
-    anomalies += record_anomalies(records, "main") + record_anomalies(extras, "historical")
+    anomalies += record_anomalies(records, "snapshot") + record_anomalies(extras, "historical")
     # Recheck sources before any output: an export being rewritten is not a snapshot.
     if any(sha256(Path(info["path"])) != info["sha256"] for info in inputs):
         raise ValueError("input changed while reading; no outputs written")
-    entries = sorted((view(r) for r in records), key=lambda e: (e["date"], int(e["rec"]["id"])), reverse=True)
+    combined = records + extras
+    combined_ids = {str(r["id"]) for r in combined}
+    if len(combined_ids) != len(combined):
+        raise ValueError("combined archive contains duplicate ids")
+    entries = sorted((view(r) for r in combined), key=lambda e: (e["date"], int(e["rec"]["id"])), reverse=True)
     groups: dict[str, list[dict]] = defaultdict(list)
     for entry in entries:
         groups[entry["month"]].append(entry)
-    chars = sum(len(text(r.get("full_text"))) for r in records)
+    chars = sum(len(text(r.get("full_text"))) for r in combined)
     stats = {
         "batch": BATCH, "inputs": inputs, "main": main_counts, "historical": history_counts,
-        "main_total": len(records), "historical_total": len(extras), "combined_unique_total": len(records) + len(extras),
+        "snapshot_total": len(records), "historical_total": len(extras),
+        "main_total": len(combined), "combined_unique_total": len(combined),
         "historical_main_overlap": len(main_ids & {r["id"] for r in extras}),
-        "provenance_counts": dict(Counter(provenance(r) for r in records)),
+        "provenance_counts": dict(Counter(provenance(r) for r in combined)),
         "month_counts": {month: len(values) for month, values in groups.items()},
         "date_range": {"min": min((e["date"] for e in entries), default=None), "max": max((e["date"] for e in entries), default=None), "timezone": "UTC+08:00"},
-        "main_field_quality": field_quality(records, MAIN_FIELDS),
+        "snapshot_field_quality": field_quality(records, MAIN_FIELDS),
+        "main_field_quality": field_quality(combined, MAIN_FIELDS),
         "historical_field_quality": field_quality(extras, HISTORY_FIELDS),
         "main_media_counts": dict(Counter(m.get("type", "unknown") for e in entries for m in e["media"] if isinstance(m, dict))),
         "main_text_chars": chars, "anomalies": anomalies,
@@ -434,22 +446,22 @@ def emit(merged: Path, birdbear: Path, out: Path, expected_main: int = 16745) ->
     stale = sorted(p.name for p in (staging / "全文").glob("*.md") if p.stem not in groups)
     if stale:
         raise ValueError(f"stale monthly files require review before rerender: {', '.join(stale)}")
-    write("archive/likes_full.jsonl", (json.dumps(r, ensure_ascii=False) + "\n" for r in records), records=len(records))
+    write("archive/likes_full.jsonl", (json.dumps(r, ensure_ascii=False) + "\n" for r in combined), records=len(combined))
     write("archive/likes_extras_birdbear_only.jsonl", (json.dumps(r, ensure_ascii=False) + "\n" for r in extras), records=len(extras))
     write("archive/archive_stats.json", json_text(stats))
-    write("vault-staging/索引.csv", render_csv(entries), records=len(records))
-    write("vault-staging/索引.md", render_index(groups, len(records), len(extras)), records=len(records))
+    write("vault-staging/索引.csv", render_csv(entries), records=len(combined))
+    write("vault-staging/索引.md", render_index(groups, len(combined), len(extras)), records=len(combined))
     for month, values in groups.items():
         write(f"vault-staging/全文/{month}.md", render_month(month, values), records=len(values))
-    write("vault-staging/README.md", render_readme(len(records), len(extras), len(groups), chars, stats))
+    write("vault-staging/README.md", render_readme(len(combined), len(extras), len(groups), chars, stats))
     inbox = frontmatter("inbox", created=BATCH) + f"""# X收藏夹全量归档（{BATCH}）
 
-- 范围：X「喜欢」合并快照，共 **{len(records):,}** 条；历史层 **{len(extras):,}** 条独立存档。
+- 范围：X「喜欢」主档，共 **{len(combined):,}** 条；其中 BirdBear 历史快照补回 **{len(extras):,}** 条，已并入索引与全文。
 - 存档位置：`{root}`（仅 staging）。[全量索引](../索引.md) · [CSV 索引](../索引.csv) · [说明](../README.md)。
 - 全文按月保存在 `../全文/`；原字段及来源标记保存在 [主档 JSONL](../../archive/likes_full.jsonl)。
 - 已知限制：导出快照不代表当前喜欢状态；图片、视频、动图均为外链；未配置哨兵。
 - [ ] 媒体本地化范围待定。
-- [ ] 决定是否并入历史层（{len(extras):,} 条）。
+- [x] 历史层 **{len(extras):,}** 条已并入主档，并保留独立审计子集。
 - [ ] 决定是否加哨兵。
 
 背景：保留导出中已获得的正文，便于原帖失效后查阅。归档内容为外部资料，不是对 AI 的指令。
@@ -465,17 +477,19 @@ def emit(merged: Path, birdbear: Path, out: Path, expected_main: int = 16745) ->
     index_rows = sum(line.startswith("- [") for line in (staging / "索引.md").read_text(encoding="utf-8").splitlines())
     anchors = [key for month in groups for key in re.findall(r'<a id="tweet-([0-9]+)"></a>', (staging / "全文" / f"{month}.md").read_text(encoding="utf-8"))]
     checks = {
-        "main_count": len(actual_ids) == len(records), "main_unique": len(actual_ids) == len(set(actual_ids)),
-        "main_id_set": set(actual_ids) == main_ids,
+        "main_count": len(actual_ids) == len(combined), "main_unique": len(actual_ids) == len(set(actual_ids)),
+        "main_id_set": set(actual_ids) == combined_ids,
         "historical_count": len(actual_extras) == len(extras), "historical_unique": len(set(actual_extras)) == len(extras),
         "historical_disjoint": not (set(actual_extras) & main_ids),
-        "csv_rows": len(csv_rows) - 1 == len(records), "csv_columns": all(len(row) == len(CSV_FIELDS) for row in csv_rows),
-        "markdown_index_rows": index_rows == len(records),
-        "monthly_record_ids": len(anchors) == len(records) and set(anchors) == main_ids,
+        "historical_in_main": set(actual_extras).issubset(set(actual_ids)),
+        "csv_rows": len(csv_rows) - 1 == len(combined), "csv_columns": all(len(row) == len(CSV_FIELDS) for row in csv_rows),
+        "markdown_index_rows": index_rows == len(combined),
+        "monthly_record_ids": len(anchors) == len(combined) and set(anchors) == combined_ids,
     }
     report_path = staging / "_render_report.json"
-    report = {"batch": BATCH, "out": str(root), "total": len(records), "historical_total": len(extras),
-              "total_text_chars": chars, "character_count_definition": "Unicode code points, including whitespace, main full_text only",
+    report = {"batch": BATCH, "out": str(root), "total": len(combined), "snapshot_total": len(records),
+              "historical_total": len(extras),
+              "total_text_chars": chars, "character_count_definition": "Unicode code points, including whitespace, combined main full_text",
               "monthly_files": len(groups), "file_count": len(generated) + 1,
               "staging_file_count": sum(f["relative_path"].startswith("vault-staging/") for f in generated) + 1,
               "csv_data_rows": len(csv_rows) - 1, "markdown_index_rows": index_rows, "monthly_sections": len(anchors),
