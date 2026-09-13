@@ -28,6 +28,39 @@ def read_refresh_state(runtime_root: Path) -> dict[str, Any]:
         return {"status": "idle", "symbols": [], "error": ""}
 
 
+def reconcile_refresh_state(
+    state: dict[str, Any], market_health: dict[str, Any]
+) -> dict[str, Any]:
+    """Hide a failed refresh after a newer formal market snapshot replaced it."""
+    if state.get("status") != "failed":
+        return state
+    refresh_as_of = str(state.get("as_of") or "")
+    published_as_of = str(
+        market_health.get("published_as_of")
+        or market_health.get("latest_daily_date")
+        or market_health.get("as_of")
+        or ""
+    )
+    market_status = str(
+        market_health.get("market_status")
+        or market_health.get("daily_data_status")
+        or ""
+    )
+    if (
+        refresh_as_of
+        and published_as_of >= refresh_as_of
+        and market_status == "current"
+    ):
+        return {
+            **state,
+            "status": "superseded",
+            "reason": "newer_market_published",
+            "legacy_state": "failed",
+            "superseded_by": published_as_of,
+        }
+    return state
+
+
 def run_post_approval_refresh(
     runtime_root: Path,
     repo_root: Path,

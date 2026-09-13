@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -322,6 +323,49 @@ class RecommendationDraftRepositoryTests(unittest.TestCase):
             self.assertEqual(11, result["successful_kols"])
             self.assertEqual(1, result["failed_kols"])
             self.assertAlmostEqual(11 / 12, result["coverage"])
+
+    def test_legacy_platform_snapshots_are_merged_without_mixing_phase_aggregates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            repository = RecommendationDraftRepository(store)
+            with store.connect() as db:
+                db.executemany(
+                    """
+                    INSERT INTO morning_runs(
+                        run_id,review_date,window_start,window_end,started_at,completed_at,status,phase,
+                        active_kols,successful_kols,failed_kols,platform_breakdown_json,errors_json
+                    ) VALUES(?,?,?,?,?,?,'completed',?,?,?,?,?,?)
+                    """,
+                    [
+                        (
+                            "x-phase", "2026-07-17", "", "", "2026-07-17T07:20:00+08:00",
+                            "2026-07-17T07:30:00+08:00", "initial", 28, 28, 0,
+                            json.dumps({"x": {"target": 28, "success": 28, "failed": 0}}), "[]",
+                        ),
+                        (
+                            "zhihu-phase", "2026-07-17", "", "", "2026-07-17T08:05:00+08:00",
+                            "2026-07-17T08:10:00+08:00", "initial", 32, 32, 0,
+                            json.dumps({"zhihu": {"target": 32, "success": 32, "failed": 0}}), "[]",
+                        ),
+                        (
+                            "final", "2026-07-17", "", "", "2026-07-17T08:45:00+08:00",
+                            "2026-07-17T08:50:00+08:00", "final", 60, 0, 0, "{}",
+                            json.dumps(["AI provider unavailable"]),
+                        ),
+                    ],
+                )
+
+            result = repository.morning_delivery(
+                "2026-07-17",
+                now=datetime(2026, 7, 17, 8, 55, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+
+            self.assertEqual("degraded", result["status"])
+            self.assertEqual(60, result["active_kols"])
+            self.assertEqual(60, result["successful_kols"])
+            self.assertEqual(1.0, result["coverage"])
+            self.assertEqual({"x", "zhihu"}, set(result["platform_breakdown"]))
+            self.assertEqual("zhihu-phase,x-phase", result["coverage_source"])
 
     def test_pending_delivery_exposes_latest_pipeline_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,22 +3,118 @@ import type {
   QueueStatus,
 } from './types'
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }))
-    const detail = Array.isArray(body.detail)
-      ? body.detail.map((item: { msg?: string }) => item.msg || response.statusText).join('；')
-      : body.detail
-    throw new Error(detail || response.statusText)
+import { ApiError, request } from './http'
+import type { ReviewQueuePage, ReviewDetail, ReviewView, QueueScope } from './features/reviews/types'
+
+function isReviewQueuePage(value: unknown): value is ReviewQueuePage {
+  return Boolean(value && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items) &&
+    (value as { counts?: unknown }).counts && typeof (value as { counts?: unknown }).counts === 'object')
+}
+
+function legacyReviewQueue(value: MorningReview, params: URLSearchParams): ReviewQueuePage {
+  const scope: QueueScope = params.get('scope') === 'backlog' ? 'backlog' : 'morning'
+  const view = (params.get('view') || 'pending') as ReviewView
+  const posts = Array.isArray(value.posts) ? value.posts : []
+  const drafts = [...(value.drafts || []), ...(value.approved_drafts || [])]
+  const counts: Record<ReviewView, number> = {
+    new: value.summary?.new_posts ?? posts.length,
+    processed: value.summary?.ai_processed ?? posts.filter((post) => post.model_status === 'completed').length,
+    pending: value.summary?.waiting_review ?? drafts.filter((draft) => draft.status === 'ready' || draft.status === 'needs_attention').length,
+    failed: value.summary?.ai_failed ?? posts.filter((post) => post.model_status === 'failed').length,
+    approved: value.summary?.approved_today ?? drafts.filter((draft) => draft.status === 'approved').length,
   }
-  return response.json() as Promise<T>
+  const filtered = posts.filter((post) => {
+    if (view === 'failed') return post.model_status === 'failed'
+    if (view === 'processed') return post.model_status === 'completed'
+    if (view === 'approved') return drafts.some((draft) => draft.post_id === post.post_id && draft.status === 'approved')
+    if (view === 'pending') return drafts.some((draft) => draft.post_id === post.post_id && (draft.status === 'ready' || draft.status === 'needs_attention'))
+    return true
+  })
+  const rows = filtered.map((post) => {
+    const postDrafts = drafts.filter((draft) => draft.post_id === post.post_id)
+    const attention = postDrafts.filter((draft) => draft.status === 'needs_attention')
+    return {
+      post_id: post.post_id,
+      posted_at: post.posted_at,
+      platform: post.platform || '',
+      handle: post.handle,
+      display_name: post.display_name,
+      excerpt: (post.text || '').slice(0, 180),
+      model_status: post.model_status || '',
+      draft_count: postDrafts.length,
+      attention_count: attention.length,
+      failure_kind: post.model_status === 'failed' ? 'model' : '',
+    }
+  })
+  // Legacy morning-review payloads may carry approved drafts after the
+  // corresponding post has fallen out of the current post window. Keep those
+  // drafts visible so the approved queue remains complete.
+  if (view === 'approved') {
+    for (const draft of drafts.filter((item) => item.status === 'approved')) {
+      if (rows.some((row) => row.post_id === draft.post_id)) continue
+      rows.push({
+        post_id: draft.post_id,
+        posted_at: draft.posted_at,
+        platform: draft.platform || '',
+        handle: draft.handle,
+        display_name: draft.display_name,
+        excerpt: (draft.text || draft.thesis || '').slice(0, 180),
+        model_status: 'completed',
+        draft_count: 1,
+        attention_count: 0,
+        failure_kind: '',
+      })
+    }
+  }
+  return {
+    review_date: value.review_date,
+    scope,
+    view,
+    page: Number(params.get('page')) || 1,
+    page_size: Number(params.get('page_size')) || 50,
+    total_posts: rows.length,
+    total_drafts: drafts.length,
+    has_more: false,
+    counts,
+    items: rows,
+    delivery: value.delivery,
+  }
 }
 
 export const api = {
+  reviewQueue: async (params: URLSearchParams, signal?: AbortSignal) => {
+    let compact: unknown = null
+    try {
+      compact = await request<unknown>(`/api/review-queue?${params}`, { signal })
+    } catch (error) {
+      const legacySpaFallback = error instanceof SyntaxError
+      const missingCompactApi = error instanceof ApiError && error.status === 404
+      if (!legacySpaFallback && !missingCompactApi) throw error
+    }
+    if (isReviewQueuePage(compact)) return compact
+    return legacyReviewQueue(await request<MorningReview>(
+      `/api/morning-review?review_date=${encodeURIComponent(params.get('review_date') || '')}&include_history=true&history_page=${params.get('page') || '1'}`,
+      { signal },
+    ), params)
+  },
+  reviewQueueDetail: async (id: string, signal?: AbortSignal, reviewDate = '') => {
+    let compact: unknown = null
+    try {
+      compact = await request<unknown>(`/api/review-queue/${encodeURIComponent(id)}`, { signal })
+    } catch (error) {
+      const legacySpaFallback = error instanceof SyntaxError
+      const missingCompactApi = error instanceof ApiError && error.status === 404
+      if (!legacySpaFallback && !missingCompactApi) throw error
+    }
+    if (compact && typeof compact === 'object' && 'post' in compact && 'drafts' in compact) return compact as ReviewDetail
+    const legacy = await request<MorningReview>(
+      `/api/morning-review?review_date=${encodeURIComponent(reviewDate)}&include_history=true&history_page=1`,
+      { signal },
+    )
+    const post = (legacy.posts || []).find((item) => item.post_id === id)
+    const drafts = [...(legacy.drafts || []), ...(legacy.approved_drafts || [])].filter((item) => item.post_id === id)
+    return { post: post as ReviewDetail['post'], drafts }
+  },
   summary: () => request<Summary>('/api/summary'),
   kols: () => request<Kol[]>('/api/kols'),
   digestAuthors: () => request<DigestAuthor[]>('/api/digest-authors'),

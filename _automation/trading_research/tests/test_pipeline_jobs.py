@@ -10,10 +10,46 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline_jobs import read_refresh_state, run_post_approval_refresh  # noqa: E402
+from pipeline_jobs import (  # noqa: E402
+    read_refresh_state,
+    reconcile_refresh_state,
+    run_post_approval_refresh,
+)
 
 
 class PipelineJobTests(unittest.TestCase):
+    def test_failed_refresh_is_superseded_by_newer_current_publication(self) -> None:
+        state = {
+            "status": "failed",
+            "as_of": "2026-08-29",
+            "error": "market sync failed",
+        }
+
+        result = reconcile_refresh_state(
+            state,
+            {
+                "market_status": "current",
+                "published_as_of": "2026-09-08",
+            },
+        )
+
+        self.assertEqual("superseded", result["status"])
+        self.assertEqual("failed", result["legacy_state"])
+        self.assertEqual("2026-09-08", result["superseded_by"])
+
+    def test_failed_refresh_remains_failed_while_market_is_stale(self) -> None:
+        state = {"status": "failed", "as_of": "2026-09-08"}
+
+        result = reconcile_refresh_state(
+            state,
+            {
+                "market_status": "stale",
+                "published_as_of": "2026-09-08",
+            },
+        )
+
+        self.assertIs(state, result)
+
     def test_approval_refresh_runs_market_before_returns_and_records_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

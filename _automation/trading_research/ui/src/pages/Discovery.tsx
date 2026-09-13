@@ -33,17 +33,7 @@ type Candidate = {
   last_seen_at: string
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(body.detail || response.statusText)
-  }
-  return response.json() as Promise<T>
-}
+import { request } from '../http'
 
 export default function Discovery() {
   const queryClient = useQueryClient()

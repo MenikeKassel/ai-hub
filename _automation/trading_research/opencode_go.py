@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -11,6 +12,16 @@ OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 OPENCODE_GO_API_URL = f"{OPENCODE_GO_BASE_URL}/chat/completions"
 OPENCODE_GO_MODEL = "deepseek-v4-flash"
 _ENV_REFERENCE = re.compile(r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def opencode_go_headers(api_key: str, session_key: str) -> dict[str, str]:
+    """Build the identity and stable conversation headers required by Go."""
+    digest = hashlib.sha256(str(session_key).encode("utf-8")).hexdigest()[:32]
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "ai-hub-kol-research/4.0",
+        "x-opencode-session": f"ai-hub-{digest}",
+    }
 
 
 def default_opencode_config_path(environ: Mapping[str, str] | None = None) -> Path:

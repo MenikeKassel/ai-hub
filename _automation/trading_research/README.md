@@ -161,7 +161,8 @@ The generated local report is
 `_runtime\trading\kol\reports\KOL推荐收益看板.md`. The tracker does not write
 Obsidian or rewrite the historical manual `KOL推荐事件表.md`.
 
-Install the weekday 20:00 task and dedicated environment from PowerShell:
+Install the weekday 23:30 fallback task and dedicated environment from PowerShell.
+Successful market publication triggers the return task immediately:
 
 ```powershell
 & 'D:\aiworkspace\ai-hub\scripts\install-kol-tracker.ps1'
@@ -307,21 +308,21 @@ drafts from being published.
 
 Market runtime data lives under `_runtime\trading\market`: immutable raw
 snapshots, normalized Parquet, DuckDB catalog/coverage, manifests, and quality
-audits. BaoStock is the normal daily provider and AKShare is the first fallback.
+audits. BaoStock is the normal daily provider; FreeStockDB, Tencent, and AKShare
+are fallbacks.
 The local FreeStockDB service is fixed at
 `D:\aiworkspace\freestock\stockdb` and `http://127.0.0.1:7899`. It is a
-loopback-only historical read source. The runtime manager starts `stockdb.exe`
-with that directory as its working directory and validates the manifest,
-catalog, data path, listener and smoke symbols. Automatic FreeStockDB updates,
-daily market synchronization and return/research recomputation are disabled in
-historical mode.
+loopback-only read source running the vendor v0.3.5 Windows client. Its API uses
+MessagePack. The runtime manager validates the binaries, listener ownership,
+catalog, current smoke symbols, and cross-section coverage. Updates stage and
+atomically swap both vendor databases (`data` and `data1`) while retaining the
+previous generation for rollback.
 
-The published market manifest is frozen at `2026-08-25`. Confirmed KOL stock
-leads enter the SQLite admission queue; they do not change DuckDB lifecycle or
-coverage. `market-symbol-admissions reconcile` prepares a candidate, accepts a
-symbol only when raw and qfq history are both complete through the cutoff, and
-atomically publishes the verified manifest. Normal market write APIs return
-HTTP 409. Minute snapshots remain separate under `warehouse\minute_<frequency>`
+The published market manifest advances to the latest completed trading day.
+Confirmed KOL stock leads enter the SQLite admission queue; a symbol is
+published only when raw and qfq history are both complete through the cutoff.
+Daily market publication and return updates are enabled. Event research remains
+manual. Minute snapshots remain separate under `warehouse\minute_<frequency>`
 and never enter KOL return calculations.
 Event-window minutes can be audited with `kol-intraday-backfill --all` and
 `kol-intraday-audit`; the resulting context is displayed beside each formal

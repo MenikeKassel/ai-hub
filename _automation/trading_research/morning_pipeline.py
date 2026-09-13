@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from runtime_jobs import owned_worker
+
 import time
 from datetime import date, datetime, time as clock_time, timedelta
 from typing import Any, Callable
@@ -48,6 +50,7 @@ class MorningPipeline:
         self.ocr_budget = OcrDailyBudget(post_store, daily_limit=150)
         self.drafts = RecommendationDraftRepository(post_store)
 
+    @owned_worker("morning")
     def run(
         self,
         *,
@@ -131,6 +134,10 @@ class MorningPipeline:
                         if not isinstance(fetched, dict)
                             else fetched.get("failed_kols", 0)
                     )
+                    fetch_run_id = fetched.get("run_id", "") if isinstance(fetched, dict) else getattr(fetched, "run_id", "")
+                    if fetch_run_id:
+                        with self.post_store.connect() as db:
+                            db.execute("INSERT OR REPLACE INTO morning_fetch_links VALUES(?,?)", (run_id, fetch_run_id))
                     stages["platform_breakdown"] = (
                         getattr(fetched, "platform_breakdown", {})
                         if not isinstance(fetched, dict)

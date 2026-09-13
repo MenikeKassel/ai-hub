@@ -209,6 +209,26 @@ def is_long_event(event: EventRecord) -> bool:
     return event.direction.strip().lower() == "long"
 
 
+def event_amendment_changes(current: EventRecord, changes: dict[str, str]) -> dict[str, str]:
+    """Ignore formatting changes that preserve the original event instant."""
+    effective: dict[str, str] = {}
+    for field, value in changes.items():
+        clean = str(value).strip()
+        previous = str(getattr(current, field))
+        if clean == previous:
+            continue
+        if field == "posted_at":
+            try:
+                before = datetime.fromisoformat(previous.replace("Z", "+00:00"))
+                after = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+                if before.tzinfo is not None and after.tzinfo is not None and before == after:
+                    continue
+            except ValueError:
+                pass  # Leave invalid timestamps to the normal event validation.
+        effective[field] = clean
+    return effective
+
+
 def validate_event(event: EventRecord) -> list[str]:
     if event.status not in EVENT_STATUSES:
         return ["status"]
@@ -419,20 +439,21 @@ class KolStore:
         errors = validate_event(event)
         if errors:
             raise ValueError(f"event validation failed: {', '.join(errors)}")
-        events = self.load_events()
-        duplicate = any(
-            existing.event_id == event.event_id
-            or (
-                event.source_url
-                and existing.source_url == event.source_url
-                and existing.symbol == event.symbol
+        with FileLock(str(self.root / "events.lock"), timeout=60):
+            events = self.load_events()
+            duplicate = any(
+                existing.event_id == event.event_id
+                or (
+                    event.source_url
+                    and existing.source_url == event.source_url
+                    and existing.symbol == event.symbol
+                )
+                for existing in events
             )
-            for existing in events
-        )
-        if duplicate:
-            return False
-        self.save_events([*events, event])
-        self.log_run("register_event", {"event_id": event.event_id, "status": event.status})
+            if duplicate:
+                return False
+            self.save_events([*events, event])
+            self.log_run("register_event", {"event_id": event.event_id, "status": event.status})
         return True
 
     def update_event(self, event: EventRecord, *, action: str) -> EventRecord:
@@ -487,11 +508,7 @@ class KolStore:
             current = next((item for item in events if item.event_id == event_id), None)
             if current is None:
                 raise KeyError(f"event not found: {event_id}")
-            effective = {
-                field: str(value).strip()
-                for field, value in changes.items()
-                if str(value).strip() != str(getattr(current, field))
-            }
+            effective = event_amendment_changes(current, changes)
             if not effective:
                 revisions = self.list_event_revisions(event_id)
                 return current, revisions[0] if revisions else {
@@ -524,19 +541,20 @@ class KolStore:
             ):
                 raise ValueError("an active event already exists for this source and symbol")
 
-            original_bytes = {
-                path: path.read_bytes() if path.exists() else None
-                for path in (
-                    self.events_path,
-                    self.marks_path,
-                    self.checkpoints_path,
-                    self.event_revisions_path,
-                )
-            }
             return_lock = FileLock(str(self.returns_lock_path), timeout=60) if recalculation_required else None
             if return_lock is not None:
                 return_lock.acquire()
+            original_bytes: dict[Path, bytes | None] = {}
             try:
+                # Snapshot only files this amendment can change, and only after
+                # taking their lock, so rollback cannot restore stale returns.
+                rollback_paths = [self.events_path, self.event_revisions_path]
+                if recalculation_required:
+                    rollback_paths.extend([self.marks_path, self.checkpoints_path])
+                original_bytes = {
+                    path: path.read_bytes() if path.exists() else None
+                    for path in rollback_paths
+                }
                 self._backup_events()
                 if recalculation_required:
                     self._backup_dataset(self.marks_path)
@@ -613,54 +631,107 @@ class KolStore:
 
     def upsert_marks(self, rows: Iterable[dict[str, str]]) -> None:
         with FileLock(str(self.returns_lock_path), timeout=60):
-            merged = {(row.get("event_id", ""), row.get("trade_date", "")): row for row in self.load_marks()}
-            for row in rows:
-                merged[(row.get("event_id", ""), row.get("trade_date", ""))] = row
-            ordered = [merged[key] for key in sorted(merged)]
-            self._atomic_write(self.marks_path, ordered, MARK_FIELDS)
+            self._upsert_marks_locked(rows)
+
+    def _upsert_marks_locked(self, rows: Iterable[dict[str, str]]) -> None:
+        merged = {(row.get("event_id", ""), row.get("trade_date", "")): row for row in self.load_marks()}
+        for row in rows:
+            merged[(row.get("event_id", ""), row.get("trade_date", ""))] = row
+        ordered = [merged[key] for key in sorted(merged)]
+        self._atomic_write(self.marks_path, ordered, MARK_FIELDS)
 
     def load_checkpoints(self) -> list[dict[str, str]]:
         return self._read_csv(self.checkpoints_path)
 
     def freeze_checkpoints(self, rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
         with FileLock(str(self.returns_lock_path), timeout=60):
-            existing = {
-                (row.get("event_id", ""), row.get("horizon", "")): row
-                for row in self.load_checkpoints()
-            }
-            added: list[dict[str, str]] = []
-            for row in rows:
-                key = (row.get("event_id", ""), row.get("horizon", ""))
-                if row.get("verification_status", "") not in {"verified", "verified_suspended"}:
-                    continue
-                if key in existing:
-                    previous = existing[key]
-                    comparable_fields = {
-                        field: row.get(field, "")
-                        for field in CHECKPOINT_FIELDS
-                        if field not in {"finalized_at", "foundation_release_id"}
-                    }
-                    previous_comparable = {
-                        field: previous.get(field, "")
-                        for field in comparable_fields
-                    }
-                    if comparable_fields != previous_comparable or row.get("foundation_release_id", "") != previous.get("foundation_release_id", ""):
-                        self._append_checkpoint_revision(
-                            event_id=key[0],
-                            horizon=key[1],
-                            previous=previous,
-                            proposed=row,
-                            reason="foundation_release_refresh",
-                        )
-                    continue
-                existing[key] = row
-                added.append(row)
-            self._atomic_write(
-                self.checkpoints_path,
-                [existing[key] for key in sorted(existing)],
-                CHECKPOINT_FIELDS,
-            )
+            return self._freeze_checkpoints_locked(rows)
+
+    def _freeze_checkpoints_locked(self, rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+        existing = {
+            (row.get("event_id", ""), row.get("horizon", "")): row
+            for row in self.load_checkpoints()
+        }
+        added: list[dict[str, str]] = []
+        for row in rows:
+            key = (row.get("event_id", ""), row.get("horizon", ""))
+            if row.get("verification_status", "") not in {"verified", "verified_suspended"}:
+                continue
+            if key in existing:
+                previous = existing[key]
+                comparable_fields = {
+                    field: row.get(field, "")
+                    for field in CHECKPOINT_FIELDS
+                    if field not in {"finalized_at", "foundation_release_id"}
+                }
+                previous_comparable = {
+                    field: previous.get(field, "")
+                    for field in comparable_fields
+                }
+                if comparable_fields != previous_comparable or row.get("foundation_release_id", "") != previous.get("foundation_release_id", ""):
+                    self._append_checkpoint_revision(
+                        event_id=key[0],
+                        horizon=key[1],
+                        previous=previous,
+                        proposed=row,
+                        reason="foundation_release_refresh",
+                    )
+                continue
+            existing[key] = row
+            added.append(row)
+        self._atomic_write(
+            self.checkpoints_path,
+            [existing[key] for key in sorted(existing)],
+            CHECKPOINT_FIELDS,
+        )
         return added
+
+    def commit_tracking_results(
+        self,
+        original: list[EventRecord],
+        calculated: list[EventRecord],
+        marks: list[dict[str, str]],
+        checkpoints: list[dict[str, str]],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]], set[str], set[str]]:
+        """Commit unchanged events only, without holding locks during fetching."""
+        original_by_id = {event.event_id: event for event in original}
+        calculated_by_id = {event.event_id: event for event in calculated}
+        calculated_ids = {row["event_id"] for row in marks}
+        # Match amend_event's lock order. Both derived files and the event
+        # metadata are committed before an amendment can invalidate them.
+        with FileLock(str(self.root / "events.lock"), timeout=60), FileLock(str(self.returns_lock_path), timeout=60):
+            current = self.load_events()
+            accepted_ids = {
+                event.event_id for event in current
+                if event.event_id in calculated_ids and event == original_by_id.get(event.event_id)
+            }
+            stale_ids = calculated_ids - accepted_ids
+            accepted_marks = [row for row in marks if row["event_id"] in accepted_ids]
+            if accepted_marks:
+                self._upsert_marks_locked(accepted_marks)
+            new_checkpoints = self._freeze_checkpoints_locked(
+                row for row in checkpoints if row["event_id"] in accepted_ids
+            )
+            completed_ids = {
+                row["event_id"] for row in self.load_checkpoints() if row.get("horizon") == "6M"
+            }
+            newly_completed: set[str] = set()
+            merged: list[EventRecord] = []
+            for event in current:
+                if event.event_id not in accepted_ids:
+                    merged.append(event)
+                    continue
+                value = calculated_by_id[event.event_id]
+                if value.event_id in completed_ids and value.status == "active":
+                    value = replace(value, status="completed")
+                    newly_completed.add(value.event_id)
+                # A fresh commit must change the snapshot even when two
+                # refreshes finish in the same second with identical baselines.
+                value = replace(value, updated_at=datetime.now(SHANGHAI).isoformat(timespec="microseconds"))
+                merged.append(value)
+            if merged != current:
+                self.save_events(merged)
+        return accepted_marks, new_checkpoints, newly_completed, stale_ids
 
     def _append_checkpoint_revision(
         self,
@@ -1686,11 +1757,33 @@ def update_kol_tracking(
         if row.get("verification_status") in {"verified", "verified_suspended"}
     ]
     if dry_run:
+        accepted_marks = all_marks
         new_checkpoints = verified_candidates
+        stale_ids: set[str] = set()
+        completed_ids = {
+            row["event_id"]
+            for row in [*store.load_checkpoints(), *new_checkpoints]
+            if row.get("horizon") == "6M"
+        }
+        newly_completed = {
+            event.event_id
+            for event in updated
+            if event.event_id in completed_ids and event.status == "active"
+        }
     else:
-        if all_marks:
-            store.upsert_marks(all_marks)
-        new_checkpoints = store.freeze_checkpoints(verified_candidates)
+        accepted_marks, new_checkpoints, newly_completed, stale_ids = store.commit_tracking_results(
+            events,
+            updated,
+            all_marks,
+            verified_candidates,
+        )
+        if stale_ids:
+            stale_list = ", ".join(sorted(stale_ids))
+            errors.append(f"事件在收益计算期间已被修订；已跳过过期结果：{stale_list}")
+            notifications = [
+                item for item in notifications
+                if item.get("event_id", "") not in stale_ids
+            ]
 
     for checkpoint in new_checkpoints:
         suspension_note = (
@@ -1711,35 +1804,25 @@ def update_kol_tracking(
             )
         )
 
-    completed_ids = {
-        row["event_id"] for row in [*store.load_checkpoints(), *new_checkpoints] if row.get("horizon") == "6M"
-    }
-    finalized_events: list[EventRecord] = []
-    for event in updated:
-        if event.event_id in completed_ids and event.status == "active":
-            finalized_events.append(replace(event, status="completed", updated_at=now_iso()))
-            notifications.append(
-                _notification(
-                    "completed",
-                    f"completed:{event.event_id}",
-                    f"KOL事件 {event.event_id} 已完成120日检查点；每日收益将继续跟踪。",
-                    event.event_id,
-                )
+    for event_id in sorted(newly_completed):
+        notifications.append(
+            _notification(
+                "completed",
+                f"completed:{event_id}",
+                f"KOL事件 {event_id} 已完成120日检查点；每日收益将继续跟踪。",
+                event_id,
             )
-        else:
-            finalized_events.append(event)
+        )
 
     if not dry_run:
-        if finalized_events != events:
-            store.save_events(finalized_events)
         generate_dashboard(store, dashboard_path)
         store.log_run(
             "kol_update",
             {
                 "run_id": run_id,
                 "as_of": as_of.isoformat(),
-                "updated_events": tracked_event_count,
-                "marks": len(all_marks),
+                "updated_events": tracked_event_count - len(stale_ids),
+                "marks": len(accepted_marks),
                 "new_checkpoints": len(new_checkpoints),
                 "awaiting_market_data": awaiting_market_data,
                 "errors": errors,
@@ -1748,8 +1831,8 @@ def update_kol_tracking(
 
     return UpdateResult(
         run_id=run_id,
-        updated_events=tracked_event_count,
-        mark_count=len(all_marks),
+        updated_events=tracked_event_count - len(stale_ids),
+        mark_count=len(accepted_marks),
         new_checkpoints=new_checkpoints,
         notifications=notifications,
         errors=errors,

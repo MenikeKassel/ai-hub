@@ -31,6 +31,7 @@ foreach ($name in $remove) {
 $freeSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2) -Hidden
 Register-LiveTask "FreeStockDB_Update_Daily" "freestockdb-update.ps1" "-DataRoot `"$(Join-Path (Split-Path -Parent $RepoRoot) 'freestock\stockdb')`"" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "17:50") "Verify and update the local FreeStockDB source before the daily market publication." $freeSettings
 Register-LiveTask "Market_Data_Sync_Daily" "market-data-sync.ps1" "" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "19:30") "Publish the latest completed daily market snapshot atomically." $settings
+Register-LiveTask "KOL_Return_Tracker_Daily" "kol-tracker.ps1" "" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "23:30") "Fallback update for audited KOL event returns; successful market publication triggers it immediately." $settings
 
 if ($RunNow) { Start-ScheduledTask -TaskName "Market_Data_Sync_Daily" }
-Write-Host "Installed live market-only tasks: FreeStockDB 17:50 and atomic market publication 19:30. Returns and research tasks remain disabled."
+Write-Host "Installed live tasks: FreeStockDB 17:50, atomic market publication 19:30, and KOL returns after publication (23:30 fallback). Event research remains manual."

@@ -122,8 +122,16 @@ function Get-ProcessRecord {
 function Test-ManagedListener {
     param(
         [int[]]$Listeners,
-        [string]$Python
+        [string]$Python,
+        $ProcessInfo = $null
     )
+    # An elevated logon task can own the console while Hermes runs with a
+    # limited token. In that case Win32_Process is visible but CommandLine is
+    # blank, so use the launcher's persisted listener identity as the fallback.
+    if ($ProcessInfo -and $ProcessInfo.alive -and $ProcessInfo.listener_pid) {
+        $recordedListenerId = [int]$ProcessInfo.listener_pid
+        if ($Listeners -contains $recordedListenerId) { return $true }
+    }
     foreach ($listenerId in $Listeners) {
         $listener = Get-ProcessRecord $listenerId
         if (-not $listener -or $listener.CommandLine -notmatch "kol_api:app" -or
@@ -166,9 +174,12 @@ function Get-ServerProbe {
     $status = Get-PipelineStatus
     $listeners = @(Get-ListenerProcess)
     $process = Get-ServerProcessInfo
-    $managed = Test-ManagedListener -Listeners $listeners -Python ([string]$process.python)
-    if ($status -and $managed) {
-        return @{ state = "ready"; listeners = $listeners; process = $process; status = $status }
+    $managed = Test-ManagedListener -Listeners $listeners -Python ([string]$process.python) -ProcessInfo $process
+    # The KOL API is the availability authority. Process ownership is useful
+    # diagnostic metadata, but Windows may deny Hermes access to an elevated
+    # listener's command line even though the API is fully ready.
+    if ($status) {
+        return @{ state = "ready"; listeners = $listeners; process = $process; status = $status; managed = $managed }
     }
     if ($listeners.Count -gt 0 -or $status) {
         return @{ state = "unhealthy"; listeners = $listeners; process = $process; status = $status; managed = $managed }
@@ -295,6 +306,7 @@ function Select-PipelineStatus {
         market_status = $PipelineStatus.market_status
         lagging_symbol_count = @($PipelineStatus.lagging_symbols).Count
         fetch_running = Test-FetchRunning
+        ownership_verified = [bool]$probe.managed
         process = $process
         listener_processes = @(Get-ListenerProcess)
     }
@@ -443,7 +455,25 @@ switch ($Action) {
         }
         Write-Result (Start-KolTask "KOL_Morning_Pipeline")
     }
-    "market" { Write-Result (Start-KolTask "Market_Data_Sync_Daily") }
+    "market" {
+        if (-not $DryRun) {
+            Write-Result (Start-KolTask "Market_Data_Sync_Daily")
+            break
+        }
+        $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
+        $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
+        $output = & $python $cli market-daily-publish --as-of $AsOf 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
+        $text = $output.Trim()
+        $first = $text.IndexOf('{')
+        $last = $text.LastIndexOf('}')
+        if ($first -lt 0 -or $last -le $first) {
+            throw "market preview returned no structured JSON: $text"
+        }
+        $preview = $text.Substring($first, $last - $first + 1) | ConvertFrom-Json
+        $preview | Add-Member -NotePropertyName action -NotePropertyValue "preview" -Force
+        Write-Result $preview
+    }
     "data-refresh" {
         $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
         $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"

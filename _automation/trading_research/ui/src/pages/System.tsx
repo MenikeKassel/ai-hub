@@ -25,25 +25,28 @@ function runPresentation(status: FetchRun['status']) {
   return { label: 'Failed', tone: 'bad', icon: XCircle }
 }
 
-export default function System() {
+export type SystemSection = 'tasks' | 'health' | 'connections'
+
+export default function System({ section = 'tasks' }: { section?: SystemSection }) {
   const client = useQueryClient()
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
-  const queueStatus = useQuery({ queryKey: ['queue-status'], queryFn: api.queueStatus, refetchInterval: 10_000 })
+  const queueStatus = useQuery({ queryKey: ['queue-status'], queryFn: api.queueStatus, enabled: section === 'tasks', refetchInterval: section === 'tasks' ? 10_000 : false })
   const diagnostics = useQuery({
     queryKey: ['system-diagnostics'],
     queryFn: api.diagnostics,
-    refetchInterval: 60_000,
+    enabled: section === 'health',
+    refetchInterval: section === 'health' ? 60_000 : false,
     staleTime: 60_000,
   })
-  const runs = useQuery({ queryKey: ['fetch-runs'], queryFn: api.fetchRuns, refetchInterval: 10_000 })
-  const tasks = useQuery({ queryKey: ['operator-tasks'], queryFn: api.tasks, refetchInterval: 5_000 })
-  const recoveryPreview = useQuery({ queryKey: ['collection-recovery-preview'], queryFn: api.collectionRecoveryPreview, refetchInterval: 30_000 })
+  const runs = useQuery({ queryKey: ['fetch-runs'], queryFn: api.fetchRuns, enabled: section === 'tasks', refetchInterval: section === 'tasks' ? 10_000 : false })
+  const tasks = useQuery({ queryKey: ['operator-tasks'], queryFn: api.tasks, enabled: section === 'tasks', refetchInterval: section === 'tasks' ? 5_000 : false })
+  const recoveryPreview = useQuery({ queryKey: ['collection-recovery-preview'], queryFn: api.collectionRecoveryPreview, enabled: section === 'tasks', refetchInterval: section === 'tasks' ? 30_000 : false })
   const [recoveryRunId, setRecoveryRunId] = useState('')
   const recoveryStatus = useQuery({
     queryKey: ['collection-recovery', recoveryRunId],
     queryFn: () => api.collectionRecoveryStatus(recoveryRunId),
-    enabled: Boolean(recoveryRunId),
-    refetchInterval: 5_000,
+    enabled: section === 'tasks' && Boolean(recoveryRunId),
+    refetchInterval: section === 'tasks' ? 5_000 : false,
   })
   const [backup, setBackup] = useState<CredentialValues>({ auth: '', ct0: '' })
   const [sessionValues, setSessionValues] = useState<Record<number, CredentialValues>>({
@@ -113,13 +116,15 @@ export default function System() {
   const fetchRunning = tasks.data?.fetch?.status === 'running'
   const morningRunning = tasks.data?.morning?.status === 'running'
   const pipelineBusy = startTask.isPending || fetchRunning || morningRunning
-  const error = health.error || saveXSession.error || verifyXSession.error || patchXSession.error || patchXPolicy.error || patchPublicBackup.error || saveBackup.error || saveDeepSeek.error || startTask.error || recoveryPreview.error || startRecovery.error
+  const error = health.error || queueStatus.error || diagnostics.error || runs.error || tasks.error || saveXSession.error || verifyXSession.error || patchXSession.error || patchXPolicy.error || patchPublicBackup.error || saveBackup.error || saveDeepSeek.error || startTask.error || recoveryPreview.error || startRecovery.error
   const recoveryBusy = startRecovery.isPending || recoveryStatus.data?.status === 'running'
 
+  const sectionTitle = section === 'tasks' ? '任务与队列' : section === 'health' ? '数据健康' : '连接与凭据'
   return <section>
     <header className="page-header">
-      <div><span className="eyebrow">DATA HEALTH</span><h1>数据健康</h1>{h?.recovery_mode === 'historical' ? <span className="scope-note">行情历史只读 · 数据截至 {h.as_of || '未知'}</span> : h?.market_update_enabled && <span className="scope-note">每日收盘行情 · 数据截至 {h?.as_of || '未发布'} · 收益/研究更新停用</span>}</div>
-      <div className="header-actions">
+      <div><span className="eyebrow">RUN CENTER</span><h1>{sectionTitle}</h1>{h?.recovery_mode === 'historical' ? <span className="scope-note">行情历史只读 · 数据截至 {h.as_of || '未知'}</span> : h?.market_update_enabled && <span className="scope-note">每日收盘行情 · 数据截至 {h?.as_of || '未发布'} · 收益自动更新{h?.returns_update_enabled ? '开启' : '关闭'} · 研究分析{h?.research_update_enabled ? '自动' : '手动'}</span>}</div>
+      {section === 'tasks' && <div className="header-actions">
+
         <button className="primary-button" disabled={pipelineBusy} onClick={() => startTask.mutate('morning')}>
           {morningRunning ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}
           {morningRunning ? '晨报运行中' : '运行完整晨报'}
@@ -130,9 +135,10 @@ export default function System() {
         <button className="secondary-button" disabled={pipelineBusy} onClick={() => startTask.mutate('zhihu')}>
           <RefreshCw size={16} />只补抓知乎
         </button>
-      </div>
+      </div>}
     </header>
     {error && <div className="error-banner">{String(error)}</div>}
+    {section === 'tasks' && <>
     <div className="panel task-console">
       <div className="panel-heading"><div><h2>任务进度</h2><span>每 5 秒刷新，按钮只负责启动，不会阻塞页面</span></div></div>
       <TaskProgress
@@ -159,7 +165,8 @@ export default function System() {
       {recoveryStatus.data && <div className="scope-note"><RefreshCw size={15} />恢复批次 {recoveryStatus.data.status} · 启动于 {formatDate(recoveryStatus.data.started_at)}{recoveryStatus.data.completed_at ? ` · 完成于 ${formatDate(recoveryStatus.data.completed_at)}` : ''}</div>}
       {!recoveryPreview.data?.x_session_ready && <div className="scope-note"><AlertTriangle size={15} />没有已验证的 X 会话；请先在下方完成至少一个槽位的保存和账号验证。</div>}
     </div>
-    <div className="health-grid">
+    </>}
+    {section === 'health' && <div className="health-grid">
       <HealthItem icon={Terminal} label="Hermes gateway" ok={h?.component_status?.hermes_gateway.status === 'running'} value={`${h?.component_status?.hermes_gateway.status || 'unknown'}${h?.component_status?.hermes_gateway.pid ? ` / PID ${h.component_status.hermes_gateway.pid}` : ''}`} />
       <HealthItem icon={Terminal} label="KOL operator" ok={h?.component_status?.operator.status === 'available'} value={h?.component_status?.operator.status || 'unknown'} />
       <HealthItem icon={Terminal} label="X session pool" ok={h?.x_collection_status === 'ready'} value={`${h?.x_collection_status || 'pending_verification'} / ${h?.x_sessions?.global_remaining_24h ?? 0} global requests left`} />
@@ -168,7 +175,7 @@ export default function System() {
       <HealthItem icon={RefreshCw} label="Morning pipeline" ok={h?.morning_pipeline_task === 'installed'} value={`Zhihu 06:30、08:05、19:20 / X 07:20、19:00 / 08:45只审核 / ${h?.morning_pipeline_task || '-'}`} />
       <HealthItem icon={Terminal} label="Codex batch review" ok={!!h?.codex_cli} value={h?.codex_cli || 'Codex CLI not found'} />
       <HealthItem icon={RefreshCw} label="候选 AI 每日队列" ok={(h?.model_queue?.manual_attention ?? 0) === 0} value={`待模型 ${h?.model_queue?.processable_remaining ?? 0} / 待OCR ${h?.model_queue?.awaiting_ocr ?? 0} · 今日 ${h?.model_daily_budget?.attempted ?? 0}/${h?.model_daily_budget?.daily_limit ?? 250} · 预计 ${h?.model_queue?.estimated_days ?? 0} 天`} />
-      <HealthItem icon={Terminal} label="OpenCode Go review AI" ok={!!h?.codex_cli} value={`${h?.deepseek_model || 'DeepSeek fallback'} / ${h?.deepseek_credentials_configured ? 'configured' : 'optional fallback unavailable'}`} />
+      <HealthItem icon={Terminal} label="OpenCode Go review AI" ok={h?.component_status?.ai.status === 'ready'} value={`${h?.component_status?.ai.status || 'unknown'} · 近24小时完成 ${h?.component_status?.ai.recent_completed ?? 0} / 失败 ${h?.component_status?.ai.recent_failed ?? 0}`} />
       <HealthItem icon={Terminal} label="OCR RapidOCR" ok={!!h?.rapid_ocr_available} value={h?.rapid_ocr_available ? 'local OCR available' : 'run OCR installer'} />
       <HealthItem icon={Terminal} label="OCR experiment" ok value={h?.unlimited_ocr_available ? 'Unlimited-OCR available' : 'optional / not installed'} />
       <HealthItem icon={Database} label="Market warehouse" ok={!!h?.market?.ok} value={`${h?.market?.active_instruments || 0} active / ${h?.market?.coverage_count || 0} coverage`} />
@@ -179,8 +186,8 @@ export default function System() {
       <HealthItem icon={Database} label="Posts database" ok={!!h?.database} value={h?.database || '-'} />
       <HealthItem icon={HardDrive} label="Media snapshots" ok value={`${((h?.media_bytes || 0) / 1024 / 1024).toFixed(1)} MB`} />
       <HealthItem icon={RefreshCw} label="Post-approval refresh" ok={h?.pipeline_refresh?.status !== 'failed'} value={`${h?.pipeline_refresh?.status || 'idle'} / ${h?.pipeline_refresh?.reason || h?.pipeline_refresh?.phase || '-'}`} />
-    </div>
-    <div className="content-grid system-grid">
+    </div>}
+    {section === 'tasks' && <div className="content-grid system-grid">
       <div className="panel">
         <div className="panel-heading"><div><h2>晨间运行</h2><span>最近 5 次</span></div></div>
         <div className="run-list">
@@ -207,8 +214,8 @@ export default function System() {
           {!runs.data?.length && <div className="empty-state compact">暂无采集运行记录</div>}
         </div>
       </div>
-    </div>
-    <div className="content-grid system-grid credential-stack-grid">
+    </div>}
+    {section === 'connections' && <div className="content-grid system-grid credential-stack-grid">
       {(h?.x_sessions?.slots || [1, 2, 3].map((slot_id) => ({ slot_id, label: `X session ${slot_id}`, status: 'pending_verification', credential_configured: false } as XSessionSlot))).map((slot) => {
         const values = sessionValues[slot.slot_id] || { auth: '', ct0: '' }
         const busy = saveXSession.isPending && saveXSession.variables?.slot === slot.slot_id
@@ -222,8 +229,8 @@ export default function System() {
         <label>OpenCode Go API key<input type="password" autoComplete="off" value={deepseekKey} onChange={(event) => setDeepseekKey(event.target.value)} /></label>
         <button className="primary-button" disabled={saveDeepSeek.isPending || !deepseekKey}>安全保存</button>
       </form>
-    </div>
-    <div className="panel scope-note"><strong>X 采集保护</strong><span>三个会话共用滚动额度；轮换不会提高总额度。状态：{h?.x_sessions?.paused_until ? `全局暂停至 ${h.x_sessions.paused_until}` : '按批次轮换'}。</span><button className="secondary-button" onClick={() => patchXPolicy.mutate(!Boolean(h?.x_sessions?.paused_until))}>{h?.x_sessions?.paused_until ? '恢复自动采集' : '暂停 X 自动采集'}</button><span>公开单帖备用：{h?.public_backup?.paused_until ? `暂停至 ${h.public_backup.paused_until}` : h?.public_backup?.enabled ? '普通故障可用' : '已停用'}。</span><button className="secondary-button" onClick={() => patchPublicBackup.mutate(h?.public_backup?.enabled ? { paused: !Boolean(h.public_backup.paused_until) } : { enabled: true })}>{h?.public_backup?.enabled && !h.public_backup?.paused_until ? '暂停公开备用' : '启用公开备用'}</button></div>
+    </div>}
+    {section === 'connections' && <div className="panel scope-note"><strong>X 采集保护</strong><span>三个会话共用滚动额度；轮换不会提高总额度。状态：{h?.x_sessions?.paused_until ? `全局暂停至 ${h.x_sessions.paused_until}` : '按批次轮换'}。</span><button className="secondary-button" onClick={() => patchXPolicy.mutate(!Boolean(h?.x_sessions?.paused_until))}>{h?.x_sessions?.paused_until ? '恢复自动采集' : '暂停 X 自动采集'}</button><span>公开单帖备用：{h?.public_backup?.paused_until ? `暂停至 ${h.public_backup.paused_until}` : h?.public_backup?.enabled ? '普通故障可用' : '已停用'}。</span><button className="secondary-button" onClick={() => patchPublicBackup.mutate(h?.public_backup?.enabled ? { paused: !Boolean(h.public_backup.paused_until) } : { enabled: true })}>{h?.public_backup?.enabled && !h.public_backup?.paused_until ? '暂停公开备用' : '启用公开备用'}</button></div>}
   </section>
 }
 

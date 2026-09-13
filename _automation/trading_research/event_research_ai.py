@@ -13,7 +13,7 @@ from kol_posts import (
     ModelProviderUnavailableError,
     _parse_json_object_content,
 )
-from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL, opencode_go_headers
 
 
 LENS_KEYS = {
@@ -362,7 +362,10 @@ class DeepSeekEventResearchInterpreter:
                 + _json({"events": _prompt_items(items)}),
             },
         ]
-        headers = {"Authorization": f"Bearer {self.credentials.load()}"}
+        session_key = "event-research:" + ",".join(
+            str(item.get("event", {}).get("event_id") or "") for item in items
+        )
+        headers = opencode_go_headers(self.credentials.load(), session_key)
         for attempt in range(2):
             body = {
                 "model": self.model_name,

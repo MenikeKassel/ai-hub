@@ -18,6 +18,99 @@ from freestockdb_runtime import FreeStockDBRuntime, VendorUpdateResult  # noqa: 
 
 
 class FreeStockDBRuntimeTests(unittest.TestCase):
+    def test_exact_processes_uses_recorded_listener_when_cim_hides_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: True,
+            )
+            runtime.paths.state.parent.mkdir(parents=True)
+            (runtime.paths.state.parent / "freestockdb-process.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 7684,
+                        "root": str(program.resolve()),
+                        "url": "http://127.0.0.1:7899",
+                    }
+                ),
+                encoding="utf-8-sig",
+            )
+            with (
+                patch.object(
+                    runtime,
+                    "_processes",
+                    return_value=[
+                        {
+                            "ProcessId": 7684,
+                            "ExecutablePath": None,
+                            "CommandLine": None,
+                        }
+                    ],
+                ),
+                patch.object(runtime, "_listening_process_ids", return_value=[7684]),
+            ):
+                processes = runtime.exact_processes()
+
+        self.assertEqual(1, len(processes))
+        self.assertEqual(7684, processes[0]["ProcessId"])
+        self.assertEqual("runtime_metadata", processes[0]["Source"])
+
+    def test_recorded_process_must_own_the_configured_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: True,
+            )
+            runtime.paths.state.parent.mkdir(parents=True)
+            (runtime.paths.state.parent / "freestockdb-process.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 7684,
+                        "root": str(program.resolve()),
+                        "url": "http://127.0.0.1:7899",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(runtime, "_processes", return_value=[]),
+                patch.object(runtime, "_listening_process_ids", return_value=[9999]),
+            ):
+                processes = runtime.exact_processes()
+
+        self.assertEqual([], processes)
+
+    def test_process_metadata_round_trips_for_future_elevated_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: True,
+            )
+
+            runtime._save_process_metadata({"ProcessId": 8123})
+            metadata = runtime._read_state(
+                runtime.paths.state.parent / "freestockdb-process.json"
+            )
+
+        self.assertEqual(8123, metadata["pid"])
+        self.assertEqual(str(program), metadata["root"])
+        self.assertEqual("http://127.0.0.1:7899", metadata["url"])
+
     def test_sample_health_marks_history_stale_against_expected_trade_date(self) -> None:
         class FixtureProvider:
             def health(self):
@@ -413,6 +506,28 @@ class FreeStockDBRuntimeTests(unittest.TestCase):
             self.assertFalse((staged / "data" / "live-only.ldb").exists())
             self.assertEqual(b"current", (staged / "数据更新.exe").read_bytes())
 
+    def test_stage_data_copies_v035_auxiliary_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "program"
+            root.mkdir()
+            for name in ("数据更新.exe", "stockdb.conf", "sync_url.txt"):
+                (root / name).write_bytes(b"current")
+            (root / "data").mkdir()
+            (root / "data" / "main.ldb").write_bytes(b"main")
+            (root / "data1").mkdir()
+            (root / "data1" / "aux.ldb").write_bytes(b"aux")
+            runtime = FreeStockDBRuntime(
+                root,
+                runtime_root=base / "runtime",
+                socket_probe=lambda *_: False,
+            )
+
+            staged = runtime._stage_data()
+
+            self.assertEqual(b"main", (staged / "data" / "main.ldb").read_bytes())
+            self.assertEqual(b"aux", (staged / "data1" / "aux.ldb").read_bytes())
+
     def test_disk_guard_accounts_for_missing_bytes_in_partial_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -756,9 +871,14 @@ class FreeStockDBRuntimeTests(unittest.TestCase):
             (runtime.paths.live / "marker.txt").write_text("unverified-new", encoding="utf-8")
             runtime.paths.previous.mkdir()
             (runtime.paths.previous / "marker.txt").write_text("verified-old", encoding="utf-8")
+            runtime.paths.root.mkdir(parents=True, exist_ok=True)
+            runtime._aux_live.mkdir()
+            (runtime._aux_live / "marker.txt").write_text("unverified-aux", encoding="utf-8")
+            runtime._aux_previous.mkdir()
+            (runtime._aux_previous / "marker.txt").write_text("verified-aux", encoding="utf-8")
             runtime._retired_previous.mkdir()
             (runtime._retired_previous / "marker.txt").write_text("older", encoding="utf-8")
-            runtime._write_swap_journal("old_moved")
+            runtime._write_swap_journal("old_moved", include_aux=True)
 
             result = runtime._recover_interrupted_swap()
 
@@ -770,6 +890,10 @@ class FreeStockDBRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 "older",
                 (runtime.paths.previous / "marker.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "verified-aux",
+                (runtime._aux_live / "marker.txt").read_text(encoding="utf-8"),
             )
 
     def test_interrupted_swap_stops_service_before_replacing_live(self) -> None:

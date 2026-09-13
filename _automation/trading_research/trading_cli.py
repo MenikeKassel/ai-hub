@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from cli_commands import collection as kol_collection_commands, review as kol_review_commands, research as kol_research_commands
 import csv
 import hashlib
 import importlib.util
@@ -503,53 +504,12 @@ def _next_event_id(events: list[EventRecord]) -> str:
     return f"KOL-{max(numbers, default=0) + 1:04d}"
 
 
-def kol_init(_: argparse.Namespace) -> None:
-    store = KolStore(KOL_ROOT)
-    created = initialize_seed_events(store)
-    generate_dashboard(store, KOL_DASHBOARD)
-    print(json.dumps({"ok": True, "created": created, "events": len(store.load_events())}, ensure_ascii=False))
+def kol_init(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_init(sys.modules[__name__], args)
 
 
 def kol_register(args: argparse.Namespace) -> None:
-    store = KolStore(KOL_ROOT)
-    source_path, source_note = _source_note_path(args.source_note)
-    text = source_path.read_text(encoding="utf-8")
-    metadata = _frontmatter(text)
-    source_url = args.source_url or metadata.get("source_url", "") or _first_url(text)
-    platform = args.platform or metadata.get("source_type", "") or metadata.get("platform", "")
-    if not platform:
-        platform = "X" if re.search(r"https?://(?:www\.)?(?:x|twitter)\.com/", source_url) else "web"
-    thesis = args.thesis or _section_summary(text)
-    event = EventRecord(
-        event_id=args.event_id or _next_event_id(store.load_events()),
-        kol_name=args.kol,
-        platform=platform,
-        source_url=source_url,
-        source_note=source_note,
-        posted_at=args.posted_at,
-        symbol=args.symbol,
-        security_name=args.name or "",
-        direction=args.direction,
-        thesis=thesis,
-        status="active",
-        activated_at=now_iso(),
-        updated_at=now_iso(),
-    )
-    errors = validate_event(event)
-    if errors:
-        raise ValueError(f"cannot activate event; missing or invalid: {', '.join(errors)}")
-    created = store.register_event(event)
-    if created:
-        store.queue_notification(
-            {
-                "kind": "activation",
-                "key": f"activation:{event.event_id}",
-                "message": f"KOL事件 {event.event_id} 已激活：{event.kol_name} / {event.symbol} {event.security_name}。",
-                "event_id": event.event_id,
-            }
-        )
-    generate_dashboard(store, KOL_DASHBOARD)
-    print(json.dumps({"ok": True, "created": created, "event_id": event.event_id}, ensure_ascii=False))
+    return kol_research_commands.kol_register(sys.modules[__name__], args)
 
 
 def _send_pending_notifications(store: KolStore) -> list[str]:
@@ -601,24 +561,7 @@ def _send_pending_notifications(store: KolStore) -> list[str]:
 
 
 def kol_update(args: argparse.Namespace) -> None:
-    _require_returns_writes("kol-update", dry_run=bool(args.dry_run))
-    KOL_ROOT.mkdir(parents=True, exist_ok=True)
-    lock_path = KOL_ROOT / "kol-update.lock"
-    lock = FileLock(str(lock_path), timeout=1)
-    try:
-        lock.acquire()
-    except Timeout:
-        print(json.dumps({
-            "ok": True,
-            "status": "already_running",
-            "dry_run": bool(args.dry_run),
-            "lock": str(lock_path),
-        }, ensure_ascii=False))
-        return
-    try:
-        _kol_update_locked(args)
-    finally:
-        lock.release()
+    return kol_research_commands.kol_update(sys.modules[__name__], args)
 
 
 def _kol_update_locked(args: argparse.Namespace) -> None:
@@ -627,9 +570,14 @@ def _kol_update_locked(args: argparse.Namespace) -> None:
         raise RuntimeError("KOL event store is not initialized; run kol-init first")
     as_of = date.fromisoformat(args.as_of)
     market_store = _market_store()
+    price_provider = (
+        market_store
+        if callable(getattr(market_store, "fetch_stock", None))
+        else WarehousePriceProvider(MARKET_ROOT / "warehouse")
+    )
     result = update_kol_tracking(
         store,
-        market_store,
+        price_provider,
         AKShareCheckpointProvider(),
         as_of=as_of,
         dashboard_path=KOL_DASHBOARD,
@@ -681,113 +629,32 @@ def _performance_service() -> KolPerformanceService:
     return KolPerformanceService(KolStore(KOL_ROOT), post_store=_post_store())
 
 
-def kol_performance_doctor(_: argparse.Namespace) -> None:
-    _require_returns_writes("kol-performance-doctor")
-    service = _performance_service()
-    migration = service.migrate_event_identities()
-    checks = service.doctor()
-    checks["migration"] = migration
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_performance_doctor(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_performance_doctor(sys.modules[__name__], args)
 
 
 def kol_performance_refresh(args: argparse.Namespace) -> None:
-    _require_returns_writes("kol-performance-refresh")
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    service = _performance_service()
-    migration = service.migrate_event_identities()
-    result = service.refresh(as_of=as_of)
-    print(json.dumps({
-        "ok": True,
-        "as_of": as_of.isoformat(),
-        "migration": migration,
-        "run_id": result["run_id"],
-        "snapshots_inserted": result["snapshots_inserted"],
-        "coverage": result["coverage"],
-    }, ensure_ascii=False))
+    return kol_research_commands.kol_performance_refresh(sys.modules[__name__], args)
 
 
 def kol_performance_backfill(args: argparse.Namespace) -> None:
-    _require_returns_writes("kol-performance-backfill")
-    service = _performance_service()
-    service.migrate_event_identities()
-    checkpoints = service.event_store.load_checkpoints()
-    dates = sorted({row.get("trade_date", "") for row in checkpoints if row.get("trade_date")})
-    start = args.start or (dates[0] if dates else date.today().isoformat())
-    end = args.end or date.today().isoformat()
-    targets = [date.fromisoformat(value) for value in dates if start <= value <= end]
-    if date.fromisoformat(end) not in targets:
-        targets.append(date.fromisoformat(end))
-    results = [service.refresh(as_of=value) for value in targets]
-    print(json.dumps({
-        "ok": True,
-        "from": start,
-        "to": end,
-        "as_of_count": len(results),
-        "runs": [result["run_id"] for result in results],
-        "snapshots_inserted": sum(result["snapshots_inserted"] for result in results),
-    }, ensure_ascii=False))
+    return kol_research_commands.kol_performance_backfill(sys.modules[__name__], args)
 
 
 def kol_performance_report(args: argparse.Namespace) -> None:
-    _require_returns_writes("kol-performance-report")
-    as_of = date.fromisoformat(args.as_of or date.today().isoformat())
-    service = _performance_service()
-    result = service.refresh(as_of=as_of)
-    if args.with_ai:
-        result = service.explain(result, DeepSeekPerformanceInterpreter())
-    message = build_weekly_message(result)
-    sent = _send_feishu(message) if args.notify else False
-    print(json.dumps({
-        "ok": True,
-        "as_of": as_of.isoformat(),
-        "weekly": bool(args.weekly),
-        "message": message,
-        "notification_sent": sent,
-        "run_id": result["run_id"],
-    }, ensure_ascii=False))
+    return kol_research_commands.kol_performance_report(sys.modules[__name__], args)
 
 
 def kol_returns_backfill(args: argparse.Namespace) -> None:
-    kol_update(
-        argparse.Namespace(
-            as_of=args.as_of or date.today().isoformat(),
-            notify=False,
-            dry_run=bool(args.dry_run),
-        )
-    )
+    return kol_research_commands.kol_returns_backfill(sys.modules[__name__], args)
 
 
-def kol_report(_: argparse.Namespace) -> None:
-    _require_returns_writes("kol-report")
-    store = KolStore(KOL_ROOT)
-    generate_dashboard(store, KOL_DASHBOARD)
-    print(json.dumps({"ok": True, "dashboard": str(KOL_DASHBOARD)}, ensure_ascii=False))
+def kol_report(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_report(sys.modules[__name__], args)
 
 
-def kol_doctor(_: argparse.Namespace) -> None:
-    store = KolStore(KOL_ROOT)
-    events = store.load_events()
-    invalid = {event.event_id: validate_event(event) for event in events if validate_event(event)}
-    checks = {
-        "runtime": str(KOL_ROOT),
-        "runtime_exists": KOL_ROOT.exists(),
-        "events": len(events),
-        "active": sum(event.status == "active" for event in events),
-        "marks": len(store.load_marks()),
-        "checkpoints": len(store.load_checkpoints()),
-        "pending_notifications": len(store.pending_notifications()),
-        "invalid_active_events": invalid,
-        "dashboard": str(KOL_DASHBOARD),
-        "dashboard_exists": KOL_DASHBOARD.exists(),
-        "baostock": dependency_available("baostock"),
-        "akshare": dependency_available("akshare"),
-        "pandas": dependency_available("pandas"),
-    }
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if invalid or not all(checks[name] for name in ["baostock", "akshare", "pandas"]):
-        raise SystemExit(2)
+def kol_doctor(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_doctor(sys.modules[__name__], args)
 
 
 def _post_store() -> KolPostStore:
@@ -928,304 +795,27 @@ def _zhihu_provider() -> ZhihuProfileProvider:
 
 
 def kol_post_doctor(args: argparse.Namespace) -> None:
-    store = _post_store()
-    x_sessions = XSessionManager(store)
-    x_policy = x_sessions.policy_status()
-    healthy_fetch_states = {"never", "success", "gap_detected"}
-    all_kols = store.list_kols()
-    scoped_kols = [
-        item for item in all_kols
-        if args.platform == "all" or str(item.get("platform") or "X").casefold() == args.platform
-    ]
-    zhihu_kols = [item for item in all_kols if item.get("platform") == "Zhihu"]
-    active_zhihu = [item for item in zhihu_kols if item.get("status") == "active"]
-    paused_zhihu = [item for item in zhihu_kols if item.get("status") == "paused"]
-    failed_zhihu = [
-        item for item in active_zhihu
-        if str(item.get("fetch_status") or "") not in healthy_fetch_states
-    ]
-    failed_scoped = [
-        item for item in scoped_kols
-        if item.get("status") == "active"
-        and str(item.get("fetch_status") or "") not in healthy_fetch_states
-    ]
-    checks = {
-        "ok": True,
-        "database": str(store.path),
-        "database_exists": store.path.exists(),
-        "platform": args.platform,
-        "active_kols": len([item for item in scoped_kols if item.get("status") == "active"]),
-        "posts": store.count_posts(),
-        "pending_reviews": store.count_pending(),
-        "media_bytes": media_disk_usage(store.media_root),
-        "twitter_cli": _resolve_twitter_command("twitter"),
-        "twitter_credentials_configured": KeyringCredentialStore().configured(),
-        "twitter_reader_credentials_configured": ReaderCredentialStore().configured(),
-        "x_sessions": x_policy,
-        "zhihu_capture_available": ZHIHU_PROFILE_CAPTURE.is_file(),
-        "zhihu_active_kols": len(active_zhihu),
-        "zhihu_paused_kols": len(paused_zhihu),
-        "zhihu_failed_kols": len(failed_zhihu),
-        "zhihu_failure_handles": [str(item.get("handle")) for item in failed_zhihu[:20]],
-        "failed_kols": len(failed_scoped),
-        "failure_handles": [str(item.get("handle")) for item in failed_scoped[:50]],
-        "nitter_credentials_configured": NitterCredentialStore().configured(),
-        "xtf": str(XTF_COMMAND) if XTF_COMMAND.exists() else "",
-        "xtf_version": xtf_version(XTF_COMMAND) if XTF_COMMAND.exists() else "",
-        "nitter": timeline_health(NITTER_URL),
-        "docker": docker_health(),
-        "fallback_mode": _fallback_mode(),
-        "shadow_rollout": store.shadow_rollout_status(),
-        "codex_cli": shutil.which("codex") or "",
-        "classifier_schema": KOL_CLASSIFIER_SCHEMA.exists(),
-        "unlimited_ocr_root": str(UNLIMITED_OCR_ROOT),
-        "unlimited_ocr_available": UnlimitedOcrBatchClassifier(
-            UNLIMITED_OCR_ROOT, UNLIMITED_OCR_RUNNER
-        ).available(),
-        "rapid_ocr_available": _ocr_classifier().available(),
-        "ocr_provider": "rapidocr",
-    }
-    platform_ok = {
-        "all": bool(checks["twitter_cli"] and checks["zhihu_capture_available"]),
-        "x": bool(checks["twitter_cli"] and any(item["status"] == "ready" for item in x_policy["slots"])),
-        "zhihu": bool(checks["zhihu_capture_available"]),
-    }
-    dependencies_ok = bool(
-        platform_ok[args.platform]
-        and checks["codex_cli"]
-        and checks["classifier_schema"]
-        and checks["rapid_ocr_available"]
-    )
-    checks["collection_ok"] = not failed_scoped
-    checks["ok"] = dependencies_ok and checks["collection_ok"]
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+    return kol_collection_commands.kol_post_doctor(sys.modules[__name__], args)
 
 
-def kol_post_db_backup(_: argparse.Namespace) -> None:
-    if not KOL_POST_DB.exists():
-        print(json.dumps({"ok": True, "skipped": True, "reason": "database_missing"}))
-        return
-    backup_root = KOL_ROOT / "backups"
-    backup_root.mkdir(parents=True, exist_ok=True)
-    target = backup_root / f"posts-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
-    with sqlite3.connect(KOL_POST_DB) as source, sqlite3.connect(target) as destination:
-        source.backup(destination)
-    backups = sorted(backup_root.glob("posts-*.db"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for expired in backups[14:]:
-        expired.unlink(missing_ok=True)
-    print(json.dumps({"ok": True, "backup": str(target)}, ensure_ascii=False))
+def kol_post_db_backup(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_post_db_backup(sys.modules[__name__], args)
 
 
-def kol_reader_migrate(_: argparse.Namespace) -> None:
-    """Copy the existing Nitter reader session into its isolated X reader slot."""
-    source = NitterCredentialStore()
-    target = ReaderCredentialStore()
-    auth_token, ct0 = source.load_values()
-    target.save(auth_token, ct0)
-    print(json.dumps({
-        "ok": True,
-        "source": source.service_name,
-        "target": target.service_name,
-        "credentials_configured": target.configured(),
-    }, ensure_ascii=False))
+def kol_reader_migrate(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_reader_migrate(sys.modules[__name__], args)
 
 
-def kol_collection_doctor(_: argparse.Namespace) -> None:
-    store = _post_store()
-    x_policy = XSessionManager(store).policy_status()
-    end = date.today().isoformat()
-    start = (date.today() - timedelta(days=7)).isoformat()
-    checks = {
-        "ok": any(item["status"] == "ready" for item in x_policy["slots"]),
-        "x_sessions": x_policy,
-        "database": str(store.path),
-        "reader_credentials_configured": ReaderCredentialStore().configured(),
-        "main_credentials_configured": KeyringCredentialStore().configured(),
-        "nitter_optional": True,
-        "nitter": timeline_health(NITTER_URL),
-        "x_recent": store.collection_coverage(platform="X", window_start=start, window_end=end),
-        "zhihu_recent": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
-        "open_gaps": store.list_collection_gaps(status="open", limit=100),
-        "latest_runs": store.recent_fetch_runs(limit=5),
-    }
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_collection_doctor(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_collection_doctor(sys.modules[__name__], args)
 
 
 def kol_gap_audit(args: argparse.Namespace) -> None:
-    store = _post_store()
-    end = date.today().isoformat() if args.to_date == "auto" else args.to_date
-    start = args.from_date
-    payload: dict[str, Any] = {
-        "ok": True,
-        "from": start,
-        "to": end,
-        "platforms": {},
-        "gaps": [],
-    }
-    for platform in ("X", "Zhihu"):
-        coverage = store.collection_coverage(
-            platform=platform,
-            window_start=start,
-            window_end=end,
-        )
-        payload["platforms"][platform] = coverage
-        for item in coverage["items"]:
-            last_success = str(item.get("last_success_at") or "")[:10]
-            fetch_status = str(item.get("fetch_status") or "")
-            if not last_success or last_success < start or fetch_status not in {"success", "gap_detected"}:
-                kol = store.get_kol(int(item["id"]))
-                store.open_collection_gap(
-                    int(item["id"]),
-                    platform=platform,
-                    window_start=start,
-                    window_end=end,
-                    last_post_id=str((kol or {}).get("last_post_id") or ""),
-                    status="open",
-                    error="no successful fetch observed in recovery window",
-                )
-                payload["gaps"].append({"platform": platform, **item})
-            else:
-                # Zero posts after a successful fetch is valid inactivity, not
-                # a collection gap. Close an older false-positive gap while
-                # keeping its row and verification timestamp for audit.
-                store.open_collection_gap(
-                    int(item["id"]),
-                    platform=platform,
-                    window_start=start,
-                    window_end=end,
-                    last_post_id="",
-                    status="closed",
-                    error="fetch succeeded; no activity is not a gap",
-                )
-    payload["open_gaps"] = store.list_collection_gaps(status="open", limit=1000)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return kol_collection_commands.kol_gap_audit(sys.modules[__name__], args)
 
 
 def kol_gap_recover(args: argparse.Namespace) -> None:
-    store = _post_store()
-    end = date.today().isoformat()
-    start = (date.today() - timedelta(days=7)).isoformat() if args.scope == "recent" else "2026-01-01"
-    batch_id = f"gap-{args.scope}-{start}-{end}"
-    active = [
-        item for item in store.list_kols("active")
-        if str(item.get("availability_status") or "active") not in {"suspended", "deleted", "paused"}
-    ]
-    store.create_fetch_batch(
-        batch_id,
-        batch_kind="recent_recovery" if args.scope == "recent" else "historical_recovery",
-        platform="X+Zhihu",
-        window_start=start,
-        window_end=end,
-        strategy_version="kol-collection-v3",
-        total_kols=len(active),
-    )
-    aggregate: list[Any] = []
-    reset_items = 0
-    skipped_platforms: list[dict[str, Any]] = []
-    for platform in ("x", "zhihu"):
-        platform_key = platform.casefold()
-        fresh_key = f"{batch_id}:{platform_key}:fresh"
-        history_key = f"{batch_id}:{platform_key}:history"
-        platform_name = "X" if platform_key == "x" else "Zhihu"
-        platform_coverage = store.collection_coverage(
-            platform=platform_name,
-            window_start=start,
-            window_end=end,
-        )
-        if args.resume and platform_coverage.get("target", 0) and platform_coverage.get("coverage", 0.0) >= 0.9:
-            skipped_platforms.append({
-                "platform": platform_name,
-                "reason": "coverage_already_at_least_90_percent",
-                "coverage": platform_coverage,
-            })
-            continue
-        reset_items += store.reset_interrupted_fetch_queue(fresh_key)
-        reset_items += store.reset_interrupted_fetch_queue(history_key)
-        if args.scope == "historical":
-            reset_items += store.reopen_fetch_queue(fresh_key)
-        provider = (
-            _post_provider(
-                "auto",
-                timeout_seconds=90 if args.scope == "historical" else 20,
-                batch_key=fresh_key,
-                history_mode=args.scope == "historical",
-            )
-            if platform_key == "x"
-            else _post_provider("auto", timeout_seconds=20)
-        )
-        first = run_post_fetch(
-            store,
-            provider,
-            platform_providers={"zhihu": _zhihu_provider()},
-            platforms={platform_key},
-            max_count=20 if args.scope == "recent" else 500,
-            fresh_first_page=args.scope == "recent",
-            reconcile_zhihu=False,
-            sleep_seconds=1.0,
-            # The shared X budget treats ordinary provider failures as
-            # deferred work; retrying inside the same window would consume a
-            # second request and can turn a local failure into a false 429.
-            retry_delays=(),
-            batch_key=fresh_key,
-            classifier=RuleClassifier(_classification_aliases()),
-        )
-        aggregate.append(first)
-        if args.scope == "recent" and not first.rate_limit_paused and first.queue_pending == 0:
-            reset_items += store.reopen_fetch_queue(history_key)
-            provider = _post_provider(
-                "auto",
-                timeout_seconds=20,
-                batch_key=history_key,
-                history_mode=True,
-            ) if platform_key == "x" else provider
-            second = run_post_fetch(
-                store,
-                provider,
-                platform_providers={"zhihu": _zhihu_provider()},
-                platforms={platform_key},
-                max_count=100,
-                reconcile_zhihu=False,
-                sleep_seconds=1.0,
-                retry_delays=(),
-                batch_key=history_key,
-                classifier=RuleClassifier(_classification_aliases()),
-            )
-            aggregate.append(second)
-    successful = sum(item.successful_kols for item in aggregate)
-    failed = sum(item.failed_kols for item in aggregate)
-    new_posts = sum(item.new_posts for item in aggregate)
-    errors = [error for item in aggregate for error in item.errors]
-    pending_queue = sum(item.queue_pending for item in aggregate)
-    if pending_queue:
-        errors.append(f"{pending_queue} recovery queue items remain pending")
-    status = "completed" if not pending_queue and not errors else "degraded"
-    store.finish_fetch_batch(
-        batch_id,
-        status=status,
-        completed_kols=successful + failed,
-        successful_kols=successful,
-        failed_kols=failed,
-        new_posts=new_posts,
-        error="; ".join(errors[:5]),
-    )
-    print(json.dumps({
-        "ok": bool(successful),
-        "scope": args.scope,
-        "batch_id": batch_id,
-        "reset_interrupted_queue_items": reset_items,
-        "skipped_platforms": skipped_platforms,
-        "runs": [item.__dict__ for item in aggregate],
-        "coverage": {
-            "X": store.collection_coverage(platform="X", window_start=start, window_end=end),
-            "Zhihu": store.collection_coverage(platform="Zhihu", window_start=start, window_end=end),
-        },
-    }, ensure_ascii=False, indent=2))
-    if not successful and failed:
-        raise SystemExit(2)
+    return kol_collection_commands.kol_gap_recover(sys.modules[__name__], args)
 
 
 def _twitter_xtf_payload(post: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
@@ -1457,486 +1047,51 @@ def _post_recovery_error_state(detail: str) -> tuple[str, str, int]:
 
 
 def kol_post_recovery(args: argparse.Namespace) -> None:
-    store = _post_store()
-    queued = store.enqueue_post_recovery(platform="" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu"))
-    reconciled = store.reconcile_post_recovery_queue()
-    summary_before = store.post_recovery_summary(platform="" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu"))
-    payload: dict[str, Any] = {
-        "ok": True,
-        "scope": args.scope,
-        "platform": args.platform,
-        "queued": queued,
-        "reconciled_bulk": reconciled,
-        "dry_run": not bool(args.apply),
-        "before": summary_before,
-        "processed": 0,
-        "hydrated": 0,
-        "terminal": 0,
-        "retryable": 0,
-        "errors": [],
-    }
-    if not args.apply:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
-    classifier = RuleClassifier(_classification_aliases())
-    platform_filter = "" if args.platform == "all" else ("X" if args.platform == "x" else "Zhihu")
-    x_sessions = XSessionManager(store) if args.platform in {"all", "x"} else None
-    x_batch_key = f"post-recovery:{uuid.uuid4().hex}"
-    x_slot_id: int | None = None
-    if args.platform in {"all", "zhihu"}:
-        # A single authenticated browser batch is shared by all per-answer
-        # requests. Failure here is reported once and remains retryable.
-        try:
-            _ensure_zhihu_browser_session()
-        except Exception as exc:
-            if args.platform == "zhihu":
-                payload["ok"] = False
-                payload["errors"].append(f"auth_or_browser_preflight: {exc}")
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-                raise SystemExit(2)
-    # Process in bounded durable batches.  With no explicit limit the command
-    # drains the queue; an interruption leaves remaining rows queued/cooldown
-    # for the next --resume invocation.
-    budget = max(0, int(args.limit or 0))
-    processed_budget = 0
-    while True:
-        batch_limit = min(1000, budget - processed_budget) if budget else 1000
-        if batch_limit <= 0:
-            break
-        queue = store.list_post_recovery_queue(platform=platform_filter, limit=batch_limit, resume=args.resume)
-        if not queue:
-            break
-        for item in queue:
-            if budget and processed_budget >= budget:
-                break
-            if not store.mark_post_recovery_running(str(item["post_id"])):
-                # Another worker claimed this row between SELECT and UPDATE.
-                # This makes bounded parallel recovery safe and idempotent.
-                continue
-            processed_budget += 1
-            payload["processed"] += 1
-            try:
-                post_row = store.get_post(str(item["post_id"]))
-                if not post_row or (str(post_row.get("text") or "").strip() or str(post_row.get("article_text") or "").strip()):
-                    store.finish_post_recovery(str(item["post_id"]), state="hydrated", provider="existing")
-                    payload["hydrated"] += 1
-                    continue
-                kol = {"id": item["kol_id"], "handle": item["handle"], "display_name": post_row.get("display_name") or item["handle"], "tracking_mode": "direct_profile"}
-                if item["platform"] == "X":
-                    if x_sessions is not None and x_slot_id is None:
-                        x_slot_id = x_sessions.batch_slot(x_batch_key, "history")
-                    raw, provider_name, warning = _twitter_single_payload(
-                        post_row,
-                        session_manager=x_sessions,
-                        batch_key=x_batch_key,
-                        slot_id=x_slot_id,
-                    )
-                    record = normalise_twitter_post(raw, kol, provider=provider_name, provider_warning=warning)
-                else:
-                    raw = _zhihu_single_payload(post_row)
-                    record = normalise_zhihu_answer(raw, kol, provider="zhihu-local")
-                store.upsert_post(record)
-                store.save_rule_classification(record.post_id, classifier.classify(record))
-                store.finish_post_recovery(str(item["post_id"]), state="hydrated", provider=record.canonical_provider)
-                payload["hydrated"] += 1
-            except Exception as exc:
-                detail = str(exc)
-                state, error_code, retry_after = _post_recovery_error_state(detail)
-                store.finish_post_recovery(str(item["post_id"]), state=state, error_code=error_code, error=detail, retry_after_seconds=retry_after)
-                if state == "terminal":
-                    payload["terminal"] += 1
-                else:
-                    payload["retryable"] += 1
-                payload["errors"].append({"post_id": item["post_id"], "code": error_code, "error": detail[:500]})
-        if budget and processed_budget >= budget:
-            break
-    payload["after"] = store.post_recovery_summary(platform=platform_filter)
-    payload["ok"] = not bool(payload["errors"]) or payload["hydrated"] > 0
-    report_path = getattr(args, "report", None)
-    if report_path:
-        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(report_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+    return kol_collection_commands.kol_post_recovery(sys.modules[__name__], args)
 
 
 def kol_fetch_queue_compact(args: argparse.Namespace) -> None:
-    store = _post_store()
-    cutoff = datetime.now(SHANGHAI) - timedelta(hours=max(1, args.older_than_hours))
-    keys = store.archive_legacy_fetch_batches(cutoff)
-    print(json.dumps({"ok": True, "archived_batches": len(keys), "batch_keys": keys}, ensure_ascii=False, indent=2))
+    return kol_collection_commands.kol_fetch_queue_compact(sys.modules[__name__], args)
 
 
 def kol_ai_resume(args: argparse.Namespace) -> None:
-    store = _post_store()
-    completed, failed = classify_pending_in_batches(
-        store,
-        build_batch_post_classifier(
-            KOL_BATCH_CLASSIFIER_SCHEMA,
-            ROOT,
-            deepseek_credentials=DeepSeekCredentialStore(),
-        ),
-        limit=args.limit,
-        daily_limit=args.daily_limit,
-    )
-    print(json.dumps({
-        "ok": failed == 0,
-        "completed": completed,
-        "failed": failed,
-        "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
-    }, ensure_ascii=False))
+    return kol_collection_commands.kol_ai_resume(sys.modules[__name__], args)
 
 
 def kol_ai_queue_maintain(args: argparse.Namespace) -> None:
-    store = _post_store()
-    before = store.model_queue_summary(daily_limit=args.daily_limit)
-    recovered = store.recover_stale_classification() if args.recover_stale else {"ocr": 0, "model": 0}
-    changed = store.prepare_model_queue() if args.apply else 0
-    after = store.model_queue_summary(daily_limit=args.daily_limit) if args.apply else before
-    print(json.dumps({
-        "ok": True,
-        "dry_run": not bool(args.apply),
-        "changed": changed,
-        "recovered_stale": recovered,
-        "before": before,
-        "after": after,
-        "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
-    }, ensure_ascii=False, indent=2))
+    return kol_collection_commands.kol_ai_queue_maintain(sys.modules[__name__], args)
 
 
 def kol_import(args: argparse.Namespace) -> None:
-    store = _post_store()
-    if args.platform != "zhihu" or not args.from_linked_profiles:
-        raise SystemExit("only --platform zhihu --from-linked-profiles is supported")
-    profiles = store.list_digest_author_profiles()
-    created = 0
-    existing = 0
-    imported: list[dict[str, Any]] = []
-    for profile in profiles:
-        handle = str(profile.get("handle") or "").strip()
-        if not handle:
-            continue
-        kol_id, was_created = store.add_kol(
-            str(profile.get("display_name") or handle),
-            handle,
-            platform="Zhihu",
-            profile_url=str(profile.get("profile_url") or ""),
-            status="paused",
-            tracking_mode="direct_profile",
-            domain="Zhihu direct profile",
-        )
-        store.update_digest_author_profile_status(handle, "paused")
-        created += int(was_created)
-        existing += int(not was_created)
-        kol = store.get_kol(kol_id)
-        if kol:
-            imported.append(kol)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "platform": "Zhihu",
-                "created": created,
-                "existing": existing,
-                "total": len(imported),
-                "items": imported,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    return kol_collection_commands.kol_import(sys.modules[__name__], args)
 
 
 def kol_zhihu_onboard(args: argparse.Namespace) -> None:
-    store = _post_store()
-    zhihu = [
-        item for item in store.list_kols()
-        if item.get("platform") == "Zhihu" and item.get("tracking_mode") == "direct_profile"
-    ]
-    paused = [item for item in zhihu if item.get("status") == "paused"]
-    active = [item for item in zhihu if item.get("status") == "active"]
-    activated: list[dict[str, Any]] = []
-    if args.advance:
-        for item in paused[: max(1, args.batch_size)]:
-            store.update_kol(int(item["id"]), {"status": "active"})
-            store.queue_backfill(int(item["id"]), max(1, args.backfill))
-            store.update_digest_author_profile_status(str(item["handle"]), "active")
-            refreshed = store.get_kol(int(item["id"]))
-            if refreshed:
-                activated.append(refreshed)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "platform": "Zhihu",
-                "active_before": len(active),
-                "paused_before": len(paused),
-                "activated": activated,
-                "active_after": len([
-                    item for item in store.list_kols("active")
-                    if item.get("platform") == "Zhihu"
-                    and item.get("tracking_mode") == "direct_profile"
-                ]),
-                "remaining_paused": len([
-                    item for item in store.list_kols("paused")
-                    if item.get("platform") == "Zhihu"
-                    and item.get("tracking_mode") == "direct_profile"
-                ]),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    return kol_collection_commands.kol_zhihu_onboard(sys.modules[__name__], args)
 
 
 def kol_fallback_mode(args: argparse.Namespace) -> None:
-    store = _post_store()
-    if not args.set:
-        print(json.dumps({"mode": _fallback_mode(), "shadow_rollout": store.shadow_rollout_status()}, ensure_ascii=False, indent=2))
-        return
-    if args.set == "enabled":
-        rollout = store.shadow_rollout_status()
-        if not rollout["ready"]:
-            print(json.dumps({"ok": False, "mode": _fallback_mode(), "shadow_rollout": rollout}, ensure_ascii=False, indent=2))
-            raise SystemExit(2)
-    FALLBACK_MODE_STATE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = FALLBACK_MODE_STATE.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"mode": args.set, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, FALLBACK_MODE_STATE)
-    print(json.dumps({"ok": True, "mode": args.set}, ensure_ascii=False))
+    return kol_collection_commands.kol_fallback_mode(sys.modules[__name__], args)
 
 
 def kol_post_fetch(args: argparse.Namespace) -> None:
-    store = _post_store()
-    requested = args.backfill or 50
-    handles = {
-        value.strip().lstrip("@").casefold()
-        for value in str(getattr(args, "handles", "") or "").split(",")
-        if value.strip()
-    }
-    batch_key = str(getattr(args, "batch_key", "") or f"scheduled:{args.as_of or date.today().isoformat()}:{args.platform}")
-    result = run_post_fetch(
-        store,
-        _post_provider(
-            args.provider,
-            batch_key=batch_key,
-            history_mode="history" in batch_key or "gap-" in batch_key,
-        ),
-        platform_providers={"zhihu": _zhihu_provider()},
-        platforms=None if args.platform == "all" else {args.platform},
-        handles=handles or None,
-        max_count=requested,
-        classifier=RuleClassifier(_classification_aliases()),
-        dry_run=args.dry_run,
-        batch_key=batch_key,
-        fresh_first_page=bool(getattr(args, "fresh_first_page", False)),
-    )
-    codex_completed = codex_failed = 0
-    if not args.dry_run and not args.skip_classify:
-        codex_completed, codex_failed = classify_pending_with_codex(
-            store,
-            build_post_classifier(KOL_CLASSIFIER_SCHEMA, ROOT),
-            limit=args.classify_limit,
-        )
-        store.save_fetch_model_result(result.run_id, codex_completed, codex_failed)
-    lead_payload: dict[str, Any] = {}
-    if not args.dry_run and not getattr(args, "skip_leads", False):
-        lead_payload = _extract_leads_to_market(store)
-    codex_failure_streak = store.codex_failure_streak()
-    payload = {
-        **result.__dict__,
-        "as_of": args.as_of or date.today().isoformat(),
-        "codex_completed": codex_completed,
-        "codex_failed": codex_failed,
-        "codex_failure_streak": codex_failure_streak,
-        "provider": args.provider,
-        "dry_run": args.dry_run,
-        "fallback_mode": _fallback_mode(),
-        "stock_leads": lead_payload,
-    }
-    if args.notify and not args.alerts_only:
-        digest = (
-            f"[KOL自动采集] 完成账号 {result.successful_kols}，失败 {result.failed_kols}，"
-            f"新增帖子 {result.new_posts}，疑似荐股 {result.candidate_posts}，"
-            f"待审核 {result.pending_reviews}，Codex成功 {codex_completed}、失败 {codex_failed}。"
-        )
-        if result.gap_kols:
-            digest += " 数据缺口：" + "、".join("@" + handle for handle in result.gap_kols) + "。"
-        if result.errors:
-            digest += " 错误：" + "；".join(result.errors[:3])
-        payload["notification_sent"] = _send_feishu(digest)
-        payload["auth_alert_sent"] = _send_transition_alert(
-            "primary_auth_failed",
-            result.auth_status == "failed",
-            "[KOL自动采集告警] X Cookie 已失效，请在本地工作台系统页更新 auth_token 和 ct0。",
-        )
-        payload["fallback_alert_sent"] = _send_transition_alert(
-            "nitter_fallback_used",
-            bool(result.fallback_kols),
-            "[KOL自动采集告警] 主采集源不可用，今日已启用本地 Nitter 备用源。",
-        )
-        payload["all_failed_alert_sent"] = _send_transition_alert(
-            "all_providers_failed",
-            result.successful_kols == 0 and result.failed_kols > 0,
-            "[KOL自动采集告警] 主源与备用源均失败，本次未推进抓取游标。",
-        )
-        payload["gap_alert_sent"] = _send_transition_alert(
-            "gap_detected",
-            bool(result.gap_kols),
-            "[KOL自动采集告警] 检测到时间线缺口，请在本地工作台检查抓取审计。",
-        )
-        payload["shadow_alert_sent"] = _send_transition_alert(
-            "shadow_fallback_failed",
-            bool(result.shadow_failed_kols),
-            "[KOL自动采集告警] Nitter shadow 比对失败，请检查备用账号会话和容器状态。",
-        )
-        payload["codex_alert_sent"] = _send_transition_alert(
-            "codex_failure_streak",
-            codex_failure_streak >= 3,
-            f"[KOL自动采集告警] Codex 已连续 {codex_failure_streak} 次分类运行全部失败，请检查 Codex CLI。",
-        )
-    if args.alerts_only:
-        payload["auth_alert_sent"] = _send_transition_alert(
-            "primary_auth_failed",
-            result.auth_status == "failed",
-            "[KOL采集告警] X会话已失效，请在本地工作台更新凭据。",
-        )
-        payload["all_failed_alert_sent"] = _send_transition_alert(
-            "all_providers_failed",
-            result.successful_kols == 0 and result.failed_kols > 0,
-            "[KOL采集告警] 本次所有采集源均失败，抓取游标没有推进。",
-        )
-        payload["gap_alert_sent"] = _send_transition_alert(
-            "gap_detected",
-            bool(result.gap_kols),
-            "[KOL采集告警] 检测到时间线缺口，请在本地工作台检查采集审计。",
-        )
-        payload["shadow_alert_sent"] = _send_transition_alert(
-            "shadow_fallback_failed",
-            bool(result.shadow_failed_kols),
-            "[KOL采集告警] Nitter影子比对失败，请检查备用会话和容器。",
-        )
-    print(json.dumps(payload, ensure_ascii=False))
-    if result.successful_kols == 0 and result.failed_kols:
-        raise SystemExit(2)
+    return kol_collection_commands.kol_post_fetch(sys.modules[__name__], args)
 
 
 def kol_fetch_resume(args: argparse.Namespace) -> None:
-    store = _post_store()
-    batch_key = args.batch_key or store.latest_pending_fetch_batch(
-        "" if args.platform == "all" else args.platform
-    )
-    if not batch_key:
-        print(json.dumps({"ok": True, "status": "nothing_pending"}, ensure_ascii=False))
-        return
-    result = run_post_fetch(
-        store,
-        _post_provider(
-            args.provider,
-            batch_key=batch_key,
-            history_mode="history" in batch_key or "gap-" in batch_key,
-        ),
-        platform_providers={"zhihu": _zhihu_provider()},
-        platforms=None if args.platform == "all" else {args.platform},
-        max_count=args.fetch_count,
-        classifier=RuleClassifier(_classification_aliases()),
-        batch_key=batch_key,
-    )
-    print(
-        json.dumps(
-            {"ok": not result.errors, "batch_key": batch_key, **result.__dict__},
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    if result.errors and result.queue_pending == 0:
-        raise SystemExit(2)
+    return kol_collection_commands.kol_fetch_resume(sys.modules[__name__], args)
 
 
-def kol_nitter_materialize(_: argparse.Namespace) -> None:
-    files = materialize_nitter_runtime(NITTER_RUNTIME, NITTER_TEMPLATE, NitterCredentialStore())
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "config_path": str(files.config_path),
-                "sessions_path": str(files.sessions_path),
-            },
-            ensure_ascii=False,
-        )
-    )
+def kol_nitter_materialize(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_nitter_materialize(sys.modules[__name__], args)
 
 
-def kol_nitter_doctor(_: argparse.Namespace) -> None:
-    docker = docker_health()
-    nitter = timeline_health(NITTER_URL)
-    checks = {
-        "ok": False,
-        "docker": docker,
-        "nitter": nitter,
-        "nitter_url": NITTER_URL,
-        "nitter_credentials_configured": NitterCredentialStore().configured(),
-        "xtf_command": str(XTF_COMMAND) if XTF_COMMAND.exists() else "",
-        "xtf_version": xtf_version(XTF_COMMAND) if XTF_COMMAND.exists() else "",
-        "config_template": str(NITTER_TEMPLATE),
-        "config_template_exists": NITTER_TEMPLATE.exists(),
-    }
-    checks["ok"] = bool(
-        docker["ready"]
-        and nitter["ready"]
-        and checks["nitter_credentials_configured"]
-        and checks["xtf_command"]
-        and checks["config_template_exists"]
-    )
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_nitter_doctor(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_nitter_doctor(sys.modules[__name__], args)
 
 
 def kol_post_classify(args: argparse.Namespace) -> None:
-    store = _post_store()
-    aliases = _classification_aliases()
-    ocr_completed, ocr_failed = process_pending_ocr_with_budget(
-        store,
-        _ocr_classifier(),
-        RuleClassifier(aliases),
-        daily_limit=args.ocr_limit,
-    )
-    if args.skip_codex:
-        store.prepare_model_queue()
-        completed = failed = 0
-    else:
-        try:
-            completed, failed = classify_pending_in_batches(
-                store,
-                build_batch_post_classifier(
-                    KOL_BATCH_CLASSIFIER_SCHEMA,
-                    ROOT,
-                    deepseek_credentials=DeepSeekCredentialStore(),
-                ),
-                limit=args.limit,
-                daily_limit=args.daily_limit,
-            )
-        except ModelWorkerBusyError:
-            print(json.dumps({"ok": True, "skipped": "model_worker_busy"}, ensure_ascii=False))
-            return
-    leads = _extract_leads_to_market(store)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "degraded": bool(ocr_failed or failed),
-                "ocr_completed": ocr_completed,
-                "ocr_failed": ocr_failed,
-                "codex_completed": completed,
-                "codex_failed": failed,
-                "stock_leads": leads,
-                "daily_budget": ModelDailyBudget(store, daily_limit=args.daily_limit).status(),
-            },
-            ensure_ascii=False,
-        )
-    )
+    return kol_collection_commands.kol_post_classify(sys.modules[__name__], args)
 
 
 def _recommendation_repair_ids(
@@ -2108,89 +1263,7 @@ def _run_recommendation_ai_repair(
 
 
 def kol_recommendation_repair(args: argparse.Namespace) -> None:
-    store = _post_store()
-    review_date = date.today().isoformat()
-    if args.doctor:
-        with store.connect() as db:
-            status_rows = db.execute(
-                "SELECT draft_generation_status,COUNT(*) FROM classifications GROUP BY draft_generation_status"
-            ).fetchall()
-            anomaly_count = int(
-                db.execute(
-                    """
-                    SELECT COUNT(*) FROM posts p JOIN classifications c ON c.post_id=p.post_id
-                    WHERE p.review_status='pending' AND c.content_type='recommendation'
-                      AND c.evidence_type='original_pre_event'
-                      AND c.model_status='completed'
-                      AND NOT EXISTS(
-                          SELECT 1 FROM recommendation_drafts d
-                          WHERE d.post_id=p.post_id
-                            AND d.status IN ('ready','needs_attention','approved','rejected')
-                      )
-                    """
-                ).fetchone()[0]
-            )
-        print(json.dumps({
-            "ok": True,
-            "database": str(store.path),
-            "schema": {str(row[0]): int(row[1]) for row in status_rows},
-            "recommendation_without_drafts": anomaly_count,
-            "repair_candidates": len(_recommendation_repair_ids(store)),
-            "full_rules_scan_candidates": len(
-                _recommendation_repair_ids(store, include_non_candidates=True)
-            ),
-        }, ensure_ascii=False, indent=2))
-        return
-
-    if args.post_id:
-        post_ids = [args.post_id]
-    elif args.all or args.pending_ai:
-        post_ids = _recommendation_repair_ids(
-            store,
-            limit=args.limit,
-            include_non_candidates=bool(args.all),
-        )
-    else:
-        raise SystemExit("use --doctor, --all, --pending-ai, or --post-id")
-
-    if args.rules_only:
-        result = _run_recommendation_rules_repair(store, post_ids, review_date=review_date)
-        mode = "rules"
-    elif args.pending_ai or args.post_id:
-        result = _run_recommendation_ai_repair(
-            store,
-            post_ids,
-            review_date=review_date,
-            max_runtime=float(args.max_runtime),
-        )
-        mode = "ai"
-    else:
-        result = _run_recommendation_rules_repair(store, post_ids, review_date=review_date)
-        mode = "rules"
-    result["ok"] = not result.get("errors")
-    result["partial"] = bool(result.get("stopped_reason"))
-    result["mode"] = mode
-    result["review_date"] = review_date
-    lead_result = _extract_leads_to_market(store)
-    result["stock_leads"] = {
-        "processed_posts": lead_result["processed_posts"],
-        "created": lead_result["created"],
-        "updated": lead_result["updated"],
-        "failed": lead_result["failed"],
-        "confirmed_count": len(lead_result["confirmed_symbols"]),
-        "reconciled_count": len(lead_result["reconciled_symbols"]),
-        "queued_count": len(lead_result["queued_symbols"]),
-    }
-    # A full historical rules scan can touch thousands of posts. Keep the
-    # CLI response useful for Hermes and shells without dropping the audit
-    # data, which remains in SQLite.
-    if len(result.get("results", [])) > 100:
-        result["results_sample"] = result["results"][:20]
-        result["results_truncated"] = len(result["results"])
-        result.pop("results", None)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if not result["ok"]:
-        raise SystemExit(2)
+    return kol_review_commands.kol_recommendation_repair(sys.modules[__name__], args)
 
 
 def _review_agent_runner() -> ReviewAgentRunner:
@@ -2204,224 +1277,36 @@ def _review_agent_runner() -> ReviewAgentRunner:
     )
 
 
-def kol_review_agent_doctor(_: argparse.Namespace) -> None:
-    store = _post_store()
-    repository = ReviewAgentRepository(store)
-    summary = repository.summary()
-    checks = {
-        "ok": True,
-        "database": str(store.path),
-        "policy_version": summary["settings"]["policy_version"],
-        "mode": summary["settings"]["mode"],
-        "pending_posts": store.count_pending(),
-        "total_decisions": summary["total_decisions"],
-        "shadow_days": summary["shadow_days"],
-        "agreement": summary["agreement"],
-        "activation_ready": summary["activation_ready"],
-        "codex_cli": shutil.which("codex") or "",
-        "classifier_schema": KOL_CLASSIFIER_SCHEMA.exists(),
-        "unlimited_ocr_available": UnlimitedOcrBatchClassifier(
-            UNLIMITED_OCR_ROOT, UNLIMITED_OCR_RUNNER
-        ).available(),
-        "rapid_ocr_available": _ocr_classifier().available(),
-        "ocr_provider": "rapidocr",
-    }
-    checks["ok"] = bool(
-        checks["codex_cli"]
-        and checks["classifier_schema"]
-        and checks["rapid_ocr_available"]
-    )
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_review_agent_doctor(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_review_agent_doctor(sys.modules[__name__], args)
 
 
 def kol_review_agent_run(args: argparse.Namespace) -> None:
-    runner = _review_agent_runner()
-    result = runner.run(
-        mode=args.mode,
-        max_runtime_minutes=args.max_runtime,
-        max_items=args.max_items,
-        post_id=args.post_id or "",
-        dry_run=args.dry_run,
-    )
-    refresh_status = "not_requested"
-    if result["mode"] == "enabled" and result["queued_symbols"] and not args.dry_run:
-        try:
-            refresh = run_post_approval_refresh(
-                RUNTIME,
-                ROOT,
-                result["queued_symbols"],
-                as_of=date.today(),
-                timeout_seconds=240,
-                raise_on_error=True,
-            )
-            refresh_status = str(refresh["status"])
-        except Exception as exc:
-            refresh_status = "failed"
-            result["errors"].append(f"post-approval refresh: {str(exc)[:1000]}")
-    result["refresh_status"] = refresh_status
-    result["notification_errors"] = (
-        _send_pending_notifications(KolStore(KOL_ROOT)) if not args.dry_run else []
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["errors"]:
-        raise SystemExit(2)
+    return kol_review_commands.kol_review_agent_run(sys.modules[__name__], args)
 
 
-def kol_review_agent_report(_: argparse.Namespace) -> None:
-    repository = ReviewAgentRepository(_post_store())
-    print(json.dumps(repository.summary(), ensure_ascii=False, indent=2))
+def kol_review_agent_report(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_review_agent_report(sys.modules[__name__], args)
 
 
 def kol_morning_pipeline(args: argparse.Namespace) -> None:
-    store = _post_store()
-    market = _market_store()
-    review_date = date.fromisoformat(args.as_of) if args.as_of else date.today()
-
-    def fetcher():
-        batch_key = f"morning:{review_date.isoformat()}:{args.platform}"
-        return run_post_fetch(
-            store,
-            _post_provider(args.provider, batch_key=batch_key),
-            platform_providers={"zhihu": _zhihu_provider()},
-            platforms=None if args.platform == "all" else {args.platform},
-            max_count=args.fetch_count,
-            classifier=RuleClassifier(_classification_aliases()),
-            batch_key=batch_key,
-            fresh_first_page=True,
-        )
-
-    pipeline = MorningPipeline(
-        store,
-        market,
-        rule_classifier=RuleClassifier(_classification_aliases()),
-        batch_classifier=build_batch_post_classifier(
-            KOL_BATCH_CLASSIFIER_SCHEMA,
-            ROOT,
-            deepseek_credentials=DeepSeekCredentialStore(),
-        ),
-        ocr_classifier=_ocr_classifier(),
-        fetcher=fetcher,
-        market_writes_enabled=_market_writes_enabled(),
-        active_kol_count=sum(
-            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
-            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
-        ),
-    )
-    repository = RecommendationDraftRepository(store)
-    repository.interrupt_stale_runs()
-    result = pipeline.run(
-        as_of=review_date,
-        fetch=not args.skip_fetch,
-        backlog_limit=args.backlog_limit,
-        max_runtime_minutes=args.max_runtime,
-        phase=args.phase,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if not result["ok"] or result.get("alert_required"):
-        raise SystemExit(2)
+    return kol_review_commands.kol_morning_pipeline(sys.modules[__name__], args)
 
 
 def kol_morning_orchestrate(args: argparse.Namespace) -> None:
-    store = _post_store()
-    market = _market_store()
-    review_date = date.today()
-
-    def fetcher():
-        batch_key = f"morning:{review_date.isoformat()}:{args.platform}"
-        return run_post_fetch(
-            store,
-            _post_provider(args.provider, batch_key=batch_key),
-            platform_providers={"zhihu": _zhihu_provider()},
-            platforms=None if args.platform == "all" else {args.platform},
-            max_count=args.fetch_count,
-            classifier=RuleClassifier(_classification_aliases()),
-            batch_key=batch_key,
-            fresh_first_page=True,
-        )
-
-    pipeline = MorningPipeline(
-        store,
-        market,
-        rule_classifier=RuleClassifier(_classification_aliases()),
-        batch_classifier=build_batch_post_classifier(
-            KOL_BATCH_CLASSIFIER_SCHEMA,
-            ROOT,
-            deepseek_credentials=DeepSeekCredentialStore(),
-        ),
-        ocr_classifier=_ocr_classifier(),
-        fetcher=fetcher,
-        market_writes_enabled=_market_writes_enabled(),
-        active_kol_count=sum(
-            str(item.get("availability_status") or "active") not in {"suspended", "deleted", "protected", "paused"}
-            for item in store.list_kols("active", None if args.platform == "all" else args.platform)
-        ),
-    )
-    repository = RecommendationDraftRepository(store)
-    interrupted = repository.interrupt_stale_runs()
-
-    def run_phase(phase: str, runtime: float) -> dict[str, Any]:
-        return pipeline.run(
-            as_of=review_date,
-            fetch=not args.skip_fetch,
-            backlog_limit=0,
-            max_runtime_minutes=runtime,
-            phase=phase,
-        )
-
-    result = MorningOrchestrator(runner=run_phase).run()
-    result["interrupted_stale_runs"] = interrupted
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if not result["ok"] or any(item.get("alert_required") for item in result["results"]):
-        raise SystemExit(2)
+    return kol_review_commands.kol_morning_orchestrate(sys.modules[__name__], args)
 
 
-def kol_morning_migrate(_: argparse.Namespace) -> None:
-    store = _post_store()
-    result = RecommendationDraftRepository(store).migrate_legacy_review_queue()
-    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+def kol_morning_migrate(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_morning_migrate(sys.modules[__name__], args)
 
 
-def kol_morning_doctor(_: argparse.Namespace) -> None:
-    store = _post_store()
-    repository = RecommendationDraftRepository(store)
-    checks = {
-        "ok": True,
-        "database": str(store.path),
-        "schema": KOL_BATCH_CLASSIFIER_SCHEMA.exists(),
-        "codex_cli": shutil.which("codex") or "",
-        "deepseek_configured": DeepSeekCredentialStore().configured(),
-        "ocr_available": _ocr_classifier().available(),
-        "ocr_provider": "rapidocr",
-        "recent_runs": repository.recent_morning_runs(3),
-        "today": repository.morning_summary(date.today().isoformat()),
-    }
-    checks["ok"] = bool(
-        checks["schema"]
-        and (checks["codex_cli"] or checks["deepseek_configured"])
-        and checks["ocr_available"]
-    )
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_morning_doctor(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_morning_doctor(sys.modules[__name__], args)
 
 
-def kol_ui_doctor(_: argparse.Namespace) -> None:
-    checks = {
-        "ok": True,
-        "frontend_dist": str(KOL_UI_DIST),
-        "frontend_exists": (KOL_UI_DIST / "index.html").exists(),
-        "fastapi": dependency_available("fastapi"),
-        "uvicorn": dependency_available("uvicorn"),
-        "database": str(KOL_POST_DB),
-        "database_exists": KOL_POST_DB.exists(),
-        "url": "http://127.0.0.1:8123",
-    }
-    checks["ok"] = bool(checks["frontend_exists"] and checks["fastapi"] and checks["uvicorn"])
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    if not checks["ok"]:
-        raise SystemExit(2)
+def kol_ui_doctor(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_ui_doctor(sys.modules[__name__], args)
 
 
 def _market_store() -> MarketStore | FoundationBackedMarketStore:
@@ -2560,128 +1445,7 @@ def _run_foundation_refresh(target: date) -> dict[str, Any]:
 
 
 def kol_data_refresh(args: argparse.Namespace) -> None:
-    """Refresh the shared release, then update every KOL consumer from one pointer."""
-    lock_path = KOL_ROOT / "foundation-refresh.lock"
-    lock = FileLock(str(lock_path), timeout=1)
-    try:
-        lock.acquire()
-    except Timeout:
-        print(json.dumps({"ok": True, "status": "already_running", "lock": str(lock_path)}))
-        return
-    try:
-        target = _resolve_foundation_as_of(args.as_of)
-        before = _foundation_status()
-        before_as_of = str(before.get("as_of") or "")
-        refresh = {"ok": True, "status": "not_needed"}
-        refresh_required = bool(
-            before_as_of
-            and (
-                date.fromisoformat(before_as_of) < target
-                or before.get("coverage_complete") is False
-            )
-        )
-        if refresh_required:
-            refresh = _run_foundation_refresh(target)
-        after = _foundation_status()
-        effective_text = str(after.get("as_of") or before_as_of)
-        steps: list[dict[str, Any]] = [{"step": "foundation_before", **before}, {"step": "foundation_refresh", **refresh}]
-        if effective_text:
-            effective = min(target, date.fromisoformat(effective_text))
-        else:
-            effective = target
-        update = {
-            "ok": False,
-            "status": "skipped",
-            "reason": "foundation release unavailable",
-        }
-        if (
-            after.get("ok")
-            and effective_text
-            and (not refresh_required or refresh.get("ok"))
-        ):
-            command = [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "kol-update",
-                "--as-of",
-                effective.isoformat(),
-            ]
-            if args.notify:
-                command.append("--notify")
-            if args.dry_run:
-                command.append("--dry-run")
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=str(ROOT),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=float(os.environ.get("KOL_UPDATE_TIMEOUT_SECONDS", "1800")),
-                    check=False,
-                )
-                update = {
-                    "ok": completed.returncode == 0,
-                    "status": "updated" if completed.returncode == 0 else "failed",
-                    "effective_as_of": effective.isoformat(),
-                    "output_tail": (completed.stdout or completed.stderr or "")[-4000:],
-                }
-            except subprocess.TimeoutExpired:
-                update = {
-                    "ok": False,
-                    "status": "timed_out",
-                    "effective_as_of": effective.isoformat(),
-                }
-        technical = {
-            "ok": False,
-            "status": "skipped",
-            "reason": "returns update did not complete",
-        }
-        if update.get("ok") and not args.dry_run:
-            context_result = _backfill_event_contexts(
-                _market_store(),
-                KolStore(KOL_ROOT),
-                stale_only=True,
-            )
-            technical = {
-                "ok": bool(context_result.get("ok")),
-                "status": "updated" if context_result.get("ok") else "failed",
-                "created": len(context_result.get("created", [])),
-                "updated": len(context_result.get("updated", [])),
-                "skipped": len(context_result.get("skipped", [])),
-                "pending": len(context_result.get("pending", [])),
-                "errors": context_result.get("errors", []),
-            }
-        elif args.dry_run:
-            technical = {"ok": True, "status": "dry_run"}
-        steps.extend([
-            {"step": "foundation_after", **after},
-            {"step": "kol_update", **update},
-            {"step": "technical_context", **technical},
-        ])
-        payload = {
-            "ok": bool(
-                after.get("ok")
-                and update.get("ok")
-                and technical.get("ok")
-                and (not refresh_required or refresh.get("ok"))
-            ),
-            "status": (
-                "completed"
-                if update.get("ok") and technical.get("ok") and (not refresh_required or refresh.get("ok"))
-                else "degraded"
-            ),
-            "requested_as_of": target.isoformat(),
-            "effective_as_of": effective.isoformat(),
-            "foundation_release_id": after.get("release_id") or before.get("release_id", ""),
-            "steps": steps,
-        }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        if not payload["ok"]:
-            raise SystemExit(2)
-    finally:
-        lock.release()
+    return kol_research_commands.kol_data_refresh(sys.modules[__name__], args)
 
 
 def _backfill_event_contexts(
@@ -2765,136 +1529,20 @@ def _backfill_event_contexts(
     return result
 
 
-def kol_context_doctor(_: argparse.Namespace) -> None:
-    market = _market_store()
-    events = [event for event in KolStore(KOL_ROOT).load_events() if event.status in {"active", "completed"}]
-    current = []
-    pending = []
-    failed = []
-    for event in events:
-        value = market.get_event_technical_context(
-            event.event_id,
-            input_hash=event_context_input_hash(event.symbol, event.posted_at),
-        )
-        if value is None or value.get("status") == "pending":
-            pending.append(event.event_id)
-        if value is not None:
-            current.append(value)
-            if value.get("status") == "failed":
-                failed.append({"event_id": event.event_id, "error": value.get("error", "")})
-    with market.connect() as db:
-        schema_version = int(db.execute("SELECT MAX(version) FROM schema_meta").fetchone()[0] or 0)
-    payload = {
-        "ok": schema_version >= 4 and not failed,
-        "feature_version": FEATURE_VERSION,
-        "schema_version": schema_version,
-        "formal_events": len(events),
-        "contexts": len(current),
-        "complete": sum(value.get("status") == "complete" for value in current),
-        "partial": sum(value.get("status") == "partial" for value in current),
-        "pending_event_ids": pending,
-        "failed": failed,
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+def kol_context_doctor(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_context_doctor(sys.modules[__name__], args)
 
 
 def kol_context_backfill(args: argparse.Namespace) -> None:
-    _require_research_writes("kol-context-backfill")
-    event_ids = {args.event_id} if args.event_id else None
-    event_store = KolStore(KOL_ROOT)
-    if event_ids and not any(event.event_id in event_ids for event in event_store.load_events()):
-        raise SystemExit(f"event not found: {args.event_id}")
-    payload = _backfill_event_contexts(
-        _market_store(),
-        event_store,
-        event_ids=event_ids,
-        force=args.force,
-    )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+    return kol_research_commands.kol_context_backfill(sys.modules[__name__], args)
 
 
-def kol_event_data_doctor(_: argparse.Namespace) -> None:
-    event_store = KolStore(KOL_ROOT)
-    market_store = _market_store()
-    service = EventDossierService(_post_store(), event_store, market_store)
-    events = [event for event in event_store.load_events() if event.status in {"active", "completed"}]
-    snapshots = market_store.list_event_dossier_snapshots()
-    latest: dict[str, dict[str, Any]] = {}
-    for item in snapshots:
-        event_id = str(item.get("event_id") or "")
-        if event_id and event_id not in latest:
-            latest[event_id] = item
-    status_counts: Counter[str] = Counter()
-    errors: list[dict[str, str]] = []
-    for event in events:
-        snapshot = latest.get(event.event_id)
-        if snapshot:
-            snapshot_status = str(snapshot.get("status") or "unknown")
-            status_counts[snapshot_status] += 1
-            if snapshot_status == "failed":
-                errors.append({"event_id": event.event_id, "error": "latest dossier snapshot status=failed"})
-            continue
-        try:
-            dossier_status = str(service.build(event.event_id).get("status") or "unknown")
-            status_counts[dossier_status] += 1
-            if dossier_status == "failed":
-                errors.append({"event_id": event.event_id, "error": "dossier status=failed"})
-        except Exception as exc:
-            status_counts["failed"] += 1
-            errors.append({"event_id": event.event_id, "error": str(exc)[:1000]})
-    with market_store.connect() as db:
-        schema_version = int(db.execute("SELECT MAX(version) FROM schema_meta").fetchone()[0] or 0)
-    payload = {
-        "ok": schema_version >= 7 and not errors,
-        "schema_version": schema_version,
-        "formal_events": len(events),
-        "snapshots": len(snapshots),
-        "status_counts": dict(status_counts),
-        "missing_snapshot_event_ids": [event.event_id for event in events if event.event_id not in latest],
-        "errors": errors,
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+def kol_event_data_doctor(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_event_data_doctor(sys.modules[__name__], args)
 
 
 def kol_event_data_backfill(args: argparse.Namespace) -> None:
-    _require_research_writes("kol-event-data-backfill")
-    event_store = KolStore(KOL_ROOT)
-    market_store = _market_store()
-    service = EventDossierService(_post_store(), event_store, market_store)
-    wanted = {args.event_id} if args.event_id else None
-    events = [
-        event for event in event_store.load_events()
-        if event.status in {"active", "completed"}
-        and (wanted is None or event.event_id in wanted)
-    ]
-    if wanted and not events:
-        raise SystemExit(f"event not found: {args.event_id}")
-    snapshots: dict[str, dict[str, Any]] = {}
-    for item in market_store.list_event_dossier_snapshots():
-        event_id = str(item.get("event_id") or "")
-        if event_id and event_id not in snapshots:
-            snapshots[event_id] = item
-    result: dict[str, Any] = {"processed": 0, "created": [], "skipped": [], "errors": []}
-    for event in events:
-        if args.missing_only and event.event_id in snapshots and snapshots[event.event_id].get("status") not in {"failed", "pending"}:
-            result["skipped"].append(event.event_id)
-            continue
-        result["processed"] += 1
-        try:
-            dossier = service.refresh(event.event_id)
-            result["created"].append({"event_id": event.event_id, "status": dossier["status"]})
-        except Exception as exc:
-            result["errors"].append({"event_id": event.event_id, "error": str(exc)[:1000]})
-    result["ok"] = not result["errors"]
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if not result["ok"]:
-        raise SystemExit(2)
+    return kol_research_commands.kol_event_data_backfill(sys.modules[__name__], args)
 
 
 def _method_research_service(
@@ -2950,32 +1598,8 @@ def _exclusive_method_research(command):
     return wrapped
 
 
-def kol_method_research_doctor(_: argparse.Namespace) -> None:
-    service, provider = _method_research_service(
-        with_market_providers=False,
-        with_ai=True,
-    )
-    try:
-        payload = service.doctor()
-        interpreter = service.interpreter
-        primary_available = DeepSeekCredentialStore().configured()
-        payload["ai"] = {
-            "primary": str(interpreter.model_name) if interpreter else "",
-            "prompt_version": (
-                str(interpreter.prompt_version) if interpreter else ""
-            ),
-            "primary_available": primary_available,
-            "backup": "",
-            "backup_configured": False,
-            "automatic_codex_fallback": False,
-        }
-        payload["ok"] = bool(payload["ok"] and primary_available)
-    finally:
-        if provider is not None:
-            provider.close()
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    if not payload["ok"]:
-        raise SystemExit(2)
+def kol_method_research_doctor(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_method_research_doctor(sys.modules[__name__], args)
 
 
 def _selected_formal_events(
@@ -3102,139 +1726,12 @@ def _run_method_ai_batches(
 
 @_exclusive_method_research
 def kol_method_research_backfill(args: argparse.Namespace) -> None:
-    _require_research_writes("kol-method-research-backfill")
-    service, provider = _method_research_service(
-        with_market_providers=not args.skip_cross_section or args.with_minute,
-        with_ai=args.with_ai,
-    )
-    event_store = service.event_store
-    events = _selected_formal_events(event_store, event_id=args.event_id)
-    result: dict[str, Any] = {
-        "ok": True,
-        "formal_events": len(events),
-        "processed": 0,
-        "created": [],
-        "skipped": [],
-        "errors": [],
-        "ai": None,
-    }
-    try:
-        for event in events:
-            existing = service.market_store.get_event_method_research(event.event_id)
-            if existing and args.missing_only and not args.force:
-                result["skipped"].append(event.event_id)
-                continue
-            result["processed"] += 1
-            print(
-                f"event-research {result['processed']}/{len(events)} {event.event_id}",
-                file=sys.stderr,
-                flush=True,
-            )
-            try:
-                value = service.refresh(
-                    event.event_id,
-                    fetch_cross_section=not args.skip_cross_section,
-                    fetch_minute=args.with_minute,
-                )
-                result["created"].append(
-                    {
-                        "event_id": event.event_id,
-                        "snapshot_id": value["snapshot_id"],
-                        "created": value["created"],
-                        "status": value["research"]["status"],
-                        "fetch": value["fetch"],
-                    }
-                )
-            except Exception as exc:
-                result["errors"].append(
-                    {"event_id": event.event_id, "error": str(exc)[:2000]}
-                )
-        if args.with_ai:
-            result["ai"] = _run_method_ai_batches(
-                service,
-                event_ids=[event.event_id for event in events],
-                max_events=args.max_ai,
-            )
-            result["errors"].extend(result["ai"].get("errors") or [])
-    finally:
-        if provider is not None:
-            provider.close()
-    result["ok"] = not result["errors"]
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    if not result["ok"]:
-        raise SystemExit(2)
+    return kol_research_commands.kol_method_research_backfill(sys.modules[__name__], args)
 
 
 @_exclusive_method_research
 def kol_method_research_run(args: argparse.Namespace) -> None:
-    _require_research_writes("kol-method-research-run")
-    service, provider = _method_research_service(
-        with_market_providers=True,
-        with_ai=not args.skip_ai,
-    )
-    events = _selected_formal_events(service.event_store, event_id=args.event_id)
-    pending = [
-        event
-        for event in events
-        if service.market_store.get_event_method_research(event.event_id) is None
-        or not service.has_ready_interpretation(
-            event.event_id,
-            str(
-                (
-                    service.market_store.get_event_method_research(
-                        event.event_id
-                    )
-                    or {}
-                ).get("snapshot_id")
-                or ""
-            ),
-        )
-    ][: max(1, args.max_events)]
-    result: dict[str, Any] = {
-        "ok": True,
-        "selected": len(pending),
-        "objective": [],
-        "ai": None,
-        "errors": [],
-    }
-    try:
-        for event in pending:
-            print(
-                f"event-research {len(result['objective']) + len(result['errors']) + 1}/{len(pending)} {event.event_id}",
-                file=sys.stderr,
-                flush=True,
-            )
-            try:
-                value = service.refresh(
-                    event.event_id,
-                    fetch_cross_section=True,
-                    fetch_minute=args.with_minute,
-                )
-                result["objective"].append(
-                    {
-                        "event_id": event.event_id,
-                        "snapshot_id": value["snapshot_id"],
-                        "status": value["research"]["status"],
-                    }
-                )
-            except Exception as exc:
-                result["errors"].append(
-                    {"event_id": event.event_id, "error": str(exc)[:2000]}
-                )
-        if not args.skip_ai:
-            result["ai"] = _run_method_ai_batches(
-                service,
-                event_ids=[event.event_id for event in pending],
-                max_events=len(pending),
-            )
-            result["errors"].extend(result["ai"].get("errors") or [])
-    finally:
-        if provider is not None:
-            provider.close()
-    result["ok"] = not result["errors"]
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    if not result["ok"]:
-        raise SystemExit(2)
+    return kol_research_commands.kol_method_research_run(sys.modules[__name__], args)
 
 
 def _classification_aliases() -> dict[str, str]:
@@ -3376,8 +1873,8 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
     }
 
 
-def kol_leads_extract(_: argparse.Namespace) -> None:
-    print(json.dumps(_extract_leads_to_market(), ensure_ascii=False, indent=2))
+def kol_leads_extract(args: argparse.Namespace) -> None:
+    return kol_review_commands.kol_leads_extract(sys.modules[__name__], args)
 
 
 def market_init(args: argparse.Namespace) -> None:
@@ -3934,6 +2431,23 @@ def market_daily_publish(args: argparse.Namespace) -> None:
         _post_store(),
         free_stockdb_url=os.environ.get("FREESTOCKDB_URL", "http://127.0.0.1:7899"),
     )
+    promote_candidate = str(getattr(args, "promote_candidate", "") or "").strip()
+    if promote_candidate:
+        report_path = Path(args.report) if args.report else (
+            MARKET_ROOT.parent
+            / "restore-reports"
+            / f"market-daily-publish-repair-promote-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        )
+        payload = publisher.promote_existing_candidate(
+            Path(promote_candidate),
+            apply=bool(args.apply),
+            report_path=report_path,
+            ui_pid_path=KOL_ROOT / "ui" / "server.pid",
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if not payload.get("ok"):
+            raise SystemExit(2)
+        return
     target = publisher.resolve_target_date(str(args.as_of or "auto"))
     report_path = Path(args.report) if args.report else (
         MARKET_ROOT.parent / "restore-reports" / f"market-daily-publish-{target.isoformat()}.json"
@@ -3950,6 +2464,9 @@ def market_daily_publish(args: argparse.Namespace) -> None:
         report_path=report_path,
         runtime_root=RUNTIME,
         ui_pid_path=KOL_ROOT / "ui" / "server.pid",
+        candidate_root=(
+            Path(args.candidate_root) if str(args.candidate_root or "").strip() else None
+        ),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if not payload.get("ok"):
@@ -4427,27 +2944,11 @@ def market_minute_fetch(args: argparse.Namespace) -> None:
 
 
 def kol_intraday_backfill(args: argparse.Namespace) -> None:
-    _require_research_writes("kol-intraday-backfill")
-    event_store = KolStore(KOL_ROOT)
-    event_ids = None if args.all else {args.event_id}
-    if event_ids and not any(event.event_id in event_ids for event in event_store.load_events()):
-        raise SystemExit(f"event not found: {args.event_id}")
-    payload = backfill_event_intraday(
-        _market_store(),
-        event_store,
-        event_ids=event_ids,
-        force=args.force,
-    )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+    return kol_research_commands.kol_intraday_backfill(sys.modules[__name__], args)
 
 
-def kol_intraday_audit(_: argparse.Namespace) -> None:
-    payload = audit_event_intraday(_market_store(), KolStore(KOL_ROOT))
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if not payload["ok"]:
-        raise SystemExit(2)
+def kol_intraday_audit(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_intraday_audit(sys.modules[__name__], args)
 
 
 def market_sync(args: argparse.Namespace) -> None:
@@ -4490,10 +2991,14 @@ def market_sync(args: argparse.Namespace) -> None:
         return
     calendar_error = ""
     try:
-        open_dates = BaoStockMarketProvider().fetch_calendar(
-            requested_as_of - timedelta(days=730), requested_as_of
+        calendar_start = requested_as_of - timedelta(days=730)
+        open_dates = BaoStockMarketProvider().fetch_calendar(calendar_start, requested_as_of)
+        store.replace_calendar(
+            open_dates,
+            provider="baostock",
+            start=calendar_start,
+            end=requested_as_of,
         )
-        store.replace_calendar(open_dates, provider="baostock")
         store.refresh_lifecycles(as_of=requested_as_of)
     except Exception as exc:
         calendar_error = str(exc)
@@ -5319,6 +3824,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_market_publish.add_argument("--as-of", default="auto")
     p_market_publish.add_argument("--apply", action="store_true")
+    p_market_publish.add_argument(
+        "--promote-candidate",
+        help="strictly validate and promote an already-completed daily candidate",
+    )
+    p_market_publish.add_argument(
+        "--candidate-root",
+        help="create or resume this dated candidate while building the daily publication",
+    )
     p_market_publish.add_argument("--report")
     p_market_publish.set_defaults(func=market_daily_publish)
 

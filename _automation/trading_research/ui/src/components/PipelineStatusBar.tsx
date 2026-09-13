@@ -23,14 +23,20 @@ export default function PipelineStatusBar() {
   })
   const value = status.data
   const delivery = value?.morning_delivery
-  const marketClosed = value?.market_status === 'closed'
+  const marketClosed = value?.market_status === 'closed' || value?.market_status === 'post_close'
   const marketInSession = value?.market_status === 'trading' || value?.market_status === 'pre_open'
   const marketDetail = value?.market_status === 'trading'
     ? `交易中 · 日线截至 ${value?.latest_trade_date || '待同步'}`
     : value?.market_status === 'pre_open'
       ? `开盘前 · 日线截至 ${value?.latest_trade_date || '待同步'}`
-      : marketClosed
-    ? `休市 · 最新 ${value?.latest_trade_date || '待同步'}`
+      : value?.market_status === 'post_close'
+        ? `已收盘 · 最新 ${value?.latest_trade_date || '待同步'}`
+      : value?.market_status === 'closed'
+        ? `休市 · 最新 ${value?.latest_trade_date || '待同步'}`
+      : value?.market_status === 'freshness_unknown'
+        ? `新鲜度待确认 · 已发布 ${value?.published_as_of || value?.latest_trade_date || '未知'}`
+      : value?.market_status === 'stale'
+        ? `行情滞后 · 已发布 ${value?.published_as_of || value?.latest_trade_date || '未知'}`
     : value?.lagging_symbols?.length
       ? `${value.lagging_symbols.length} 只标的滞后`
       : `最新 ${value?.latest_trade_date || '待同步'}`
@@ -48,6 +54,6 @@ export default function PipelineStatusBar() {
     <div><RadioTower size={15} /><span><small>最近帖子采集</small><strong>{shortTime(value?.latest_fetch_at)}</strong></span><i className={value?.latest_fetch_status === 'success' ? 'ok' : 'warn'} /></div>
     <div title={`最近 AI：${shortTime(value?.latest_ai_at)}`}><Bot size={15} /><span><small>AI 队列</small><strong title={aiQueueLabel}>{aiQueueLabel}</strong></span><i className={value?.pending_ai || value?.failed_ai ? 'warn' : 'ok'} /></div>
     <div><CalendarCheck size={15} /><span><small>晨报交付</small><strong title={`${deliveryProgress} ${platformSummary}`}>{delivery?.completed_at ? `${deliveryLabels[delivery.status] || delivery.status} · ${shortTime(delivery.completed_at)}` : deliveryProgress || deliveryLabels[delivery?.status || ''] || '尚未交付'}</strong></span><i className={delivery?.status === 'ready' ? 'ok' : 'warn'} /></div>
-    <div><CandlestickChart size={15} /><span><small>行情交易日</small><strong>{marketDetail}</strong></span><i className={marketClosed || marketInSession || !value?.lagging_symbols?.length ? 'ok' : 'warn'} /></div>
+    <div><CandlestickChart size={15} /><span><small>行情交易日</small><strong>{marketDetail}</strong></span><i className={marketClosed || marketInSession || value?.market_status === 'current' ? 'ok' : 'warn'} /></div>
   </div>
 }

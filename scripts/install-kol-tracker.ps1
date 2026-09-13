@@ -47,7 +47,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $actionArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -RepoRoot `"$RepoRoot`""
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArguments
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "20:00"
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At "23:30"
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
@@ -69,6 +69,6 @@ if ($RunNow) {
     Start-ScheduledTask -TaskName $TaskName
 }
 
-Write-Host "Installed scheduled task: $TaskName (Monday-Friday at 20:00)"
+Write-Host "Installed scheduled task: $TaskName (Monday-Friday at 23:30 fallback; market publication triggers it on success)"
 Write-Host "Python: $python"
 Write-Host "Runner: $runner"

@@ -22,7 +22,7 @@ from filelock import FileLock
 import httpx
 
 from kol_posts import DeepSeekCredentialStore, ModelProviderUnavailableError
-from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL, opencode_go_headers
 from kol_tracker import (
     EventRecord,
     KolStore,
@@ -963,7 +963,10 @@ class DeepSeekPerformanceInterpreter:
             }
             response = httpx.post(
                 self.api_url,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=opencode_go_headers(
+                    api_key,
+                    f"kol-performance:{facts.get('platform')}:{facts.get('kol_name')}:{facts.get('as_of')}",
+                ),
                 json=body,
                 timeout=self.timeout_seconds,
             )

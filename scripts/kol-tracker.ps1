@@ -28,6 +28,8 @@ $logDirectory = Join-Path $runtime "kol\logs"
 $logPath = Join-Path $logDirectory "kol-tracker.log"
 $mutex = New-Object System.Threading.Mutex($false, "Local\KOLReturnTrackerDaily")
 $hasLock = $false
+$marketMutex = New-Object System.Threading.Mutex($false, "Local\MarketDataSyncDaily")
+$hasMarketLock = $false
 
 function Write-TrackerLog([string]$Message) {
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -52,6 +54,15 @@ try {
         Write-TrackerLog "Skipped because another tracker process holds the mutex."
         exit 0
     }
+    try {
+        $hasMarketLock = $marketMutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        $hasMarketLock = $true
+    }
+    if (-not $hasMarketLock) {
+        Write-TrackerLog "Skipped because market publication is still running; the publisher will trigger returns after success."
+        exit 0
+    }
     if (-not (Test-Path -LiteralPath $python)) {
         throw "Dedicated Python environment not found: $python"
     }
@@ -64,8 +75,17 @@ try {
         $arguments += "--notify"
     }
     Write-TrackerLog "Starting KOL update for $AsOf."
-    $output = & $python @arguments 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
+    $stdoutPath = Join-Path $logDirectory (".kol-tracker-" + [guid]::NewGuid().ToString("N") + ".out")
+    $stderrPath = Join-Path $logDirectory (".kol-tracker-" + [guid]::NewGuid().ToString("N") + ".err")
+    try {
+        & $python @arguments 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" }
+        $output = @($stdout, $stderr) -join [Environment]::NewLine
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
+    }
     if ($output.Trim()) {
         Write-TrackerLog $output.Trim()
     }
@@ -77,11 +97,17 @@ try {
 } catch {
     $message = $_.Exception.Message
     Write-TrackerLog "Tracker error: $message"
-    Send-FailureNotification $message
+    if (-not $NoNotify) {
+        Send-FailureNotification $message
+    }
     exit 1
 } finally {
     if ($hasLock) {
         $mutex.ReleaseMutex()
     }
+    if ($hasMarketLock) {
+        $marketMutex.ReleaseMutex()
+    }
     $mutex.Dispose()
+    $marketMutex.Dispose()
 }

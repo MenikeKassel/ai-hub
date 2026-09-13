@@ -1242,9 +1242,26 @@ class MarketStore:
                 [lifecycle, last_mentioned_at, now_iso(), symbol],
             )
 
-    def replace_calendar(self, open_dates: Iterable[date], *, provider: str) -> None:
+    def replace_calendar(
+        self,
+        open_dates: Iterable[date],
+        *,
+        provider: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> None:
         timestamp = now_iso()
-        rows = [(value.isoformat(), True, provider, timestamp) for value in sorted(set(open_dates))]
+        open_set = set(open_dates)
+        if start is None and open_set:
+            start = min(open_set)
+        if end is None and open_set:
+            end = max(open_set)
+        if start is not None and end is not None and end < start:
+            raise ValueError("calendar end precedes start")
+        values: list[date] = []
+        if start is not None and end is not None:
+            values = [start + timedelta(days=index) for index in range((end - start).days + 1)]
+        rows = [(value.isoformat(), value in open_set, provider, timestamp) for value in values]
         with self.lock(timeout=30), self.connect(lock=False) as db:
             db.execute("DELETE FROM trading_calendar WHERE provider=?", [provider])
             if rows:
@@ -1600,7 +1617,9 @@ class MarketStore:
                 [expected_cutoff.isoformat()],
             ).fetchone()
         latest_open_date = str(latest_open_row[0] or "") if latest_open_row else ""
-        if today_is_open and current.time() < MARKET_OPEN_TIME:
+        if today_open_row is None:
+            market_session_status = "unknown"
+        elif today_is_open and current.time() < MARKET_OPEN_TIME:
             market_session_status = "pre_open"
         elif today_is_open and current.time() < MARKET_CLOSE_TIME:
             market_session_status = "trading"
@@ -2221,32 +2240,47 @@ class TencentMarketProvider:
         import urllib.parse
         import urllib.request
 
-        # The endpoint treats the end date as exclusive.  Asking for the day
-        # after ``end`` therefore includes the requested final trading day.
-        query = urllib.parse.urlencode(
-            {
-                "param": ",".join(
-                    (
-                        self.provider_symbol(symbol, instrument_type),
-                        "day",
-                        start.strftime("%Y-%m-%d"),
-                        (end + timedelta(days=1)).strftime("%Y-%m-%d"),
-                        "1000",
-                        "qfq" if adjustment == "qfq" else "",
-                    )
-                )
-            }
-        )
-        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?" + query
-        request = urllib.request.Request(url, headers={"User-Agent": "ai-hub-market/3.0"})
-        with urllib.request.urlopen(request, timeout=15) as response:
-            body = response.read().decode("utf-8", errors="replace")
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Tencent returned invalid daily JSON for {symbol}") from exc
         code = self.provider_symbol(symbol, instrument_type)
-        rows = (((payload.get("data") or {}).get(code) or {}).get("day") or []) if isinstance(payload, dict) else []
+
+        def request_rows(start_value: str, end_value: str) -> list[Any]:
+            query = urllib.parse.urlencode(
+                {
+                    "param": ",".join(
+                        (
+                            code,
+                            "day",
+                            start_value,
+                            end_value,
+                            "1000",
+                            "qfq" if adjustment == "qfq" else "",
+                        )
+                    )
+                }
+            )
+            url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?" + query
+            request = urllib.request.Request(url, headers={"User-Agent": "ai-hub-market/3.0"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Tencent returned invalid daily JSON for {symbol}") from exc
+            values = (((payload.get("data") or {}).get(code) or {}).get("day") or []) if isinstance(payload, dict) else []
+            return values if isinstance(values, list) else []
+
+        # The endpoint treats the end date as exclusive. Asking for the day
+        # after ``end`` therefore includes the requested final trading day.
+        rows = request_rows(
+            start.strftime("%Y-%m-%d"),
+            (end + timedelta(days=1)).strftime("%Y-%m-%d"),
+        )
+        # Tencent's 920-code endpoint currently returns an empty ranged series
+        # while its undated form still returns the latest completed BJ bar.
+        # Daily publication only needs that incremental bar, and the normal
+        # date filter below prevents a quote outside the requested window from
+        # entering the warehouse.
+        if not rows and code.startswith("bj920"):
+            rows = request_rows("", "")
         if not isinstance(rows, list):
             raise RuntimeError(f"Tencent returned an invalid daily payload for {symbol}")
         # [date, open, close, high, low, volume]
@@ -2570,6 +2604,19 @@ class FreeStockDBMarketProvider:
                 params=params,
             )
             response.raise_for_status()
+            content_type = str(getattr(response, "headers", {}).get("content-type", ""))
+            if "application/x-msgpack" in content_type.casefold():
+                try:
+                    import msgpack
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "msgpack is required for FreeStockDB v0.3.5 responses"
+                    ) from exc
+                return msgpack.unpackb(
+                    response.content,
+                    raw=False,
+                    strict_map_key=False,
+                )
             return response.json()
         except Exception as exc:
             raise RuntimeError(f"FreeStockDB request failed: {exc}") from exc

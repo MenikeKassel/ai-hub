@@ -38,7 +38,45 @@ $stderr = Join-Path $runtime "server.err.log"
 $url = "http://127.0.0.1:$Port"
 $pidPath = Join-Path $runtime "server.pid"
 $metadataPath = Join-Path $runtime "server.process.json"
+$stopRequestPath = Join-Path $runtime "stop.request.json"
+$stopResultPath = Join-Path $runtime "stop.result.json"
 $mutexName = "Global\ai-hub-kol-ui-$Port"
+
+# The UI can run from an elevated logon task while the daily market publisher
+# intentionally runs with a limited token. A tokenized stop request lets that
+# existing managed task close its own listener before the atomic market swap.
+if (Test-Path -LiteralPath $stopRequestPath) {
+    $request = Get-Content -LiteralPath $stopRequestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Remove-Item -LiteralPath $stopRequestPath -Force -ErrorAction SilentlyContinue
+    $processIds = @()
+    if (Test-Path -LiteralPath $pidPath) {
+        $processIds += [int](Get-Content -LiteralPath $pidPath -Raw -Encoding ASCII).Trim()
+    }
+    if (Test-Path -LiteralPath $metadataPath) {
+        $metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($metadata.listener_pid) { $processIds += [int]$metadata.listener_pid }
+        if ($metadata.supervisor_pid) { $processIds += [int]$metadata.supervisor_pid }
+    }
+    $processIds += @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    try {
+        foreach ($processId in @($processIds | Select-Object -Unique)) {
+            $target = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($target) {
+                $target | Stop-Process -Force -ErrorAction Stop
+                $target | Wait-Process -Timeout 15 -ErrorAction Stop
+            }
+        }
+        Remove-Item -LiteralPath $pidPath,$metadataPath -Force -ErrorAction SilentlyContinue
+        [ordered]@{ token = $request.token; status = "stopped"; completed_at = [DateTimeOffset]::Now.ToString("o") } |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath $stopResultPath -Encoding UTF8
+        exit 0
+    } catch {
+        [ordered]@{ token = $request.token; status = "failed"; error = $_.Exception.Message; completed_at = [DateTimeOffset]::Now.ToString("o") } |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath $stopResultPath -Encoding UTF8
+        exit 1
+    }
+}
 
 function Get-HttpReady {
     try {

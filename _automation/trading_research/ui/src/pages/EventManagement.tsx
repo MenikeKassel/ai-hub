@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ExternalLink, History, Pencil, RotateCcw, Search, TrendingUp, X } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, ExternalLink, History, Pencil, RotateCcw, Search, TrendingUp, X } from 'lucide-react'
 import { api, formatDate } from '../api'
 import ActionToast from '../components/ActionToast'
 import EventDossierPanel from '../components/EventDossierPanel'
+import QueryState from '../components/QueryState'
+import { amendmentMessage, eventChanges, eventForm, toEventTimestamp } from '../eventEditing'
+import { updateRoute, useDirtyGuard, useRoute } from '../workspace'
 import type { Event, EventAmendment, EventUpdate } from '../types'
 
 type EventStatus = 'active' | 'completed' | 'candidate' | 'excluded' | 'archived'
@@ -26,10 +29,13 @@ function isWaiting(event: Event): boolean {
 
 export default function EventManagement() {
   const client = useQueryClient()
+  const { params } = useRoute()
   const events = useQuery({ queryKey: ['events'], queryFn: api.events })
   const [filter, setFilter] = useState<EventFilter>('active')
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState('')
+  const [page, setPage] = useState(1)
+  const routeEventId = params.get('event') || ''
   const values = events.data || []
   const counts = useMemo<Record<EventFilter, number>>(() => ({
     active: values.filter((event) => event.status === 'active').length,
@@ -47,40 +53,51 @@ export default function EventManagement() {
         .some((value) => value.toLowerCase().includes(query)))
       .sort((a, b) => b.posted_at.localeCompare(a.posted_at))
   }, [filter, search, values])
-  const selected = filtered.find((event) => event.event_id === selectedId) || filtered[0]
-  useEffect(() => { if (selectedId && !filtered.some((event) => event.event_id === selectedId)) setSelectedId('') }, [filtered, selectedId])
+  const effectiveSelectedId = routeEventId || selectedId
+  const linkedIndex = filtered.findIndex((event) => event.event_id === routeEventId)
+  const pageCount = Math.max(1, Math.ceil(filtered.length / 50))
+  const currentPage = linkedIndex >= 0 ? Math.floor(linkedIndex / 50) + 1 : Math.min(page, pageCount)
+  const pageItems = filtered.slice((currentPage - 1) * 50, currentPage * 50)
+  const selected = values.find((event) => event.event_id === effectiveSelectedId) || pageItems[0]
+  useEffect(() => { setPage(1) }, [filter, search])
+  useEffect(() => {
+    const linked = values.find((event) => event.event_id === routeEventId)
+    if (linked) setFilter(linked.status as EventStatus)
+  }, [routeEventId, events.data])
+  useEffect(() => { if (routeEventId && values.length && !values.some((event) => event.event_id === routeEventId)) updateRoute({ event: null }, true) }, [routeEventId, values])
   const mutation = useMutation({
     mutationFn: ({ id, value }: { id: string; value: EventUpdate }) => api.patchEvent(id, value),
-    onSuccess: () => { setSelectedId(''); client.invalidateQueries({ queryKey: ['events'] }); client.invalidateQueries({ queryKey: ['market'] }) },
+    onSuccess: () => { setSelectedId(''); updateRoute({ event: null }, true); client.invalidateQueries({ queryKey: ['events'] }); client.invalidateQueries({ queryKey: ['market'] }) },
   })
   const amendment = useMutation({
     mutationFn: ({ id, value }: { id: string; value: EventAmendment }) => api.amendEvent(id, value),
     onSuccess: () => { client.invalidateQueries({ queryKey: ['events'] }); client.invalidateQueries({ queryKey: ['market'] }); client.invalidateQueries({ queryKey: ['event-revisions'] }) },
   })
   const message = amendment.isPending ? '正在保存修订并评估收益重算…'
-    : amendment.isSuccess ? amendment.data.refresh_status === 'queued' ? '事件已修订，行情补齐与收益重算已入队' : '事件已修订，现有收益保持不变'
+    : amendment.isSuccess ? amendmentMessage(amendment.data)
       : amendment.isError ? String(amendment.error)
         : mutation.isPending ? '正在保存事件状态…' : mutation.isSuccess ? '事件状态已更新' : mutation.isError ? String(mutation.error) : ''
 
   return <section>
     <header className="page-header"><div><span className="eyebrow">FORMAL EVENTS</span><h1>正式事件</h1><p className="page-subtitle">这里只管理你已经批准的独立推荐证据、行情基准与跟踪状态。</p></div></header>
     <div className="event-summary" aria-label="正式事件概览">
-      {(['active', 'waiting', 'completed', 'candidate'] as EventFilter[]).map((value) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setSelectedId('') }}><span>{labels[value]}</span><strong>{counts[value]}</strong></button>)}
+      {(['active', 'waiting', 'completed', 'candidate'] as EventFilter[]).map((value) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setSelectedId(''); updateRoute({ event: null }, true) }}><span>{labels[value]}</span><strong>{events.data ? counts[value] : '—'}</strong></button>)}
     </div>
     <div className="event-manager-toolbar">
-      <div className="segmented" role="tablist">{(['active', 'waiting', 'completed', 'candidate', 'excluded', 'archived'] as EventFilter[]).map((value) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setSelectedId('') }}>{labels[value]} {counts[value]}</button>)}</div>
+      <div className="segmented" role="tablist">{(['active', 'waiting', 'completed', 'candidate', 'excluded', 'archived'] as EventFilter[]).map((value) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setSelectedId(''); updateRoute({ event: null }, true) }}>{labels[value]} {events.data ? counts[value] : '—'}</button>)}</div>
       <label className="search-field event-search"><Search size={15} /><input aria-label="搜索正式事件" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="事件、股票或 KOL" /></label>
-      <span>显示 {filtered.length} 条</span>
+      <span>{events.data ? `共 ${filtered.length} 条` : '等待事件数据'}</span>
     </div>
-    {events.isError && <div className="error-banner">事件读取失败：{String(events.error)}</div>}
-    <div className="event-manager">
-      <aside className="event-manager-list">{filtered.map((event) => <button className={selected?.event_id === event.event_id ? 'event-manager-item active' : 'event-manager-item'} key={event.event_id} onClick={() => setSelectedId(event.event_id)}>
+    <QueryState loading={events.isLoading} error={events.error} stale={Boolean(events.data)} />
+    {events.isError && <button className="secondary-button" onClick={() => events.refetch()}>重试读取事件</button>}
+    <div className={`event-manager ${effectiveSelectedId ? 'show-detail' : ''}`}>
+      <aside className="event-manager-list">{pageItems.map((event) => <button className={selected?.event_id === event.event_id ? 'event-manager-item active' : 'event-manager-item'} key={event.event_id} onClick={() => { setSelectedId(event.event_id); updateRoute({ event: event.event_id }) }}>
         <div><span className="mono">{event.symbol || event.event_id}</span><span className={`badge ${eventTone(event.status)}`}>{isWaiting(event) ? '等待行情' : labels[event.status as EventStatus] || event.status}</span></div>
         <strong>{event.security_name || '标的待补'}</strong>
         <small>{event.kol_name} · {formatDate(event.posted_at).split(' ')[0]}</small>
         <p>{event.exclusion_reason || event.thesis || '尚未填写推荐理由'}</p>
-      </button>)}{!events.isLoading && !filtered.length && <div className="empty-state">没有符合当前筛选的事件</div>}</aside>
-      <main className="event-manager-detail">{selected ? <EventEditor event={selected} busy={mutation.isPending || amendment.isPending} onUpdate={(value) => mutation.mutate({ id: selected.event_id, value })} onAmend={(value) => amendment.mutate({ id: selected.event_id, value })} /> : <div className="empty-state">选择一条事件查看详情</div>}</main>
+      </button>)}{events.data && !filtered.length && <div className="empty-state">没有符合当前筛选的事件</div>}{events.data && filtered.length > 0 && <div className="queue-pagination"><span>第 {currentPage} / {pageCount} 页 · 每页 50 条</span><div><button className="icon-button" title="上一页事件" disabled={currentPage <= 1} onClick={() => { setPage(currentPage - 1); setSelectedId(''); updateRoute({ event: null }) }}><ArrowLeft size={16} /></button><button className="icon-button" title="下一页事件" disabled={currentPage >= pageCount} onClick={() => { setPage(currentPage + 1); setSelectedId(''); updateRoute({ event: null }) }}><ArrowRight size={16} /></button></div></div>}</aside>
+      <main className="event-manager-detail"><button className="secondary-button event-detail-back" onClick={() => { setSelectedId(''); updateRoute({ event: null }) }}><ArrowLeft size={16} />返回事件列表</button>{selected ? <EventEditor event={selected} busy={mutation.isPending || amendment.isPending} onUpdate={(value) => mutation.mutate({ id: selected.event_id, value })} onAmend={(value) => amendment.mutate({ id: selected.event_id, value })} /> : <div className="empty-state">选择一条事件查看详情</div>}</main>
     </div>
     {message && <ActionToast state={mutation.isPending || amendment.isPending ? 'pending' : mutation.isError || amendment.isError ? 'error' : 'success'} message={message} />}
   </section>

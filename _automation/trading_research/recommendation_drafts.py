@@ -383,6 +383,10 @@ class RecommendationDraftRepository:
             ).fetchone()
             if running is not None:
                 raise RuntimeError(f"morning pipeline already running: {running['run_id']}")
+            if db.execute("SELECT 1 FROM morning_runs WHERE review_date=? LIMIT 1", (review_date,)).fetchone() is None:
+                db.execute("""INSERT OR IGNORE INTO morning_targets(review_date,kol_id,platform)
+                    SELECT ?,id,platform FROM kols WHERE status='active'
+                    AND COALESCE(availability_status,'active') NOT IN ('suspended','deleted','protected','paused')""", (review_date,))
             db.execute(
                 """
                 INSERT INTO morning_runs(
@@ -399,6 +403,9 @@ class RecommendationDraftRepository:
         now: datetime | None = None,
         max_age_minutes: int = 70,
     ) -> int:
+        from runtime_jobs import worker_active
+        if worker_active(self.post_store.path, "morning"):
+            return 0
         current = now or datetime.now(SHANGHAI)
         if current.tzinfo is None:
             current = current.replace(tzinfo=SHANGHAI)
@@ -516,119 +523,8 @@ class RecommendationDraftRepository:
         return values
 
     def morning_delivery(self, review_date: str, *, now: datetime | None = None) -> dict[str, Any]:
-        current = now or datetime.now(SHANGHAI)
-        deadline = datetime.fromisoformat(f"{review_date}T09:00:00+08:00")
-        with self.post_store.connect() as db:
-            row = db.execute(
-                """
-                SELECT * FROM morning_runs
-                WHERE review_date=? AND phase='final' AND status != 'running'
-                ORDER BY started_at DESC LIMIT 1
-                """,
-                (review_date,),
-            ).fetchone()
-            coverage_row = db.execute(
-                """
-                SELECT active_kols,successful_kols,failed_kols FROM morning_runs
-                WHERE review_date=? AND successful_kols + failed_kols > 0
-                ORDER BY started_at DESC LIMIT 1
-                """,
-                (review_date,),
-            ).fetchone()
-            latest = db.execute(
-                """
-                SELECT * FROM morning_runs WHERE review_date=?
-                ORDER BY started_at DESC LIMIT 1
-                """,
-                (review_date,),
-            ).fetchone()
-            current_platform_rows = db.execute(
-                """
-                SELECT lower(platform) platform,COUNT(*) count
-                FROM kols
-                WHERE status='active'
-                  AND COALESCE(availability_status,'active') NOT IN
-                      ('suspended','deleted','protected','paused')
-                GROUP BY lower(platform)
-                """
-            ).fetchall()
-        current_platform_breakdown = {
-            str(item["platform"]): {
-                "target": int(item["count"]),
-                "success": 0,
-                "failed": 0,
-                "blocked": 0,
-                "rate_limited": 0,
-                "provider_failed": 0,
-                "pending": int(item["count"]),
-            }
-            for item in current_platform_rows
-        }
-        if row is None:
-            progress = dict(latest) if latest is not None else {}
-            active_kols = int(progress.get("active_kols") or 0)
-            successful_kols = int(progress.get("successful_kols") or 0)
-            platform_breakdown = _loads(
-                progress.get("platform_breakdown_json", "{}"), {}
-            )
-            if not platform_breakdown and successful_kols == 0:
-                active_kols = sum(item["target"] for item in current_platform_breakdown.values())
-                platform_breakdown = current_platform_breakdown
-            return {
-                "status": "pending" if current <= deadline else "missed",
-                "deadline": deadline.isoformat(),
-                "completed_at": "",
-                "coverage": successful_kols / active_kols if active_kols else 0.0,
-                "active_kols": active_kols,
-                "successful_kols": successful_kols,
-                "failed_kols": int(progress.get("failed_kols") or 0),
-                "errors": _loads(progress.get("errors_json", "[]"), []),
-                "latest_run_id": str(progress.get("run_id") or ""),
-                "latest_phase": str(progress.get("phase") or ""),
-                "latest_status": str(progress.get("status") or "waiting"),
-                "stage": str(progress.get("stage") or "waiting"),
-                "progress_current": int(progress.get("progress_current") or 0),
-                "progress_total": int(progress.get("progress_total") or 0),
-                "platform_breakdown": platform_breakdown,
-            }
-        value = dict(row)
-        completed_at = datetime.fromisoformat(str(value.get("completed_at") or value["started_at"]))
-        errors = _loads(value.get("errors_json", "[]"), [])
-        platform_breakdown = _loads(value.get("platform_breakdown_json", "{}"), {})
-        attempted_kols = int(value.get("successful_kols") or 0) + int(value.get("failed_kols") or 0)
-        active_kols = attempted_kols or int(value.get("active_kols") or 0)
-        successful_kols = int(value.get("successful_kols") or 0)
-        failed_kols = int(value.get("failed_kols") or 0)
-        if not platform_breakdown and attempted_kols == 0:
-            active_kols = sum(item["target"] for item in current_platform_breakdown.values())
-            platform_breakdown = current_platform_breakdown
-        if attempted_kols == 0 and coverage_row is not None:
-            successful_kols = int(coverage_row["successful_kols"] or 0)
-            failed_kols = int(coverage_row["failed_kols"] or 0)
-            active_kols = successful_kols + failed_kols or int(coverage_row["active_kols"] or 0)
-        if completed_at > deadline:
-            status = "late"
-        elif value["status"] == "completed" and not errors and failed_kols == 0:
-            status = "ready"
-        else:
-            status = "degraded"
-        return {
-            "status": status,
-            "deadline": deadline.isoformat(),
-            "completed_at": value.get("completed_at") or "",
-            "coverage": successful_kols / active_kols if active_kols else 0.0,
-            "active_kols": active_kols,
-            "successful_kols": successful_kols,
-            "failed_kols": failed_kols,
-            "errors": errors,
-            "latest_run_id": str(value.get("run_id") or ""),
-            "latest_phase": str(value.get("phase") or "final"),
-            "latest_status": str(value.get("status") or ""),
-            "stage": str(value.get("stage") or "completed"),
-            "progress_current": int(value.get("progress_current") or 0),
-            "progress_total": int(value.get("progress_total") or 0),
-            "platform_breakdown": platform_breakdown,
-        }
+        from morning_status import delivery_status
+        return delivery_status(self.post_store, review_date, now=now)
 
     def migrate_legacy_review_queue(self) -> dict[str, int]:
         """Remove old non-candidates from the user queue without deleting source posts."""

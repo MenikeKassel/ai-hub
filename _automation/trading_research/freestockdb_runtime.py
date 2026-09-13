@@ -63,9 +63,9 @@ DEFAULT_RUNTIME_ROOT = Path(
     os.environ.get("TRADING_RUNTIME_ROOT", Path(__file__).resolve().parents[2] / "_runtime" / "trading")
 )
 MIN_FREE_BYTES = 5 * 1024 * 1024 * 1024
-EXPECTED_RELEASE = "v0.2.1"
-EXPECTED_SERVER_SHA256 = "ccd847e9221f57eafc4c1c995ed52b2e9e0d3172bfe5ee8ebce5251b9f4ea0bb"
-EXPECTED_UPDATER_SHA256 = "011ef6c6b620126db7e1cc8d5fc9214da13faf4cc66ef4da0484987d7ad48b1a"
+EXPECTED_RELEASE = "v0.3.5-more-power"
+EXPECTED_SERVER_SHA256 = "a8df43aa3d14f79b5a99a6f4e826a4efdf227f4a9f9fcad9d60a1b8a73985a90"
+EXPECTED_UPDATER_SHA256 = "ee833769e9b2d8765e5919d93c73cb0f5f7732b4971ee31746eb6e733b910fc8"
 MAX_CLOSE_WAIT = 20
 MIN_CATALOG_SYMBOLS = 5_000
 
@@ -358,6 +358,56 @@ class FreeStockDBRuntime:
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
             return {"addresses": [], "verified": False, "error": str(exc)[:500]}
 
+    def _listening_process_ids(self) -> list[int]:
+        if os.name != "nt":
+            return []
+        script = (
+            f"Get-NetTCPConnection -LocalPort {self.port} -State Listen "
+            "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess "
+            "-Unique | ConvertTo-Json -Compress"
+        )
+        try:
+            result = self._process_runner(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                return []
+            output = (result.stdout or "").strip()
+            if not output:
+                return []
+            decoded = json.loads(output)
+            values = decoded if isinstance(decoded, list) else [decoded]
+            return sorted({int(value) for value in values if int(value) > 0})
+        except (OSError, TypeError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+            return []
+
+    def _recorded_listener_process(self) -> dict[str, Any] | None:
+        metadata = self._read_state(self.paths.state.parent / "freestockdb-process.json")
+        if not metadata:
+            return None
+        try:
+            pid = int(metadata.get("pid") or 0)
+            recorded_root = Path(str(metadata.get("root") or "")).resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+        if pid <= 0 or recorded_root != self.paths.root.resolve():
+            return None
+        recorded_url = str(metadata.get("url") or "").rstrip("/")
+        if recorded_url and recorded_url != self.base_url.rstrip("/"):
+            return None
+        if pid not in self._listening_process_ids():
+            return None
+        return {
+            "ProcessId": pid,
+            "ExecutablePath": str(self.paths.server),
+            "CommandLine": "",
+            "Source": "runtime_metadata",
+        }
+
     def _config_security(self) -> dict[str, Any]:
         if not self.paths.config.is_file():
             return {"safe": False, "ip": "", "readonly": "", "error": "missing_config"}
@@ -386,6 +436,10 @@ class FreeStockDBRuntime:
                 values.append(item)
             elif not executable and expected in command_line.lower():
                 values.append(item)
+        if not values:
+            recorded = self._recorded_listener_process()
+            if recorded:
+                values.append(recorded)
         return values
 
     def _manifest(self, data_root: Path | None = None) -> dict[str, Any]:
@@ -393,7 +447,8 @@ class FreeStockDBRuntime:
         if not path.is_file():
             return {"path": str(path), "exists": False, "file_count": 0}
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            # Accept manifests produced by either Python or Windows PowerShell.
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
             files = value.get("files", []) if isinstance(value, dict) else []
             return {
                 "path": str(path),
@@ -461,11 +516,15 @@ class FreeStockDBRuntime:
             usage_root = self.paths.storage_root
             usage_root.mkdir(parents=True, exist_ok=True)
             usage = shutil.disk_usage(usage_root)
+            live_roots = [self.paths.data]
+            if self._aux_live.is_dir():
+                live_roots.append(self._aux_live)
             data_bytes = sum(
                 item.stat().st_size
-                for item in self.paths.data.rglob("*")
+                for root in live_roots
+                for item in root.rglob("*")
                 if item.is_file()
-            ) if self.paths.data.is_dir() else 0
+            )
             staged_data = self.paths.staging / "data"
             staged_marker = self.paths.staging / ".aihub-staging.json"
             reusable_path = (
@@ -476,14 +535,16 @@ class FreeStockDBRuntime:
                 and not self._is_directory_link(self.paths.previous)
                 else None
             )
-            candidate_bytes = (
-                sum(
-                    item.stat().st_size
-                    for item in reusable_path.rglob("*")
-                    if item.is_file()
-                )
-                if reusable_path
-                else 0
+            reusable_roots = [reusable_path] if reusable_path else []
+            if reusable_path == staged_data and (self.paths.staging / "data1").is_dir():
+                reusable_roots.append(self.paths.staging / "data1")
+            elif reusable_path == self.paths.previous and self._aux_previous.is_dir():
+                reusable_roots.append(self._aux_previous)
+            candidate_bytes = sum(
+                item.stat().st_size
+                for root in reusable_roots
+                for item in root.rglob("*")
+                if item.is_file()
             )
             required_bytes = max(data_bytes - candidate_bytes, 0) + MIN_FREE_BYTES
             return {
@@ -520,7 +581,9 @@ class FreeStockDBRuntime:
         if not path.is_file():
             return None
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            # PowerShell 5.1 writes UTF-8 JSON with a BOM; Python-owned state
+            # files do not. utf-8-sig accepts both forms.
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
             return value if isinstance(value, dict) else None
         except (OSError, json.JSONDecodeError):
             return {"status": "invalid"}
@@ -978,6 +1041,8 @@ class FreeStockDBRuntime:
             cwd=str(cwd or self.paths.root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -1209,26 +1274,93 @@ class FreeStockDBRuntime:
                 stderr_file.close()
 
     def _stop_exact_service(self) -> None:
+        stop_errors: list[str] = []
         for item in self.exact_processes():
             pid = str(item.get("ProcessId") or item.get("pid") or "")
             if not pid:
                 continue
             if os.name == "nt":
-                self._run_command(["taskkill", "/PID", pid, "/T", "/F"], timeout=20)
+                stopped = self._run_command(["taskkill", "/PID", pid, "/T", "/F"], timeout=20)
+                if stopped.returncode != 0:
+                    stop_errors.append((stopped.stderr or stopped.stdout or f"taskkill exited {stopped.returncode}").strip())
             else:
                 self._run_command(["kill", pid], timeout=10)
         for _ in range(40):
             if not self.exact_processes() and not self._socket_probe(self.host, self.port, 0.2):
                 return
             time.sleep(0.25)
-        raise RuntimeError("FreeStockDB service did not stop cleanly")
+        if os.name == "nt":
+            token = f"freestockdb-stop-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+            request_path = self.paths.state.parent / "freestockdb-stop.request.json"
+            result_path = self.paths.state.parent / "freestockdb-stop.result.json"
+            request_path.write_text(json.dumps({"token": token}), encoding="utf-8")
+            triggered = self._run_command(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    "Start-ScheduledTask -TaskName 'KOL_FreeStockDB_Start' -ErrorAction Stop",
+                ],
+                timeout=20,
+            )
+            deadline = time.monotonic() + 30
+            managed_result: dict[str, Any] = {}
+            while triggered.returncode == 0 and time.monotonic() < deadline:
+                if result_path.exists():
+                    candidate = self._read_state(result_path) or {}
+                    if candidate.get("token") == token:
+                        managed_result = candidate
+                        break
+                time.sleep(0.5)
+            if managed_result.get("status") == "stopped":
+                for _ in range(40):
+                    if not self._socket_probe(self.host, self.port, 0.2):
+                        return
+                    time.sleep(0.25)
+            request_path.unlink(missing_ok=True)
+            managed_error = str(
+                managed_result.get("error")
+                or triggered.stderr
+                or triggered.stdout
+                or "elevated stop timed out"
+            )
+            stop_errors.append(managed_error)
+        detail = "; ".join(value[:500] for value in stop_errors if value)
+        raise RuntimeError(
+            "FreeStockDB service did not stop cleanly"
+            + (f": {detail}" if detail else "")
+        )
+
+    def _save_process_metadata(self, process: dict[str, Any]) -> None:
+        pid = int(process.get("ProcessId") or process.get("pid") or 0)
+        if pid <= 0:
+            return
+        path = self.paths.state.parent / "freestockdb-process.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "root": str(self.paths.root),
+                    "data": str(self.paths.data),
+                    "url": self.base_url,
+                    "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
     def _start_service(self, data_root: Path | None = None) -> dict[str, Any]:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
             raise RuntimeError("FreeStockDB service must use a loopback-only URL")
         binary = self._binary()
         if not binary.get("verified") or not binary.get("updater_verified"):
-            raise RuntimeError("FreeStockDB v0.2.1 binary SHA-256 verification failed")
+            raise RuntimeError(
+                f"FreeStockDB {self.expected_release} binary SHA-256 verification failed"
+            )
         if self._socket_probe(self.host, self.port, 0.3):
             if self.exact_processes():
                 return {"status": "already_running"}
@@ -1251,8 +1383,10 @@ class FreeStockDBRuntime:
         else:
             subprocess.Popen(command, cwd=str(self.paths.root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):
-            if self.exact_processes() and self._socket_probe(self.host, self.port, 0.2):
-                return {"status": "started", "pid": self.exact_processes()[0].get("ProcessId", "")}
+            processes = self.exact_processes()
+            if processes and self._socket_probe(self.host, self.port, 0.2):
+                self._save_process_metadata(processes[0])
+                return {"status": "started", "pid": processes[0].get("ProcessId", "")}
             time.sleep(0.25)
         raise RuntimeError("FreeStockDB service did not become ready")
 
@@ -1500,6 +1634,8 @@ class FreeStockDBRuntime:
         staged_root = self.paths.staging
         marker = staged_root / ".aihub-staging.json"
         if (staged_root / "data").is_dir() and marker.is_file():
+            if self._aux_live.is_dir() and not (staged_root / "data1").exists():
+                shutil.copytree(self._aux_live, staged_root / "data1")
             for source in (self.paths.updater, self.paths.config, self.paths.source):
                 shutil.copy2(source, staged_root / source.name)
             try:
@@ -1523,11 +1659,17 @@ class FreeStockDBRuntime:
         staged_root.mkdir(parents=True)
         if reused_previous:
             os.replace(self.paths.previous, staged_root / "data")
+            if self._aux_previous.is_dir():
+                os.replace(self._aux_previous, staged_root / "data1")
+            elif self._aux_live.is_dir():
+                shutil.copytree(self._aux_live, staged_root / "data1")
         for source in (self.paths.updater, self.paths.config, self.paths.source):
             shutil.copy2(source, staged_root / source.name)
         if not reused_previous:
             source_data = self.paths.live if self.paths.live.is_dir() else self.paths.data
             shutil.copytree(source_data, staged_root / "data")
+            if self._aux_live.is_dir():
+                shutil.copytree(self._aux_live, staged_root / "data1")
         marker.write_text(
             json.dumps(
                 {
@@ -1580,15 +1722,31 @@ class FreeStockDBRuntime:
         return self.paths.storage_root / ".freestockdb-swap.json"
 
     @property
+    def _aux_live(self) -> Path:
+        return self.paths.root / "data1"
+
+    @property
+    def _aux_previous(self) -> Path:
+        return self.paths.root / "data1.prev"
+
+    @property
     def _retired_previous(self) -> Path:
         return self.paths.storage_root / "previous.retired"
 
-    def _write_swap_journal(self, phase: str) -> None:
+    @property
+    def _retired_aux_previous(self) -> Path:
+        return self.paths.root / "data1.previous.retired"
+
+    def _write_swap_journal(self, phase: str, *, include_aux: bool = False) -> None:
         payload = {
             "phase": phase,
             "live": str(self.paths.live),
             "previous": str(self.paths.previous),
             "retired_previous": str(self._retired_previous),
+            "include_aux": include_aux,
+            "aux_live": str(self._aux_live),
+            "aux_previous": str(self._aux_previous),
+            "retired_aux_previous": str(self._retired_aux_previous),
             "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
         temporary = self._swap_journal.with_suffix(".tmp")
@@ -1606,7 +1764,9 @@ class FreeStockDBRuntime:
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"FreeStockDB swap journal cannot be read: {exc}") from exc
         phase = str(state.get("phase") or "")
+        include_aux = bool(state.get("include_aux"))
         retired = self._retired_previous
+        retired_aux = self._retired_aux_previous
         service_was_running = bool(self.exact_processes())
         port_open = self._socket_probe(self.host, self.port, 0.2)
         if port_open and not service_was_running:
@@ -1624,10 +1784,22 @@ class FreeStockDBRuntime:
                 or (phase == "prepared" and not self.paths.live.exists())
             ) and self.paths.previous.exists():
                 os.replace(self.paths.previous, self.paths.live)
+            if include_aux:
+                if phase in {"old_moved", "new_live"} and self._aux_live.exists():
+                    shutil.rmtree(self._aux_live)
+                if (
+                    phase in {"old_moved", "new_live"}
+                    or (phase == "prepared" and not self._aux_live.exists())
+                ) and self._aux_previous.exists():
+                    os.replace(self._aux_previous, self._aux_live)
             if retired.exists():
                 if self.paths.previous.exists():
                     shutil.rmtree(self.paths.previous)
                 os.replace(retired, self.paths.previous)
+            if include_aux and retired_aux.exists():
+                if self._aux_previous.exists():
+                    shutil.rmtree(self._aux_previous)
+                os.replace(retired_aux, self._aux_previous)
             self._swap_journal.unlink(missing_ok=True)
             recovery_succeeded = True
         finally:
@@ -1653,22 +1825,25 @@ class FreeStockDBRuntime:
             if _sha256(path) != expected["sha256"]:
                 raise RuntimeError(f"FreeStockDB copied snapshot SHA-256 mismatch: {relative}")
 
-    def _verify_staged_data(self, staged_root: Path) -> dict[str, Any]:
-        manifest = self._manifest(staged_root / "data")
+    def _verify_staged_data(
+        self, staged_root: Path, dataset: str = "data"
+    ) -> dict[str, Any]:
+        data_root = staged_root / dataset
+        manifest = self._manifest(data_root)
         if not manifest.get("exists") or not manifest.get("file_count"):
             raise RuntimeError("FreeStockDB staged dataset has no usable sync manifest")
         files = manifest.get("file_count", 0)
         missing = 0
         verified = 0
         try:
-            payload = json.loads((staged_root / "data" / ".sync_manifest.json").read_text(encoding="utf-8"))
+            payload = json.loads((data_root / ".sync_manifest.json").read_text(encoding="utf-8"))
             for item in payload.get("files", []):
                 relative = item.get("path") if isinstance(item, dict) else None
                 if not relative:
                     continue
-                file_path = (staged_root / "data" / relative).resolve()
-                data_root = (staged_root / "data").resolve()
-                if data_root not in file_path.parents:
+                file_path = (data_root / relative).resolve()
+                resolved_data_root = data_root.resolve()
+                if resolved_data_root not in file_path.parents:
                     raise RuntimeError(f"FreeStockDB manifest path escapes data root: {relative}")
                 if not file_path.is_file():
                     missing += 1
@@ -1820,8 +1995,18 @@ class FreeStockDBRuntime:
                 persist_update_state({"ok": False, "status": "failed", "error": "FreeStockDB runtime files are incomplete", "started_at": started_at})
                 raise RuntimeError("FreeStockDB runtime files are incomplete")
             if not before.get("binary", {}).get("verified") or not before.get("binary", {}).get("updater_verified"):
-                persist_update_state({"ok": False, "status": "failed", "error": "FreeStockDB v0.2.1 binary SHA-256 verification failed", "started_at": started_at})
-                raise RuntimeError("FreeStockDB v0.2.1 binary SHA-256 verification failed")
+                binary_error = (
+                    f"FreeStockDB {self.expected_release} binary SHA-256 verification failed"
+                )
+                persist_update_state(
+                    {
+                        "ok": False,
+                        "status": "failed",
+                        "error": binary_error,
+                        "started_at": started_at,
+                    }
+                )
+                raise RuntimeError(binary_error)
             failed_security_checks = [
                 name
                 for name in ("config", "loopback")
@@ -1891,10 +2076,18 @@ class FreeStockDBRuntime:
                 reusable_stage = bool(
                     (self.paths.staging / "data").is_dir()
                     and (self.paths.staging / ".aihub-staging.json").is_file()
+                    and (
+                        not self._aux_live.is_dir()
+                        or (self.paths.staging / "data1").is_dir()
+                    )
                 )
                 reusable_previous = bool(
                     self.paths.previous.is_dir()
                     and not self._is_directory_link(self.paths.previous)
+                    and (
+                        not self._aux_live.is_dir()
+                        or self._aux_previous.is_dir()
+                    )
                 )
                 needs_live_snapshot = not reusable_stage and not reusable_previous
                 if service_was_running and needs_live_snapshot:
@@ -1907,6 +2100,8 @@ class FreeStockDBRuntime:
                 updater = staged_root / self.paths.updater.name
                 configured_arguments = os.environ.get("FREESTOCKDB_UPDATER_ARGUMENTS", "").strip()
                 updater_arguments = shlex.split(configured_arguments, posix=os.name != "nt") if configured_arguments else []
+                for dataset in ("data", "data1"):
+                    (staged_root / dataset / "disable").unlink(missing_ok=True)
                 save_phase("vendor_update", timeout_seconds=timeout)
                 sync = self._run_vendor_updater(
                     [str(updater), *updater_arguments],
@@ -1924,10 +2119,22 @@ class FreeStockDBRuntime:
                 )
                 if sync.returncode != 0:
                     raise RuntimeError(f"FreeStockDB updater sync failed: {sync.returncode}")
+                # v0.3.5 creates this marker after a completed pass. Leaving it
+                # in the published generation makes the next scheduled update
+                # a no-op, so keep the runtime continuously updateable.
+                for dataset in ("data", "data1"):
+                    (staged_root / dataset / "disable").unlink(missing_ok=True)
                 save_phase("manifest")
                 self._write_manifest(staged_root / "data")
+                staged_aux = staged_root / "data1"
+                if staged_aux.is_dir():
+                    self._write_manifest(staged_aux)
                 save_phase("verify_files")
                 verify = self._verify_staged_data(staged_root)
+                if staged_aux.is_dir():
+                    verify["auxiliary"] = self._verify_staged_data(
+                        staged_root, "data1"
+                    )
                 self._write_log("verify", verify)
                 baseline_files = int(before.get("manifest", {}).get("file_count") or 0)
                 staged_files = int(verify.get("file_count") or 0)
@@ -1942,15 +2149,25 @@ class FreeStockDBRuntime:
                     shutil.rmtree(retired_previous)
                 if self.paths.previous.exists():
                     os.replace(self.paths.previous, retired_previous)
+                retired_aux_previous = self._retired_aux_previous
+                if retired_aux_previous.exists():
+                    shutil.rmtree(retired_aux_previous)
+                if self._aux_previous.exists():
+                    os.replace(self._aux_previous, retired_aux_previous)
+                include_aux = staged_aux.is_dir()
                 save_phase("swap")
                 if self.exact_processes():
                     self._stop_exact_service()
                     stopped_for_swap = True
-                self._write_swap_journal("prepared")
+                self._write_swap_journal("prepared", include_aux=include_aux)
                 os.replace(self.paths.live, self.paths.previous)
-                self._write_swap_journal("old_moved")
+                if include_aux and self._aux_live.exists():
+                    os.replace(self._aux_live, self._aux_previous)
+                self._write_swap_journal("old_moved", include_aux=include_aux)
                 os.replace(staged_root / "data", self.paths.live)
-                self._write_swap_journal("new_live")
+                if include_aux:
+                    os.replace(staged_aux, self._aux_live)
+                self._write_swap_journal("new_live", include_aux=include_aux)
                 self._start_service()
                 service_paused_for_update = False
                 save_phase("acceptance")
@@ -1973,6 +2190,8 @@ class FreeStockDBRuntime:
                     )
                 if retired_previous.exists():
                     shutil.rmtree(retired_previous)
+                if retired_aux_previous.exists():
+                    shutil.rmtree(retired_aux_previous)
                 self._swap_journal.unlink(missing_ok=True)
                 self._write_log(
                     "completed",

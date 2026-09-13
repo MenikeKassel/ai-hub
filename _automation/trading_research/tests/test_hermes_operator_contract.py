@@ -106,6 +106,52 @@ class HermesOperatorContractTests(unittest.TestCase):
             self.assertIn(action, operator)
         self.assertIn("stderr_tail", operator)
 
+    def test_operator_accepts_a_healthy_api_when_process_details_are_hidden(self) -> None:
+        operator = (ROOT / "scripts" / "hermes-kol-operator.ps1").read_text(encoding="utf-8")
+
+        managed_listener = re.search(
+            r"function Test-ManagedListener\s*\{(?P<body>.*?)\n\}", operator, re.S
+        )
+        server_probe = re.search(r"function Get-ServerProbe\s*\{(?P<body>.*?)\n\}", operator, re.S)
+        self.assertIsNotNone(managed_listener)
+        self.assertIsNotNone(server_probe)
+        self.assertIn("$ProcessInfo.listener_pid", managed_listener.group("body"))
+        self.assertIn("if ($status)", server_probe.group("body"))
+        self.assertNotIn("if ($status -and $managed)", server_probe.group("body"))
+        self.assertIn("ownership_verified", operator)
+
+    def test_market_dry_run_is_preview_only_and_failures_keep_child_logs(self) -> None:
+        operator = (ROOT / "scripts" / "hermes-kol-operator.ps1").read_text(encoding="utf-8")
+        runner = (ROOT / "scripts" / "market-data-sync.ps1").read_text(encoding="utf-8")
+
+        market_block = re.search(r'"market"\s*\{(?P<body>.*?)\n\s*\}\n\s*"data-refresh"', operator, re.S)
+        self.assertIsNotNone(market_block)
+        self.assertIn("if (-not $DryRun)", market_block.group("body"))
+        self.assertIn("market-daily-publish --as-of $AsOf", market_block.group("body"))
+        self.assertIn('NotePropertyValue "preview"', market_block.group("body"))
+        self.assertIn('$ErrorActionPreference = "Continue"', runner)
+        self.assertIn("market-sync-failed-$attemptId.stderr.log", runner)
+        self.assertIn('"--candidate-root", $CandidateRoot', runner)
+        self.assertIn("$maxAttempts = 3", runner)
+        self.assertIn("PyEval_SaveThread", runner)
+        self.assertIn('_runtime\\trading\\market-task-logs', runner)
+        self.assertNotIn('_runtime\\trading\\market\\logs"', runner)
+        self.assertNotIn(
+            "Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue\n    }\n",
+            runner,
+        )
+
+    def test_freestockdb_start_task_can_stop_its_elevated_listener(self) -> None:
+        starter = (ROOT / "scripts" / "start-freestockdb.ps1").read_text(encoding="utf-8")
+        runtime = (
+            ROOT / "_automation" / "trading_research" / "freestockdb_runtime.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("freestockdb-stop.request.json", starter)
+        self.assertIn("freestockdb-stop.result.json", starter)
+        self.assertIn("KOL_FreeStockDB_Start", runtime)
+        self.assertIn("_save_process_metadata", runtime)
+
     def test_skill_stops_after_start_failure(self) -> None:
         skill = (ROOT / "_skills" / "kol-research-operator" / "SKILL.md").read_text(
             encoding="utf-8"

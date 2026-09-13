@@ -14,6 +14,7 @@ from opencode_go import (  # noqa: E402
     OPENCODE_GO_API_URL,
     OPENCODE_GO_MODEL,
     load_opencode_go_api_key,
+    opencode_go_headers,
 )
 from kol_posts import (  # noqa: E402
     CredentialStorageError,
@@ -22,6 +23,15 @@ from kol_posts import (  # noqa: E402
 
 
 class OpenCodeGoTests(unittest.TestCase):
+    def test_request_headers_include_stable_session_and_client_identity(self) -> None:
+        first = opencode_go_headers("fixture-key", "conversation-1")
+        repeated = opencode_go_headers("fixture-key", "conversation-1")
+        other = opencode_go_headers("fixture-key", "conversation-2")
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first["x-opencode-session"], other["x-opencode-session"])
+        self.assertEqual("ai-hub-kol-research/4.0", first["User-Agent"])
+
     def test_public_contract_uses_go_deepseek_v4_flash(self) -> None:
         self.assertEqual(
             "https://opencode.ai/zen/go/v1/chat/completions",

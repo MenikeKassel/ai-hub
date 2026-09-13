@@ -32,7 +32,7 @@ from kol_audit.discovery.service import PLATFORMS, ProviderRegistry
 from kol_audit.events.store import KolStore
 from kol_audit.market.store import MarketStore
 from kol_audit.posts.store import KolPostStore
-from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL, load_opencode_go_api_key
+from opencode_go import OPENCODE_GO_API_URL, OPENCODE_GO_MODEL, load_opencode_go_api_key, opencode_go_headers
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUNTIME_ROOT = ROOT / "_runtime" / "trading"
@@ -482,7 +482,10 @@ class OpenCodeGoCandidateScoreProvider:
             "thinking": {"type": "disabled"},
             "stream": False,
         }
-        headers = {"Authorization": f"Bearer {self.key_loader()}"}
+        headers = opencode_go_headers(
+            self.key_loader(),
+            f"kol-discovery:{candidate.get('platform')}:{candidate.get('handle') or candidate.get('id')}",
+        )
         if self.client is None:
             response = httpx.post(
                 OPENCODE_GO_API_URL,

@@ -7,6 +7,7 @@ import { api, formatDate, percent } from '../api'
 import CandlestickChart, { type PriceChartMarker } from '../components/CandlestickChart'
 import EventMethodResearch from '../components/EventMethodResearch'
 import type { Event } from '../types'
+import { updateRoute, useRoute } from '../workspace'
 
 const CHECKPOINTS = [
   { days: 5, label: '1W' },
@@ -86,10 +87,12 @@ function contextWarningLabel(value: string): string {
 }
 
 export default function Backtests() {
+  const { params } = useRoute()
   const events = useQuery({ queryKey: ['events'], queryFn: api.events })
   const summary = useQuery({ queryKey: ['summary'], queryFn: api.summary })
   const checkpoints = useQuery({ queryKey: ['checkpoints'], queryFn: api.checkpoints })
   const [selectedSymbol, setSelectedSymbol] = useState('')
+  const routeSymbol = params.get('symbol') || ''
   const [search, setSearch] = useState('')
   const activeEvents = useMemo(
     () => events.data?.filter((event) => event.status === 'active' || event.status === 'completed') || [],
@@ -105,7 +108,8 @@ export default function Backtests() {
       ...group.events.map((event) => event.kol_name),
     ].some((value) => value.toLowerCase().includes(query)))
   }, [groups, search])
-  const selected = filteredGroups.find((group) => group.symbol === selectedSymbol) || filteredGroups[0]
+  const effectiveSymbol = routeSymbol || selectedSymbol
+  const selected = groups.find((group) => group.symbol === effectiveSymbol) || filteredGroups[0]
   const firstRecommendationDate = selected?.events[0]?.baseline_date || selected?.events[0]?.posted_at.slice(0, 10) || ''
   const historyStart = firstRecommendationDate ? shiftDate(firstRecommendationDate, -180) : ''
   const stockHistory = useQuery({
@@ -153,7 +157,7 @@ export default function Backtests() {
           <div className="audit-event-scroll">{filteredGroups.map((group) => {
             const kols = new Set(group.events.map((event) => event.kol_name)).size
             const awaiting = group.events.filter((event) => !event.baseline_date || !event.latest_mark).length
-            return <button key={group.symbol} className={selected?.symbol === group.symbol ? 'audit-event active' : 'audit-event'} onClick={() => setSelectedSymbol(group.symbol)}>
+            return <button key={group.symbol} className={selected?.symbol === group.symbol ? 'audit-event active' : 'audit-event'} onClick={() => { setSelectedSymbol(group.symbol); updateRoute({ symbol: group.symbol }) }}>
               <div><span className="mono">{group.symbol}</span><span className={awaiting ? 'badge amber' : 'badge green'}>{awaiting ? `${awaiting} 条待行情` : '跟踪中'}</span></div>
               <strong>{group.securityName}</strong>
               <small>{kols} 位 KOL · {group.events.length} 次推荐</small>

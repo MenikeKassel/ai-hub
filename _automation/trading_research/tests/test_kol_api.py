@@ -17,11 +17,26 @@ from kol_posts import RuleClassifier, RuleResult, normalise_twitter_post  # noqa
 from kol_tracker import SHANGHAI, EventRecord  # noqa: E402
 from event_context import compute_event_technical_context, failed_event_technical_context  # noqa: E402
 from market_data import Instrument  # noqa: E402
+from model_budget import ModelDailyBudget  # noqa: E402
 from recommendation_drafts import RecommendationDraftRepository  # noqa: E402
 from review_agent import PolicyDecision  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
+    def test_openapi_schema_builds_after_route_modules_are_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+
+            response = TestClient(app).get("/openapi.json")
+
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertIn("/api/review-queue", response.json()["paths"])
+
     def test_gateway_pid_reader_supports_legacy_and_json_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -297,6 +312,52 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(core.json()["revision"]["recalculation_required"])
             self.assertEqual(1, refresh.call_count)
             self.assertEqual(2, len(revisions.json()))
+
+    def test_return_affecting_amendment_is_rejected_before_mutation_when_returns_are_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            market_root = root / "runtime" / "market"
+            market_root.mkdir(parents=True)
+            (market_root / "recovery-mode.json").write_text(
+                '{"mode":"live","write_enabled":true,"market_update_enabled":true,'
+                '"returns_update_enabled":false,"research_update_enabled":false}',
+                encoding="utf-8",
+            )
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            event = EventRecord(
+                event_id="KOL-T901",
+                kol_name="fixture",
+                platform="X",
+                source_url="https://x.com/fixture/status/2078000000000000901",
+                source_note="post:2078000000000000901",
+                posted_at="2026-07-17T08:30:00+08:00",
+                symbol="002414",
+                security_name="高德红外",
+                direction="long",
+                thesis="原理由",
+                status="active",
+                baseline_date="2026-07-17",
+                baseline_price_raw="10.00",
+            )
+            app.state.event_store.register_event(event)
+            app.state.event_store.upsert_marks([
+                {"event_id": event.event_id, "trade_date": "2026-07-17", "close_raw": "10.00"}
+            ])
+
+            response = TestClient(app).post(
+                f"/api/events/{event.event_id}/amendments",
+                json={"reason": "修正股票映射", "symbol": "600900", "security_name": "长江电力"},
+            )
+
+            self.assertEqual(409, response.status_code, response.text)
+            saved = app.state.event_store.load_events()[0]
+            self.assertEqual("002414", saved.symbol)
+            self.assertEqual("2026-07-17", saved.baseline_date)
+            self.assertEqual(1, len(app.state.event_store.load_marks()))
 
     def test_event_dossier_is_explicit_about_missing_sections_and_refreshes_append_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1460,6 +1521,74 @@ class ApiTests(unittest.TestCase):
                 response = client.get("/api/system/health")
             self.assertEqual(200, response.status_code, response.text)
             self.assertTrue(response.json()["lightweight"])
+
+    def test_tasks_interrupts_a_stale_morning_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            with app.state.post_store.connect() as db:
+                db.execute(
+                    """
+                    INSERT INTO morning_runs(
+                        run_id,review_date,window_start,window_end,started_at,status,phase,errors_json
+                    ) VALUES(?,?,?,?,?,'running','final','[]')
+                    """,
+                    (
+                        "stale-ui-run",
+                        "2000-01-02",
+                        "2000-01-01T09:00:00+08:00",
+                        "2000-01-02T09:00:00+08:00",
+                        "2000-01-02T10:00:00+08:00",
+                    ),
+                )
+
+            response = TestClient(app).get("/api/tasks")
+
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("interrupted", response.json()["morning"]["status"])
+
+    def test_health_does_not_report_ai_ready_when_every_attempt_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            budget = ModelDailyBudget(app.state.post_store, daily_limit=250)
+            self.assertTrue(budget.reserve())
+            budget.finish(success=False)
+
+            response = TestClient(app).get("/api/system/health")
+
+            self.assertEqual(200, response.status_code, response.text)
+            ai = response.json()["component_status"]["ai"]
+            self.assertEqual("unavailable", ai["status"])
+            self.assertEqual(0, ai["completed"])
+            self.assertEqual(1, ai["failed"])
+
+    def test_diagnostics_uses_the_same_ai_failure_status_as_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            budget = ModelDailyBudget(app.state.post_store, daily_limit=250)
+            self.assertTrue(budget.reserve())
+            budget.finish(success=False)
+
+            response = TestClient(app).get("/api/system/diagnostics")
+
+            self.assertEqual(200, response.status_code, response.text)
+            ai = response.json()["component_status"]["ai"]
+            self.assertEqual("unavailable", ai["status"])
+            self.assertEqual(1, ai["failed"])
 
     def test_credential_endpoint_returns_actionable_validation_error(self) -> None:
         class RecordingCredentials:

@@ -3,6 +3,11 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Keep prior hashed chunks so an already-open console survives a new build.
+    // The lazy loader refreshes once if a chunk is ever missing unexpectedly.
+    emptyOutDir: false,
+  },
   server: {
     port: 5173,
     proxy: {

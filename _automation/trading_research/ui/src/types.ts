@@ -872,7 +872,8 @@ export interface EventRevision {
 export interface EventAmendmentResult {
   event: Event
   revision: EventRevision
-  refresh_status: 'not_required' | 'queued'
+  refresh_status: 'not_required' | 'queued' | 'pending' | 'disabled' | 'failed'
+  refresh_error?: string
 }
 
 export interface Checkpoint {
@@ -1107,7 +1108,7 @@ export interface Health {
     operator: { status: string }
     x: { status: string; error_code: string }
     nitter: { status: string; ready: boolean }
-    ai: { status: string }
+    ai: { status: string; attempted?: number; completed?: number; failed?: number; recent_completed?: number; recent_failed?: number; updated_at?: string }
     market: { status: string; ok: boolean }
     freestockdb: { status: string; ok: boolean }
   }
@@ -1151,7 +1152,8 @@ export interface PipelineStatus {
   next_preview: MorningReview['summary']
   latest_trade_date: string
   expected_trade_date: string
-  market_status: 'pre_open' | 'trading' | 'closed' | 'current' | 'provider_pending' | 'unknown'
+  published_as_of?: string
+  market_status: 'pre_open' | 'trading' | 'post_close' | 'closed' | 'current' | 'stale' | 'freshness_unknown' | 'market_locked' | 'market_unavailable' | 'provider_pending' | 'checking' | 'unknown'
   lagging_symbols: string[]
   refresh: PipelineRefresh
 }

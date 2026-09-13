@@ -32,10 +32,16 @@ function Invoke-Captured([string[]]$Arguments) {
     try {
         & $python @Arguments 1> $stdoutPath 2> $stderrPath
         $code = $LASTEXITCODE
-        $stdout = [string](if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" })
-        $stderr = [string](if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" })
-        if ($stdout.Trim()) { Write-ClassifyLog $stdout.Trim() }
-        if ($stderr.Trim()) { Write-ClassifyLog ("stderr: " + $stderr.Trim()) }
+        $stdout = ""
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $stdout = [string](Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8)
+        }
+        $stderr = ""
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderr = [string](Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-ClassifyLog $stdout.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-ClassifyLog ("stderr: " + $stderr.Trim()) }
         return $code
     } finally {
         Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue

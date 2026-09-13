@@ -26,7 +26,7 @@ from kol_tracker import (  # noqa: E402
     update_kol_tracking,
     validate_event,
 )
-from trading_cli import _send_pending_notifications, kol_update  # noqa: E402
+from trading_cli import _kol_update_locked, _send_pending_notifications, kol_update  # noqa: E402
 
 
 def price_frame(dates: list[str], opens: list[float], closes: list[float]) -> pd.DataFrame:
@@ -127,6 +127,27 @@ class EventAmendmentTests(unittest.TestCase):
             self.assertTrue(revision["recalculation_required"])
             self.assertTrue(any(store.backups_dir.glob("*_daily_marks.csv")))
             self.assertTrue(any(store.backups_dir.glob("*_checkpoints.csv")))
+
+    def test_same_instant_timestamp_amendment_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp) / "kol")
+            event = active_event(
+                posted_at="2026-07-08T10:00:00+08:00",
+                baseline_date="2026-07-08",
+                baseline_price_raw="10.00",
+            )
+            store.register_event(event)
+            store.upsert_marks([{"event_id": event.event_id, "trade_date": "2026-07-09", "close_raw": "10.50"}])
+
+            updated, revision = store.amend_event(
+                event.event_id,
+                {"posted_at": "2026-07-08T02:00:00+00:00"},
+                reason="浏览器时区格式化",
+            )
+
+            self.assertEqual(event.posted_at, updated.posted_at)
+            self.assertFalse(revision["recalculation_required"])
+            self.assertEqual(1, len(store.load_marks()))
 
 
 class WarehousePriceProviderTests(unittest.TestCase):
@@ -268,6 +289,27 @@ class BaselineAndReturnTests(unittest.TestCase):
 
 
 class StoreAndDashboardTests(unittest.TestCase):
+    def test_live_local_market_is_adapted_to_return_price_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            KolStore(root / "kol").save_events([])
+            local_market = object()
+            result = UpdateResult("run", 0, 0, [], [], [], [])
+            with (
+                patch("trading_cli.KOL_ROOT", root / "kol"),
+                patch("trading_cli.MARKET_ROOT", root / "market"),
+                patch("trading_cli.KOL_DASHBOARD", root / "dashboard.md"),
+                patch("trading_cli._market_store", return_value=local_market),
+                patch("trading_cli.update_kol_tracking", return_value=result) as updated,
+                patch("trading_cli.KolPerformanceService.refresh", return_value={"coverage": {}}),
+                redirect_stdout(StringIO()),
+            ):
+                _kol_update_locked(Namespace(as_of="2026-07-15", dry_run=False, notify=False, event_id=""))
+
+            provider = updated.call_args.args[1]
+            self.assertIsInstance(provider, WarehousePriceProvider)
+            self.assertEqual(root / "market" / "warehouse", provider.warehouse_root)
+
     def test_legacy_return_csv_is_backed_up_and_migrated_with_mfe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -306,6 +348,7 @@ class StoreAndDashboardTests(unittest.TestCase):
             with (
                 patch("trading_cli.KOL_ROOT", root),
                 patch("trading_cli.KOL_DASHBOARD", root / "dashboard.md"),
+                patch("trading_cli._market_store", return_value=object()),
                 patch("trading_cli.update_kol_tracking", return_value=result),
                 patch("trading_cli._send_pending_notifications", return_value=["notification failed"]),
                 redirect_stdout(output),
@@ -699,6 +742,41 @@ class UpdateCoordinatorTests(unittest.TestCase):
             self.assertEqual([], result.errors)
             self.assertEqual([], store.load_marks())
             self.assertFalse(any(item["kind"] == "calculation_failure" for item in result.notifications))
+
+    def test_concurrent_event_registration_is_preserved_during_return_commit(self) -> None:
+        stock, benchmark = self._six_day_prices()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = KolStore(root / "kol")
+            store.register_event(active_event(posted_at="2026-07-01T10:00:00+08:00"))
+
+            class RegisteringProvider(FakeProvider):
+                registered = False
+
+                def fetch_stock(self, symbol, start, end, *, adjusted):
+                    if not self.registered:
+                        self.registered = True
+                        store.register_event(active_event(
+                            event_id="KOL-T002",
+                            source_url="https://x.com/test/status/2",
+                            status="candidate",
+                        ))
+                    return super().fetch_stock(symbol, start, end, adjusted=adjusted)
+
+            primary = RegisteringProvider("primary", {"600000": stock}, benchmark)
+            secondary = FakeProvider("secondary", {"600000": stock}, benchmark)
+
+            result = update_kol_tracking(
+                store,
+                primary,
+                secondary,
+                as_of=date(2026, 7, 8),
+                dashboard_path=root / "dashboard.md",
+            )
+
+            self.assertEqual(["KOL-T001", "KOL-T002"], [event.event_id for event in store.load_events()])
+            self.assertEqual([], result.errors)
 
 
 if __name__ == "__main__":

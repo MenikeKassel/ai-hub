@@ -25,6 +25,8 @@ from market_data import (  # noqa: E402
     normalise_daily_bars,
     sync_daily_bars,
 )
+from market_admissions import write_published_manifest  # noqa: E402
+from market_publication import MarketDailyPublisher  # noqa: E402
 from trading_cli import _completed_market_sync_date, _drain_market_queue, _sync_with_fallback  # noqa: E402
 
 
@@ -57,6 +59,34 @@ class TencentMarketProviderTests(unittest.TestCase):
         request = opened.call_args.args[0]
         self.assertIn("bj920045", request.full_url)
         self.assertNotIn("auth", request.full_url.lower())
+
+    def test_retries_bj_920_with_latest_bar_when_ranged_endpoint_is_empty(self) -> None:
+        payloads = [
+            {"data": {"bj920179": {"day": []}}},
+            {"data": {"bj920179": {"day": [["2026-09-08", "54.31", "54.62", "55.49", "53.34", "26634"]]}}},
+        ]
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", side_effect=[Response(value) for value in payloads]) as opened:
+            frame = TencentMarketProvider().fetch_daily(
+                "920179", "stock", date(2026, 9, 4), date(2026, 9, 8), "raw"
+            )
+
+        self.assertEqual(2, opened.call_count)
+        self.assertEqual(["2026-09-08"], [value.isoformat() for value in frame["date"]])
+        self.assertNotIn("2026-09-04", opened.call_args.args[0].full_url)
 
 
 def daily_frame(*, invalid: bool = False) -> pd.DataFrame:
@@ -107,7 +137,172 @@ class FailingProvider:
         raise RuntimeError("fixture provider unavailable")
 
 
+class FlakyTencentProvider:
+    name = "tencent"
+
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_daily(self, symbol, instrument_type, start, end, adjustment):
+        self.calls += 1
+        if self.calls == 1:
+            return pd.DataFrame()
+        return daily_frame()
+
+
 class MarketDataTests(unittest.TestCase):
+    def test_publication_powershell_capture_replaces_decode_errors(self) -> None:
+        completed = object()
+        with patch("market_publication.subprocess.run", return_value=completed) as run:
+            result = MarketDailyPublisher._run_powershell("Write-Error '失败'")
+
+        self.assertIs(completed, result)
+        self.assertEqual("utf-8", run.call_args.kwargs["encoding"])
+        self.assertEqual("replace", run.call_args.kwargs["errors"])
+
+    def test_daily_publisher_retries_transient_tencent_empty_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            market_root = Path(tmp) / "market"
+            store = MarketStore(market_root)
+            store.upsert_instrument(
+                Instrument("920670", "数字人", "stock", "BJ", lifecycle="tracking")
+            )
+            provider = FlakyTencentProvider()
+
+            results = MarketDailyPublisher(market_root, None)._sync_symbol(
+                store,
+                "920670",
+                date(2026, 7, 13),
+                [provider],
+            )
+
+            coverage = {
+                row["adjustment"]: row["end_date"] for row in store.get_coverage("920670")
+            }
+            self.assertEqual(3, provider.calls)
+            self.assertEqual({"raw": "2026-07-13", "qfq": "2026-07-13"}, coverage)
+            self.assertTrue(any(item.get("error") for item in results))
+
+    def test_existing_candidate_preview_requires_complete_matching_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            live_root = base / "market"
+            candidate_root = base / "market-live-candidate-20260911-010203"
+            symbols = {f"{value:06d}" for value in range(1, 563)}
+            for root in (live_root, candidate_root):
+                store = MarketStore(root)
+                store.upsert_instruments(
+                    Instrument(symbol, symbol, "stock", "SZ", lifecycle="pinned")
+                    for symbol in sorted(symbols)
+                )
+                write_published_manifest(
+                    root,
+                    as_of="2026-09-10",
+                    baseline_symbols=symbols,
+                    extension_symbols=set(),
+                    source="fixture",
+                )
+            report = base / "report.json"
+            with patch(
+                "market_publication._coverage_end_dates",
+                return_value=(
+                    {symbol: "2026-09-10" for symbol in symbols},
+                    {symbol: "2026-09-10" for symbol in symbols},
+                ),
+            ):
+                result = MarketDailyPublisher(
+                    live_root, None
+                ).promote_existing_candidate(
+                    candidate_root,
+                    apply=False,
+                    report_path=report,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["dry_run"])
+            self.assertFalse(result["published"])
+            self.assertEqual([], result["failures"])
+            self.assertTrue(candidate_root.exists())
+
+    def test_publication_rebases_paths_recorded_under_candidate_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            live_root = base / "market"
+            old_root = base / "market-live-candidate-20260910-224717"
+            raw_relative = Path("raw") / "fixture.csv.gz"
+            normalized_relative = Path("warehouse") / "fixture.parquet"
+            for relative in (raw_relative, normalized_relative):
+                destination = live_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"fixture")
+            store = MarketStore(live_root)
+            with store.lock(timeout=30), store.connect(lock=False) as db:
+                db.execute(
+                    "INSERT INTO data_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        "run-1", "daily", "fixture", "000001", "raw", "", "",
+                        "completed", 1, "2026-09-10", "2026-09-10",
+                        str(old_root / raw_relative),
+                        json.dumps([str(old_root / normalized_relative)]),
+                        "", "valid", "{}", "",
+                    ],
+                )
+                db.execute(
+                    "INSERT INTO data_coverage VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        "000001", "daily", "raw", "fixture", "2026-09-10",
+                        "2026-09-10", 1, "valid",
+                        json.dumps([str(old_root / normalized_relative)]), "",
+                    ],
+                )
+
+            result = MarketDailyPublisher(live_root, None)._rebase_market_paths()
+
+            self.assertEqual({"data_runs": 1, "data_coverage": 1}, result)
+            with store.connect() as db:
+                raw_path, normalized_json = db.execute(
+                    "SELECT raw_path,normalized_paths_json FROM data_runs"
+                ).fetchone()
+                (coverage_json,) = db.execute(
+                    "SELECT paths_json FROM data_coverage"
+                ).fetchone()
+            self.assertEqual(str(live_root / raw_relative), raw_path)
+            self.assertEqual(
+                [str(live_root / normalized_relative)], json.loads(normalized_json)
+            )
+            self.assertEqual(
+                [str(live_root / normalized_relative)], json.loads(coverage_json)
+            )
+
+    def test_resumed_candidate_refreshes_live_instrument_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            live_root = base / "market"
+            candidate_root = base / "market-live-candidate-20260911-193043"
+            live = MarketStore(live_root)
+            candidate = MarketStore(candidate_root)
+            live.upsert_instrument(
+                Instrument("000001", "live", "stock", "SZ", lifecycle="pinned")
+            )
+            candidate.upsert_instruments(
+                [
+                    Instrument("000001", "stale", "stock", "SZ", lifecycle="archived"),
+                    Instrument("000002", "removed", "stock", "SZ", lifecycle="tracking"),
+                ]
+            )
+
+            copied = MarketDailyPublisher(
+                live_root, None
+            )._refresh_candidate_runtime_state(
+                candidate_root, refresh_instruments=True
+            )
+
+            current = {item["symbol"]: item for item in candidate.list_instruments()}
+            self.assertEqual("pinned", current["000001"]["lifecycle"])
+            self.assertEqual("live", current["000001"]["name"])
+            self.assertEqual("archived", current["000002"]["lifecycle"])
+            self.assertEqual(2, copied["instruments"])
+
     def test_freestockdb_provider_reuses_persistent_http_client(self) -> None:
         class Response:
             @staticmethod
@@ -139,6 +334,27 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(2, len(client.calls))
         self.assertTrue(all(call[0] == "http://127.0.0.1:7899/" for call in client.calls))
         self.assertFalse(client.closed, "injected clients remain owned by their caller")
+
+    def test_freestockdb_provider_decodes_v035_msgpack_response(self) -> None:
+        import msgpack
+
+        expected = {"0": ["000001", "000002"], "name": "股票代码"}
+
+        class Response:
+            headers = {"content-type": "application/x-msgpack"}
+            content = msgpack.packb(expected, use_bin_type=True)
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+        class Client:
+            @staticmethod
+            def get(*_args, **_kwargs):
+                return Response()
+
+        provider = FreeStockDBMarketProvider(client=Client())
+        self.assertEqual(expected, provider._request_json({"cmd": "get"}))
 
     def test_freestockdb_daily_adapter_normalizes_http_payload(self) -> None:
         provider = FreeStockDBMarketProvider(base_url="http://127.0.0.1:7899")
@@ -575,6 +791,25 @@ class MarketDataTests(unittest.TestCase):
             self.assertEqual(previous_day.isoformat(), health["latest_open_date"])
             self.assertEqual("current", health["daily_data_status"])
             self.assertEqual([], health["lagging_symbols"])
+
+    def test_calendar_records_closed_days_for_session_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketStore(Path(tmp) / "market")
+            friday = date(2026, 7, 17)
+            sunday = date(2026, 7, 19)
+            store.replace_calendar(
+                [friday],
+                provider="fixture",
+                start=friday,
+                end=sunday,
+            )
+
+            health = store.health(
+                as_of=datetime(2026, 7, 19, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            )
+
+            self.assertEqual("closed", health["market_session_status"])
+            self.assertEqual(friday.isoformat(), health["latest_open_date"])
 
     def test_quarantined_batch_does_not_replace_last_good_normalized_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

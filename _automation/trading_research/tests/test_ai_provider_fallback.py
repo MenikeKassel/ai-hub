@@ -56,6 +56,8 @@ class AiProviderFallbackTests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             captured.update(json.loads(request.content))
             self.assertEqual("Bearer fixture-key", request.headers["Authorization"])
+            self.assertTrue(request.headers["x-opencode-session"].startswith("ai-hub-"))
+            self.assertEqual("ai-hub-kol-research/4.0", request.headers["User-Agent"])
             self.assertEqual(
                 "https://opencode.ai/zen/go/v1/chat/completions",
                 str(request.url),
