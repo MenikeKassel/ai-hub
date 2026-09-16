@@ -1161,6 +1161,58 @@ class FreeStockDBRuntime:
         except (AttributeError, OSError):
             return None
 
+    def _windows_process_transfer_total(self, pid: int) -> int | None:
+        """Cumulative I/O transfer bytes for the process (files + sockets).
+
+        The vendor updater can spend minutes waiting on slow source servers
+        without touching the staged files or burning CPU, so the quiescence
+        detector must also watch its I/O counters.  GetProcessIoCounters counts
+        socket traffic in OtherTransferCount, which is what a network-bound
+        updater keeps moving.
+        """
+        if os.name != "nt":
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class IoCounters(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetProcessIoCounters.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(IoCounters),
+            ]
+            kernel32.GetProcessIoCounters.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return None
+            try:
+                counters = IoCounters()
+                if not kernel32.GetProcessIoCounters(handle, ctypes.byref(counters)):
+                    return None
+                return (
+                    int(counters.ReadTransferCount)
+                    + int(counters.WriteTransferCount)
+                    + int(counters.OtherTransferCount)
+                )
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return None
+
     def _close_windows_for_pid(self, pid: int) -> bool:
         if os.name != "nt":
             return False
@@ -1243,6 +1295,7 @@ class FreeStockDBRuntime:
             started = time.monotonic()
             previous_activity = self._tree_activity(cwd / "data")
             previous_cpu = self._windows_process_cpu_seconds(process.pid)
+            previous_transfer = self._windows_process_transfer_total(process.pid)
             quiet_since: float | None = None
             completion = "process_exit"
             while process.poll() is None:
@@ -1264,13 +1317,28 @@ class FreeStockDBRuntime:
                     if cpu is not None and previous_cpu is not None
                     else 0.0
                 )
-                busy = activity != previous_activity or activity[3] > 0 or cpu_delta > 0.5
+                transfer = self._windows_process_transfer_total(process.pid)
+                transfer_delta = (
+                    transfer - previous_transfer
+                    if transfer is not None and previous_transfer is not None
+                    else 0
+                )
+                # A network-bound updater can look "quiet" to CPU and file
+                # watchers for minutes while it waits on slow source servers;
+                # its I/O counters keep advancing, so treat that as activity.
+                busy = (
+                    activity != previous_activity
+                    or activity[3] > 0
+                    or cpu_delta > 0.5
+                    or transfer_delta > 0
+                )
                 if busy:
                     quiet_since = None
                 elif quiet_since is None:
                     quiet_since = now
                 previous_activity = activity
                 previous_cpu = cpu
+                previous_transfer = transfer
 
                 if (
                     now - started >= minimum_runtime

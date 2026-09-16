@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -174,6 +175,29 @@ class FreeStockDBRuntimeTests(unittest.TestCase):
                 processes = runtime.exact_processes()
 
         self.assertEqual([], processes)
+
+    def test_vendor_transfer_counter_tracks_process_io(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: False,
+            )
+            self.assertIsNone(runtime._windows_process_transfer_total(999_999_999))
+            first = runtime._windows_process_transfer_total(os.getpid())
+            if first is None:
+                self.skipTest("process I/O counters are unavailable here")
+            with open(base / "payload.bin", "wb") as handle:
+                handle.write(b"x" * (16 * 1024 * 1024))
+                handle.flush()
+                os.fsync(handle.fileno())
+            second = runtime._windows_process_transfer_total(os.getpid())
+            self.assertIsNotNone(second)
+            self.assertGreater(second, first)
 
     def test_process_metadata_round_trips_for_future_elevated_detection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
