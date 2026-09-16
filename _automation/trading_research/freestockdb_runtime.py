@@ -426,6 +426,25 @@ class FreeStockDBRuntime:
             "readonly": readonly,
         }
 
+    def _listener_process_name(self, pid: int) -> str:
+        if os.name != "nt":
+            return ""
+        script = (
+            f"@(Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue | "
+            "Select-Object -ExpandProperty ProcessName) -join ','"
+        )
+        try:
+            result = self._process_runner(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return (result.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
     def exact_processes(self) -> list[dict[str, Any]]:
         expected = str(self.paths.server.resolve()).lower()
         values: list[dict[str, Any]] = []
@@ -440,6 +459,30 @@ class FreeStockDBRuntime:
             recorded = self._recorded_listener_process()
             if recorded:
                 values.append(recorded)
+        if not values and self._socket_probe(self.host, self.port, 0.2):
+            # The elevated service process can hide both ExecutablePath and
+            # CommandLine from a non-elevated CIM query, and the recorded pid can
+            # drift from the serving pid (observed 2026-09-16: metadata pid 16420
+            # vs listener pid 16424). Fall back to the loopback listener itself,
+            # but only when the port is actually open, and accept it only when
+            # its process name matches our server binary, so a genuine foreign
+            # port conflict is still reported.
+            expected_names = {
+                self.paths.server.name.casefold(),
+                self.paths.server.stem.casefold(),
+            }
+            for pid in self._listening_process_ids():
+                name = self._listener_process_name(pid).casefold()
+                if name and name in expected_names:
+                    values.append(
+                        {
+                            "ProcessId": pid,
+                            "ExecutablePath": str(self.paths.server),
+                            "CommandLine": "",
+                            "Source": "listener_process_name",
+                        }
+                    )
+                    break
         return values
 
     def _manifest(self, data_root: Path | None = None) -> dict[str, Any]:

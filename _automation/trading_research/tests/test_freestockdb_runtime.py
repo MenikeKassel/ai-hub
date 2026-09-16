@@ -90,6 +90,91 @@ class FreeStockDBRuntimeTests(unittest.TestCase):
 
         self.assertEqual([], processes)
 
+    def test_exact_processes_falls_back_to_listener_name_when_recorded_pid_drifted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: True,
+            )
+            runtime.paths.state.parent.mkdir(parents=True)
+            # Metadata records the launcher pid (16420) while the serving
+            # process listening on 7899 is 16424 — observed on 2026-09-16.
+            (runtime.paths.state.parent / "freestockdb-process.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 16420,
+                        "root": str(program.resolve()),
+                        "url": "http://127.0.0.1:7899",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(
+                    runtime,
+                    "_processes",
+                    return_value=[
+                        {
+                            "ProcessId": 16424,
+                            "ExecutablePath": None,
+                            "CommandLine": None,
+                        }
+                    ],
+                ),
+                patch.object(runtime, "_listening_process_ids", return_value=[16424]),
+                patch.object(runtime, "_listener_process_name", return_value="stockdb"),
+            ):
+                processes = runtime.exact_processes()
+
+        self.assertEqual(1, len(processes))
+        self.assertEqual(16424, processes[0]["ProcessId"])
+        self.assertEqual("listener_process_name", processes[0]["Source"])
+
+    def test_listener_name_fallback_rejects_a_foreign_listener(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: True,
+            )
+            with (
+                patch.object(runtime, "_processes", return_value=[]),
+                patch.object(runtime, "_listening_process_ids", return_value=[4321]),
+                patch.object(runtime, "_listener_process_name", return_value="python"),
+            ):
+                processes = runtime.exact_processes()
+
+        self.assertEqual([], processes)
+
+    def test_listener_name_fallback_requires_an_open_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            program = base / "stockdb"
+            program.mkdir()
+            runtime = FreeStockDBRuntime(
+                program,
+                runtime_root=base / "runtime",
+                data_root=program,
+                socket_probe=lambda *_: False,
+            )
+            with (
+                patch.object(runtime, "_processes", return_value=[]),
+                patch.object(runtime, "_listening_process_ids", return_value=[16424]),
+                patch.object(runtime, "_listener_process_name", return_value="stockdb"),
+            ):
+                processes = runtime.exact_processes()
+
+        self.assertEqual([], processes)
+
     def test_process_metadata_round_trips_for_future_elevated_detection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
