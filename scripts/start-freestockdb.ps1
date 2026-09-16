@@ -48,6 +48,19 @@ function Get-ExactProcesses {
     }
 }
 
+function Get-ServerListenerProcessIds {
+    # The elevated server process can hide ExecutablePath/CommandLine from a
+    # limited-token query, so identify our own listener by process name.
+    $matches = @()
+    foreach ($listenerPid in @(Get-ListenerProcessIds)) {
+        $proc = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -ieq [IO.Path]::GetFileNameWithoutExtension($server)) {
+            $matches += [int]$listenerPid
+        }
+    }
+    return @($matches)
+}
+
 function Test-RecordedListener {
     param([int[]]$Listeners)
     if (-not (Test-Path -LiteralPath $metadataPath)) { return $false }
@@ -82,13 +95,29 @@ if (Test-Path -LiteralPath $stopRequestPath) {
         $recordedRoot = [IO.Path]::GetFullPath([string]$metadata.root).TrimEnd('\')
         $expectedRoot = [IO.Path]::GetFullPath($FreeStockRoot).TrimEnd('\')
         $listeners = @(Get-ListenerProcessIds)
-        if ($recordedPid -le 0 -or $recordedRoot -ine $expectedRoot -or $listeners -notcontains $recordedPid) {
-            throw "Recorded FreeStockDB process does not own port $Port."
+        if ($recordedRoot -ine $expectedRoot) {
+            throw "Recorded FreeStockDB root does not match $FreeStockRoot."
         }
-        $target = Get-Process -Id $recordedPid -ErrorAction SilentlyContinue
-        if ($target) {
-            $target | Stop-Process -Force -ErrorAction Stop
-            $target | Wait-Process -Timeout 15 -ErrorAction Stop
+        # The recorded pid can drift from the pid that actually serves the port
+        # (the launcher process exits once the server takes over; observed
+        # 2026-09-16: recorded 16420 vs listener 16424). Prefer the recorded pid
+        # while it still owns the port, otherwise stop the listener that matches
+        # our own server binary — and refuse anything else.
+        $targets = @()
+        if ($recordedPid -gt 0 -and $listeners -contains $recordedPid) {
+            $targets = @($recordedPid)
+        } else {
+            $targets = @(Get-ServerListenerProcessIds)
+        }
+        if ($targets.Count -eq 0) {
+            throw "No FreeStockDB listener owns port $Port (listeners: $($listeners -join ', '))."
+        }
+        foreach ($targetPid in $targets) {
+            $target = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+            if ($target) {
+                $target | Stop-Process -Force -ErrorAction Stop
+                $target | Wait-Process -Timeout 15 -ErrorAction Stop
+            }
         }
         Remove-Item -LiteralPath $metadataPath -Force -ErrorAction SilentlyContinue
         [ordered]@{ token = $request.token; status = "stopped"; completed_at = [DateTimeOffset]::Now.ToString("o") } |
@@ -115,7 +144,20 @@ $env:FREESTOCKDB_URL = $url
 $listeners = @(Get-ListenerProcessIds)
 if ($listeners.Count -gt 0) {
     $exact = @(Get-ExactProcesses)
-    if ($exact.Count -gt 0 -or (Test-RecordedListener -Listeners $listeners)) {
+    $serverListeners = @(Get-ServerListenerProcessIds)
+    $metadataRootMatches = $false
+    if (Test-Path -LiteralPath $metadataPath) {
+        try {
+            $metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $metadataRootMatches = (
+                [IO.Path]::GetFullPath([string]$metadata.root).TrimEnd('\') -ieq
+                [IO.Path]::GetFullPath($FreeStockRoot).TrimEnd('\')
+            )
+        } catch {
+            $metadataRootMatches = $false
+        }
+    }
+    if ($exact.Count -gt 0 -or (Test-RecordedListener -Listeners $listeners) -or ($serverListeners.Count -gt 0 -and $metadataRootMatches)) {
         Write-Host "FreeStockDB is already running: $url"
         exit 0
     }
@@ -129,7 +171,8 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     Start-Sleep -Seconds 1
     $exact = @(Get-CimInstance Win32_Process -Filter "Name='stockdb.exe'" |
         Where-Object { [string]$_.ExecutablePath -ieq $server })
-    if ((Get-ListenerProcessIds).Count -gt 0 -and $exact.Count -gt 0) {
+    $serverListeners = @(Get-ServerListenerProcessIds)
+    if ((Get-ListenerProcessIds).Count -gt 0 -and ($exact.Count -gt 0 -or $serverListeners.Count -gt 0)) {
         $ready = $true
         break
     }
@@ -140,12 +183,15 @@ if (-not $ready) {
     throw "FreeStockDB failed to start from $FreeStockRoot (port $Port)."
 }
 
+$listenerPids = @(Get-ListenerProcessIds)
+$servingPid = if ($listenerPids.Count -gt 0) { [int]$listenerPids[0] } else { [int]$process.Id }
 $metadata = [ordered]@{
-    pid = [int]$process.Id
+    pid = $servingPid
+    launcher_pid = [int]$process.Id
     root = $FreeStockRoot
     data = $data
     url = $url
     started_at = [DateTimeOffset]::Now.ToString("o")
 }
 $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath $metadataPath -Encoding UTF8
-Write-Host "FreeStockDB: $url (pid=$($process.Id), data=$data)"
+Write-Host "FreeStockDB: $url (pid=$servingPid, data=$data)"
