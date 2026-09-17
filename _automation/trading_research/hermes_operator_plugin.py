@@ -25,6 +25,7 @@ ACTIONS = {
     "returns",
     "import-zhihu",
     "onboard-zhihu",
+    "import-douyin",
     "list-kols",
     "add-kol",
     "set-kol-status",
