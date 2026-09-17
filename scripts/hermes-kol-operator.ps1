@@ -2,7 +2,7 @@
 param(
     [ValidateSet(
         "status", "doctor", "start", "open", "collect", "review", "market", "data-refresh", "returns",
-        "import-zhihu", "onboard-zhihu",
+        "import-zhihu", "onboard-zhihu", "import-douyin",
         "list-kols", "add-kol", "set-kol-status", "list-drafts", "approve-draft",
         "reject-draft", "list-events", "event-action",
         "platform-status", "discover-accounts", "list-candidates", "score-candidate",
@@ -511,13 +511,25 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw $output.Trim() }
         Write-Output $output.Trim()
     }
+    "import-douyin" {
+        # Douyin has no live adapter: rebuild captures from the local archive,
+        # then ingest them through the capture-backed provider.
+        $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
+        $cli = Join-Path $RepoRoot "_automation\trading_research\trading_cli.py"
+        $sync = & $python $cli kol-douyin-capture-sync 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw $sync.Trim() }
+        $fetch = & $python $cli kol-post-fetch --platform douyin 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw $fetch.Trim() }
+        Write-Output $sync.Trim()
+        Write-Output $fetch.Trim()
+    }
     "list-kols" {
         $items = Invoke-KolApi "GET" "/api/kols"
         Write-Result @($items | Select-Object id, display_name, platform, handle, status, fetch_status, last_fetched_at, consecutive_failures)
     }
     "add-kol" {
         if (-not $Handle -or -not $DisplayName) { throw "add-kol requires -Handle and -DisplayName" }
-        $trackingMode = if ($Platform -eq "Zhihu") { "direct_profile" } else { "all" }
+        $trackingMode = if ($Platform -ieq "Zhihu") { "direct_profile" } elseif ($Platform -ieq "douyin") { "capture" } else { "all" }
         Write-Result (Invoke-KolApi "POST" "/api/kols" @{
             handle = $Handle.TrimStart("@")
             display_name = $DisplayName

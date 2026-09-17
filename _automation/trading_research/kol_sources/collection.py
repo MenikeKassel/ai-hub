@@ -7,7 +7,7 @@ from kol_tracker import SHANGHAI, now_iso
 from runtime_jobs import initialize_schema, owned_worker, worker_active
 from .core import FetchSummary, ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XPostProvider, XSessionUnavailableError
 from .media import download_images as _download_images_impl
-from .normalization import normalise_twitter_post, normalise_zhihu_answer
+from .normalization import normalise_douyin_post, normalise_twitter_post, normalise_zhihu_answer
 from .providers import _post_provider_warning, _provider_result
 from .repository import KolPostStore
 from .rules import RuleClassifier
@@ -442,6 +442,12 @@ def run_post_fetch(
                 try:
                     if platform == "zhihu":
                         post = normalise_zhihu_answer(
+                            payload,
+                            kol,
+                            provider=fetch_result.provider,
+                        )
+                    elif platform == "douyin":
+                        post = normalise_douyin_post(
                             payload,
                             kol,
                             provider=fetch_result.provider,

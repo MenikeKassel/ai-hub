@@ -67,6 +67,7 @@ from kol_sources.core import (
 from kol_sources.normalization import (
     ZHIHU_DIGEST_AUTHOR_RE,
     extract_zhihu_digest_attributions,
+    normalise_douyin_post,
     normalise_twitter_post,
     normalise_zhihu_answer,
 )

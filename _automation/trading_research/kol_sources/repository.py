@@ -924,6 +924,10 @@ class KolPostStore:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", clean_handle):
                 raise ValueError("invalid Zhihu url_token")
             canonical_profile = profile_url.strip() or f"https://www.zhihu.com/people/{clean_handle}"
+        elif clean_platform == "Douyin":
+            if not re.fullmatch(r"[A-Za-z0-9_\-]{6,200}", clean_handle):
+                raise ValueError("invalid Douyin sec_uid")
+            canonical_profile = profile_url.strip() or f"https://www.douyin.com/user/{clean_handle}"
         else:
             raise ValueError("unsupported KOL platform")
         if status not in {"active", "paused"}:

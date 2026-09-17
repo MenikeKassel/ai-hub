@@ -794,6 +794,17 @@ def _zhihu_provider() -> ZhihuProfileProvider:
     )
 
 
+def _douyin_provider():
+    """Capture-backed provider for Douyin KOLs (no live adapter by design)."""
+    from kol_discovery_runtime import douyin_post_provider
+
+    return douyin_post_provider()
+
+
+def kol_douyin_capture_sync(args: argparse.Namespace) -> None:
+    return kol_collection_commands.kol_douyin_capture_sync(sys.modules[__name__], args)
+
+
 def kol_post_doctor(args: argparse.Namespace) -> None:
     return kol_collection_commands.kol_post_doctor(sys.modules[__name__], args)
 
@@ -3543,8 +3554,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_zhihu_onboard.add_argument("--backfill", type=int, default=20)
     p_zhihu_onboard.set_defaults(func=kol_zhihu_onboard)
 
+    p_douyin_sync = sub.add_parser(
+        "kol-douyin-capture-sync",
+        help="build Douyin KOL captures from the local douyin-collection-archive",
+    )
+    p_douyin_sync.add_argument("--manifest", default="", help="archive download_manifest.jsonl (env: DOUYIN_ARCHIVE_MANIFEST)")
+    p_douyin_sync.add_argument("--transcripts", default="", help="archive transcripts root (env: DOUYIN_ARCHIVE_TRANSCRIPTS)")
+    p_douyin_sync.add_argument("--capture-root", default="", help="target captures root (default: kol-discovery captures)")
+    p_douyin_sync.add_argument("--dry-run", action="store_true")
+    p_douyin_sync.set_defaults(func=kol_douyin_capture_sync)
+
     p_post_doctor = sub.add_parser("kol-post-doctor", help="check KOL post collection dependencies")
-    p_post_doctor.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_post_doctor.add_argument("--platform", choices=["all", "x", "zhihu", "douyin"], default="all")
     p_post_doctor.set_defaults(func=kol_post_doctor)
 
     p_post_backup = sub.add_parser("kol-post-db-backup", help="create a consistent SQLite backup")
@@ -3619,7 +3640,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_post_fetch.add_argument("--classify-limit", type=int, default=0)
     p_post_fetch.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
-    p_post_fetch.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_post_fetch.add_argument("--platform", choices=["all", "x", "zhihu", "douyin"], default="all")
     p_post_fetch.add_argument(
         "--handles",
         help="comma-separated handles for a targeted retry; omit to fetch all active accounts",

@@ -169,7 +169,10 @@ def kol_morning_pipeline(context: ModuleType, args: argparse.Namespace) -> None:
         return context.run_post_fetch(
             store,
             context._post_provider(args.provider, batch_key=batch_key),
-            platform_providers={"zhihu": context._zhihu_provider()},
+            platform_providers={
+                "zhihu": context._zhihu_provider(),
+                "douyin": context._douyin_provider(),
+            },
             platforms=None if args.platform == "all" else {args.platform},
             max_count=args.fetch_count,
             classifier=context.RuleClassifier(context._classification_aliases()),
@@ -218,7 +221,10 @@ def kol_morning_orchestrate(context: ModuleType, args: argparse.Namespace) -> No
         return context.run_post_fetch(
             store,
             context._post_provider(args.provider, batch_key=batch_key),
-            platform_providers={"zhihu": context._zhihu_provider()},
+            platform_providers={
+                "zhihu": context._zhihu_provider(),
+                "douyin": context._douyin_provider(),
+            },
             platforms=None if args.platform == "all" else {args.platform},
             max_count=args.fetch_count,
             classifier=context.RuleClassifier(context._classification_aliases()),

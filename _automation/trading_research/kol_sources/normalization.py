@@ -170,3 +170,70 @@ def normalise_zhihu_answer(
         metrics_provider=provider,
         provider_warning="secondhand_aggregation" if is_aggregation else "",
     )
+
+
+def normalise_douyin_post(
+    payload: dict[str, Any],
+    kol: dict[str, Any],
+    *,
+    provider: str = "douyin-capture",
+) -> PostRecord:
+    """Normalise a Douyin capture item (archive/transcript export) into a post.
+
+    Captures are produced by ``kol-douyin-capture-sync`` from the local Douyin
+    archive (favourites manifest + whisper transcripts); text is the transcript
+    when available and the post description otherwise.
+    """
+    item_id = str(
+        payload.get("external_item_id")
+        or payload.get("item_id")
+        or payload.get("aweme_id")
+        or ""
+    ).strip()
+    if not re.fullmatch(r"\d{5,25}", item_id):
+        raise ValueError("Douyin item has an invalid id")
+    text = str(payload.get("text") or payload.get("desc") or "").strip()
+    if not text:
+        raise ValueError("Douyin item has no usable text")
+    posted_at = str(payload.get("posted_at") or payload.get("created_at") or "").strip()
+    if not posted_at:
+        raise ValueError("Douyin item is missing an exact timestamp")
+    utc_value, local_value = _utc_and_local(posted_at)
+    media_kind = str(
+        payload.get("media_type") or payload.get("content_type") or "video"
+    ).strip().casefold()
+    post_type = "gallery" if media_kind in {"gallery", "images", "note"} else "video"
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        segment = "note" if post_type == "gallery" else "video"
+        url = f"https://www.douyin.com/{segment}/{item_id}"
+    # Same id scheme as kol_audit.discovery.models.content_id: "<platform>:<id>".
+    post_id = f"douyin:{item_id}"
+    hash_input = "\n".join([post_id, text]).encode("utf-8")
+    return PostRecord(
+        post_id=post_id,
+        kol_id=int(kol["id"]),
+        platform="douyin",
+        handle=str(kol["handle"]),
+        author_name=str(kol.get("display_name") or kol["handle"]),
+        url=url,
+        text=text,
+        article_title="",
+        article_text="",
+        quoted_id="",
+        quoted_text="",
+        quoted_author="",
+        reply_to_id="",
+        reply_to_author="",
+        posted_at=local_value,
+        posted_at_utc=utc_value,
+        post_type=post_type,
+        language="zh",
+        media=[],
+        metrics={},
+        raw_payload=dict(payload),
+        content_hash=hashlib.sha256(hash_input).hexdigest(),
+        fetched_at=now_iso(),
+        canonical_provider=provider,
+        metrics_provider=provider,
+    )

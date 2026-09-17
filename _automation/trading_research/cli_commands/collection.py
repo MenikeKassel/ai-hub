@@ -3,6 +3,18 @@ import argparse
 from types import ModuleType
 
 
+def _platform_providers(context: ModuleType) -> dict[str, object]:
+    """Providers for the platforms that are not the primary X provider.
+
+    Douyin has no live adapter by design: its provider replays JSON captures
+    produced by ``kol-douyin-capture-sync`` from the local archive.
+    """
+    return {
+        "zhihu": context._zhihu_provider(),
+        "douyin": context._douyin_provider(),
+    }
+
+
 def kol_post_doctor(context: ModuleType, args: argparse.Namespace) -> None:
     store = context._post_store()
     x_sessions = context.XSessionManager(store)
@@ -236,7 +248,7 @@ def kol_gap_recover(context: ModuleType, args: argparse.Namespace) -> None:
         first = context.run_post_fetch(
             store,
             provider,
-            platform_providers={"zhihu": context._zhihu_provider()},
+            platform_providers=_platform_providers(context),
             platforms={platform_key},
             max_count=20 if args.scope == "recent" else 500,
             fresh_first_page=args.scope == "recent",
@@ -261,7 +273,7 @@ def kol_gap_recover(context: ModuleType, args: argparse.Namespace) -> None:
             second = context.run_post_fetch(
                 store,
                 provider,
-                platform_providers={"zhihu": context._zhihu_provider()},
+                platform_providers=_platform_providers(context),
                 platforms={platform_key},
                 max_count=100,
                 reconcile_zhihu=False,
@@ -555,6 +567,32 @@ def kol_fallback_mode(context: ModuleType, args: argparse.Namespace) -> None:
     print(context.json.dumps({"ok": True, "mode": args.set}, ensure_ascii=False))
 
 
+def kol_douyin_capture_sync(context: ModuleType, args: argparse.Namespace) -> None:
+    """Regenerate Douyin captures from the local archive for registered KOLs."""
+    from pathlib import Path
+
+    from kol_discovery_runtime import DEFAULT_CAPTURE_ROOT
+    from kol_sources.douyin_capture import sync_douyin_captures
+
+    store = context._post_store()
+    capture_root = Path(str(getattr(args, "capture_root", "") or "") or DEFAULT_CAPTURE_ROOT)
+    manifest_arg = str(getattr(args, "manifest", "") or "")
+    transcripts_arg = str(getattr(args, "transcripts", "") or "")
+    dry_run = bool(getattr(args, "dry_run", False))
+    result = sync_douyin_captures(
+        store,
+        manifest=Path(manifest_arg) if manifest_arg else None,
+        transcripts=Path(transcripts_arg) if transcripts_arg else None,
+        capture_root=capture_root,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        result["next_step"] = "kol-post-fetch --platform douyin"
+    print(context.json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("ok"):
+        raise SystemExit(2)
+
+
 def kol_post_fetch(context: ModuleType, args: argparse.Namespace) -> None:
     store = context._post_store()
     requested = args.backfill or 50
@@ -571,7 +609,7 @@ def kol_post_fetch(context: ModuleType, args: argparse.Namespace) -> None:
             batch_key=batch_key,
             history_mode="history" in batch_key or "gap-" in batch_key,
         ),
-        platform_providers={"zhihu": context._zhihu_provider()},
+        platform_providers=_platform_providers(context),
         platforms=None if args.platform == "all" else {args.platform},
         handles=handles or None,
         max_count=requested,
@@ -685,7 +723,7 @@ def kol_fetch_resume(context: ModuleType, args: argparse.Namespace) -> None:
             batch_key=batch_key,
             history_mode="history" in batch_key or "gap-" in batch_key,
         ),
-        platform_providers={"zhihu": context._zhihu_provider()},
+        platform_providers=_platform_providers(context),
         platforms=None if args.platform == "all" else {args.platform},
         max_count=args.fetch_count,
         classifier=context.RuleClassifier(context._classification_aliases()),

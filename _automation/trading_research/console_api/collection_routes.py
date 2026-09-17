@@ -58,10 +58,15 @@ def register_routes(services: ApiServices) -> None:
             session_manager=x_sessions,
             batch_key=f"api:fetch:{uuid.uuid4().hex}",
         )
+        from kol_discovery_runtime import douyin_post_provider
+
         result = run_post_fetch(
             post_store,
             provider,
-            platform_providers={"zhihu": zhihu_provider},
+            platform_providers={
+                "zhihu": zhihu_provider,
+                "douyin": douyin_post_provider(),
+            },
             max_count=body.max_count,
             classifier=RuleClassifier(
                 classification_aliases()

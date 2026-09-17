@@ -440,6 +440,14 @@ class LocalCaptureAccountProvider:
         )
 
 
+def douyin_post_provider(capture_root: Path | None = None) -> Any:
+    """Post-fetch provider for Douyin captures (no live adapter by design)."""
+    from kol_sources.providers import CaptureAccountPostProvider
+
+    root = Path(capture_root) if capture_root else DEFAULT_CAPTURE_ROOT
+    return CaptureAccountPostProvider(LocalCaptureAccountProvider("douyin", root))
+
+
 class OpenCodeGoCandidateScoreProvider:
     """Score evidence only; the public core keeps admission human-controlled."""
 

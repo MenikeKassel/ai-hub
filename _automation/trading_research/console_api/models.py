@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class KolCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     handle: str = Field(min_length=1, max_length=100)
-    platform: str = Field(default="X", pattern="^(X|Zhihu)$")
+    platform: str = Field(default="X", pattern="^(X|Zhihu|Douyin|x|zhihu|douyin)$")
     profile_url: str = Field(default="", max_length=500)
     domain: str = Field(default="", max_length=300)
     tracking_mode: str = Field(default="all", max_length=30)

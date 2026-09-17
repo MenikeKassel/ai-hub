@@ -836,3 +836,29 @@ def build_x_post_provider(
     if mode == "nitter":
         return fallback
     return FallbackXPostProvider(primary, fallback, mode=fallback_mode if fallback_mode in {"enabled", "shadow", "disabled"} else "shadow")
+
+
+class CaptureAccountPostProvider:
+    """Present a local JSON-capture account as a post-fetch provider.
+
+    Platforms without a live adapter (Douyin, ...) are ingested from capture
+    files written by ``kol-douyin-capture-sync``; this adapter exposes the
+    discovery provider's ``resolve``/``fetch`` pair through the
+    ``fetch_user_posts`` interface the post-fetch loop calls.
+    """
+
+    def __init__(self, discovery_provider: Any):
+        self.discovery = discovery_provider
+        self.name = str(getattr(discovery_provider, "name", "local-capture"))
+
+    def fetch_user_posts(self, handle: str, max_count: int) -> ProviderFetchResult:
+        account = self.discovery.resolve(handle)
+        content = self.discovery.fetch(account, None, max(1, int(max_count)))
+        posts = [dict(item) for item in getattr(content, "items", [])]
+        warnings = [str(value) for value in (getattr(content, "warnings", []) or [])]
+        return ProviderFetchResult(
+            self.name,
+            posts,
+            [ProviderAttempt(self.name, "success", len(posts))],
+            warnings,
+        )
