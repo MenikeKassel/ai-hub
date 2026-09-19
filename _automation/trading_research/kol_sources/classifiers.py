@@ -791,11 +791,15 @@ def build_post_classifier(
     workspace: Path,
     *,
     deepseek_credentials: DeepSeekCredentialStore | None = None,
-) -> FallbackPostClassifier:
-    return FallbackPostClassifier(
-        CodexPostClassifier(schema_path, workspace),
-        DeepSeekPostClassifier(schema_path, deepseek_credentials),
-    )
+) -> DeepSeekPostClassifier:
+    """OpenCode Go (DeepSeek V4 Flash) is the ONLY classifier provider.
+
+    2026-09-19 user decision: every KOL classification routes through OpenCode
+    Go; Codex is never used, directly or as a fallback, so the pipeline cannot
+    consume Codex/ChatGPT quota. ``workspace`` remains in the signature for
+    existing call sites.
+    """
+    return DeepSeekPostClassifier(schema_path, deepseek_credentials)
 
 
 def build_batch_post_classifier(
@@ -803,8 +807,6 @@ def build_batch_post_classifier(
     workspace: Path,
     *,
     deepseek_credentials: DeepSeekCredentialStore | None = None,
-) -> FallbackBatchPostClassifier:
-    return FallbackBatchPostClassifier(
-        CodexBatchPostClassifier(schema_path, workspace),
-        DeepSeekBatchPostClassifier(schema_path, deepseek_credentials),
-    )
+) -> DeepSeekBatchPostClassifier:
+    """OpenCode Go only — see :func:`build_post_classifier` (2026-09-19)."""
+    return DeepSeekBatchPostClassifier(schema_path, deepseek_credentials)

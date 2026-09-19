@@ -278,7 +278,7 @@ auto-followed until the original account identity is confirmed.
 The normal operator surface is now `Today Review`:
 
 ```text
-X post -> rules/OCR -> Codex batch classification -> one draft per stock
+X post -> rules/OCR -> OpenCode Go (DeepSeek V4 Flash) batch classification -> one draft per stock
        -> human edit/approve/reject -> formal event -> market and returns refresh
 ```
 
@@ -297,13 +297,15 @@ normal UI and has no pending-task badge. Legacy non-candidate posts are marked
 as system-screened with an audit record; source posts are never deleted.
 
 The morning window has priority over historical backlog. Numbered recommendation
-lists are parsed deterministically before OCR or Codex. RapidOCR runs locally
-through an isolated ONNX runtime, handles at most eight posts per scope, and has
-a 90-second batch ceiling. OCR text, line boxes, confidence, and provider are
-kept with the classification audit. Unlimited-OCR remains an experimental deep
-document parser and is not part of the morning SLA. Codex processes
-up to ten posts per batch, retries once, and may only emit structured drafts
-with source evidence. Item failures degrade the run but do not prevent other
+lists are parsed deterministically before OCR or model classification. RapidOCR
+runs locally through an isolated ONNX runtime, handles at most eight posts per
+scope, and has a 90-second batch ceiling. OCR text, line boxes, confidence, and
+provider are kept with the classification audit. Unlimited-OCR remains an
+experimental deep document parser and is not part of the morning SLA. The
+OpenCode Go (DeepSeek V4 Flash) batch classifier processes up to ten posts per
+batch, retries once, and may only emit structured drafts with source evidence.
+All classifier traffic runs on the OpenCode Go API; Codex is not used for
+classification (2026-09-19). Item failures degrade the run but do not prevent other
 drafts from being published.
 
 Market runtime data lives under `_runtime\trading\market`: immutable raw
