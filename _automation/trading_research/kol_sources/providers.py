@@ -185,6 +185,18 @@ class TwitterCliProvider:
             from twitter_cli.client import TwitterClient  # type: ignore
         except Exception as exc:
             raise TwitterProviderError(f"twitter-cli 0.8.5 import failed: {type(exc).__name__}") from exc
+        # The reader performs HTTP through curl_cffi's shared session, which
+        # binds TWITTER_PROXY when the session is first created.  Production
+        # hosts cannot reach x.com directly, so the configured proxy must be
+        # applied here as well; otherwise every guarded page dies with
+        # "HTTP 0 / api_error" network failures while the subprocess paths
+        # (which already export TWITTER_PROXY) keep working.
+        if self.proxy_url:
+            os.environ["TWITTER_PROXY"] = self.proxy_url
+            import twitter_cli.client as _twitter_client_module  # type: ignore
+            session = getattr(_twitter_client_module, "_cffi_session", None)
+            if session is not None:
+                session.proxies = {"https": self.proxy_url, "http": self.proxy_url}
         credentials = self.session_manager.credentials_for(slot_id) if self.session_manager else {
             "TWITTER_AUTH_TOKEN": self.credentials.load_values()[0],
             "TWITTER_CT0": self.credentials.load_values()[1],

@@ -3727,7 +3727,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_morning.add_argument("--as-of")
     p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
-    p_morning.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_morning.add_argument("--platform", choices=["all", "x", "zhihu", "douyin"], default="all")
     p_morning.add_argument("--fetch-count", type=int, default=50)
     p_morning.add_argument("--backlog-limit", type=int, default=20)
     p_morning.add_argument("--phase", choices=["initial", "refresh", "final", "preview"], default="initial")
@@ -3739,7 +3739,7 @@ def build_parser() -> argparse.ArgumentParser:
         "kol-morning-orchestrate", help="run the due morning phase and chain missed phases safely"
     )
     p_morning_orchestrate.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
-    p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu"], default="all")
+    p_morning_orchestrate.add_argument("--platform", choices=["all", "x", "zhihu", "douyin"], default="all")
     p_morning_orchestrate.add_argument("--fetch-count", type=int, default=20)
     p_morning_orchestrate.add_argument("--skip-fetch", action="store_true")
     p_morning_orchestrate.set_defaults(func=kol_morning_orchestrate)

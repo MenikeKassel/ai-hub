@@ -2,7 +2,7 @@
 param(
     [string]$RepoRoot = "",
     [int]$FetchCount = 20,
-    [ValidateSet("all", "x", "zhihu")]
+    [ValidateSet("all", "x", "zhihu", "douyin")]
     [string]$Platform = "x",
     [switch]$NoNotify,
     [switch]$NoFetch

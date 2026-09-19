@@ -78,7 +78,7 @@ Register-KolTask -Name "KOL_Zhihu_Fetch_Evening" -Script $fetch -Arguments @("-R
 Register-KolTask -Name "KOL_Post_Fetch_Manual_X" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual X collection entrypoint."
 Register-KolTask -Name "KOL_Post_Fetch_Manual_Zhihu" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual Zhihu collection entrypoint."
 
-$morningTimes = @(@("KOL_Morning_Pipeline_0720", "07:20", "x"), @("KOL_Morning_Pipeline_0805", "08:05", "zhihu"), @("KOL_Morning_Pipeline_0845", "08:45", "all"))
+$morningTimes = @(@("KOL_Morning_Pipeline_0700", "07:00", "douyin"), @("KOL_Morning_Pipeline_0720", "07:20", "x"), @("KOL_Morning_Pipeline_0805", "08:05", "zhihu"), @("KOL_Morning_Pipeline_0845", "08:45", "all"))
 foreach ($item in $morningTimes) {
     $morningArguments = @("-RepoRoot", "`"$RepoRoot`"", "-Platform", $item[2], "-FetchCount", "20")
     if ($item[0] -eq "KOL_Morning_Pipeline_0845") { $morningArguments += "-NoFetch" }

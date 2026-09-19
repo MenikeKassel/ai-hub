@@ -215,6 +215,18 @@ def kol_morning_orchestrate(context: ModuleType, args: argparse.Namespace) -> No
     store = context._post_store()
     market = context._market_store()
     review_date = context.date.today()
+    capture_sync: dict[str, Any] | None = None
+    if args.platform in {"douyin", "all"} and not args.skip_fetch:
+        # Douyin has no live adapter by design: refresh the archive captures
+        # first so the fetch phase below ingests whatever the local
+        # douyin-collection-archive currently holds.
+        from kol_discovery_runtime import DEFAULT_CAPTURE_ROOT
+        from kol_sources.douyin_capture import sync_douyin_captures
+
+        try:
+            capture_sync = sync_douyin_captures(store, capture_root=DEFAULT_CAPTURE_ROOT)
+        except Exception as exc:  # pragma: no cover - defensive report
+            capture_sync = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
     def fetcher():
         batch_key = f"morning:{review_date.isoformat()}:{args.platform}"
@@ -256,13 +268,18 @@ def kol_morning_orchestrate(context: ModuleType, args: argparse.Namespace) -> No
         return pipeline.run(
             as_of=review_date,
             fetch=not args.skip_fetch,
-            backlog_limit=0,
+            # Archived Douyin items can be months old, so their phase also
+            # drains the pending backlog instead of relying on the 09:00-to-
+            # 09:00 review window alone.
+            backlog_limit=50 if args.platform == "douyin" else 0,
             max_runtime_minutes=runtime,
             phase=phase,
         )
 
     result = context.MorningOrchestrator(runner=run_phase).run()
     result["interrupted_stale_runs"] = interrupted
+    if capture_sync is not None:
+        result["douyin_capture_sync"] = capture_sync
     print(context.json.dumps(result, ensure_ascii=False, indent=2))
     if not result["ok"] or any(item.get("alert_required") for item in result["results"]):
         raise SystemExit(2)

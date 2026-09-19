@@ -261,5 +261,18 @@ class DouyinNormalisationTest(unittest.TestCase):
             )
 
 
+class DouyinMorningPhaseTest(unittest.TestCase):
+    def test_morning_commands_accept_the_douyin_platform(self) -> None:
+        import trading_cli
+
+        parser = trading_cli.build_parser()
+        orchestrate = parser.parse_args(["kol-morning-orchestrate", "--platform", "douyin"])
+        self.assertEqual("douyin", orchestrate.platform)
+        morning_run = parser.parse_args(
+            ["kol-morning-run", "--platform", "douyin", "--as-of", "2026-09-19"]
+        )
+        self.assertEqual("douyin", morning_run.platform)
+
+
 if __name__ == "__main__":
     unittest.main()

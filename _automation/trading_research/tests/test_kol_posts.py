@@ -847,6 +847,78 @@ class ProviderAndFetchTests(unittest.TestCase):
         self.assertEqual("secret-auth", calls[0][1]["env"]["TWITTER_AUTH_TOKEN"])
         self.assertEqual("http://127.0.0.1:7897", calls[0][1]["env"]["TWITTER_PROXY"])
 
+    def test_guarded_reader_applies_configured_proxy(self) -> None:
+        """The direct reader must carry the proxy, or every page times out."""
+        import os
+        import sys
+        from types import SimpleNamespace
+
+        class FakeSessionManager:
+            def credentials_for(self, slot_id):
+                return {"TWITTER_AUTH_TOKEN": "fixture-auth", "TWITTER_CT0": "fixture-ct0"}
+
+        class FakeCredentials:
+            def load_values(self):
+                return ("fixture-auth", "fixture-ct0")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "twitter_cli"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "client.py").write_text(
+                "from types import SimpleNamespace\n"
+                "\n"
+                "\n"
+                "class TwitterClient:\n"
+                "    def __init__(self, auth_token, ct0, config, cookie_string=''):\n"
+                "        self.auth_token = auth_token\n"
+                "        self.cookie_string = cookie_string\n"
+                "\n"
+                "\n"
+                "_cffi_session = SimpleNamespace(proxies=None)\n",
+                encoding="utf-8",
+            )
+            previous_site = os.environ.get("TWITTER_CLI_SITE_PACKAGES")
+            previous_proxy = os.environ.pop("TWITTER_PROXY", None)
+            os.environ["TWITTER_CLI_SITE_PACKAGES"] = tmp
+            for name in ("twitter_cli", "twitter_cli.client"):
+                sys.modules.pop(name, None)
+            try:
+                # Without a configured proxy nothing is forced on the reader.
+                plain = TwitterCliProvider(
+                    "twitter", FakeCredentials(), proxy_url="", session_manager=FakeSessionManager()
+                )
+                plain._direct_client_for_slot(1)
+                self.assertNotIn("TWITTER_PROXY", os.environ)
+                self.assertIsNone(sys.modules["twitter_cli.client"]._cffi_session.proxies)
+
+                # With one, it reaches both the env and the shared session.
+                proxied = TwitterCliProvider(
+                    "twitter",
+                    FakeCredentials(),
+                    proxy_url="http://127.0.0.1:7788",
+                    session_manager=FakeSessionManager(),
+                )
+                client = proxied._direct_client_for_slot(2)
+                self.assertEqual("fixture-auth", client.auth_token)
+                self.assertEqual("http://127.0.0.1:7788", os.environ["TWITTER_PROXY"])
+                self.assertEqual(
+                    {"https": "http://127.0.0.1:7788", "http": "http://127.0.0.1:7788"},
+                    sys.modules["twitter_cli.client"]._cffi_session.proxies,
+                )
+            finally:
+                for name in ("twitter_cli", "twitter_cli.client"):
+                    sys.modules.pop(name, None)
+                while tmp in sys.path:
+                    sys.path.remove(tmp)
+                if previous_site is None:
+                    os.environ.pop("TWITTER_CLI_SITE_PACKAGES", None)
+                else:
+                    os.environ["TWITTER_CLI_SITE_PACKAGES"] = previous_site
+                os.environ.pop("TWITTER_PROXY", None)
+                if previous_proxy is not None:
+                    os.environ["TWITTER_PROXY"] = previous_proxy
+
     def test_daily_fetch_is_idempotent(self) -> None:
         class Provider:
             name = "fixture"
