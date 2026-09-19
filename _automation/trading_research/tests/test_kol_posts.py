@@ -94,7 +94,12 @@ class StoreTests(unittest.TestCase):
 
             gate = PublicBackupGate(store)
             provider = FxTwitterPublicPostProvider(gate)
-            with patch("kol_posts.urllib.request.urlopen", return_value=FakeResponse()):
+
+            class FakeOpener:
+                def open(self, request, timeout=None):
+                    return FakeResponse()
+
+            with patch("kol_sources.providers.proxy_opener", return_value=FakeOpener()):
                 payload = provider.fetch_post("https://x.com/alice/status/2076000000000000001", batch_key="public-test")
             self.assertEqual("2076000000000000001", payload["id"])
             self.assertEqual("public text", payload["text"])
@@ -108,7 +113,11 @@ class StoreTests(unittest.TestCase):
             provider = FxTwitterPublicPostProvider(PublicBackupGate(store))
             with self.assertRaises(ValueError):
                 provider.fetch_post("https://example.com/alice/status/2076000000000000001", batch_key="bad")
-            with patch("kol_posts.urllib.request.urlopen", side_effect=urllib.error.HTTPError("https://api.fxtwitter.com", 404, "not found", {}, None)):
+            class NotFoundOpener:
+                def open(self, request, timeout=None):
+                    raise urllib.error.HTTPError("https://api.fxtwitter.com", 404, "not found", {}, None)
+
+            with patch("kol_sources.providers.proxy_opener", return_value=NotFoundOpener()):
                 with self.assertRaises(PublicBackupNotFoundError):
                     provider.fetch_post("https://x.com/alice/status/2076000000000000001", batch_key="not-found")
             with store.connect() as db:
@@ -918,6 +927,99 @@ class ProviderAndFetchTests(unittest.TestCase):
                 os.environ.pop("TWITTER_PROXY", None)
                 if previous_proxy is not None:
                     os.environ["TWITTER_PROXY"] = previous_proxy
+
+    def test_proxy_opener_carries_the_configured_proxy(self) -> None:
+        import os
+        import urllib.request
+
+        from kol_sources.core import DEFAULT_OUTBOUND_PROXY, proxy_opener
+
+        def handler_of(opener):
+            return next(item for item in opener.handlers if isinstance(item, urllib.request.ProxyHandler))
+
+        previous = os.environ.pop("KOL_X_PROXY", None)
+        try:
+            self.assertEqual(
+                {"http": DEFAULT_OUTBOUND_PROXY, "https": DEFAULT_OUTBOUND_PROXY},
+                dict(handler_of(proxy_opener()).proxies),
+            )
+            os.environ["KOL_X_PROXY"] = "http://127.0.0.1:7788"
+            self.assertEqual(
+                {"http": "http://127.0.0.1:7788", "https": "http://127.0.0.1:7788"},
+                dict(handler_of(proxy_opener()).proxies),
+            )
+            os.environ["KOL_X_PROXY"] = ""
+            # An empty override tolerates either an empty handler or none.
+            self.assertFalse(
+                [
+                    item
+                    for item in proxy_opener().handlers
+                    if isinstance(item, urllib.request.ProxyHandler) and item.proxies
+                ]
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("KOL_X_PROXY", None)
+            else:
+                os.environ["KOL_X_PROXY"] = previous
+
+    def test_media_download_uses_the_proxy_opener(self) -> None:
+        from kol_sources import media as media_module
+        from kol_sources.core import PostRecord
+
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg"}
+
+            def read(self, size=-1):
+                return b"fake-jpeg-bytes"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class FakeOpener:
+            def __init__(self):
+                self.urls: list[str] = []
+
+            def open(self, request, timeout=None):
+                self.urls.append(request.full_url)
+                return FakeResponse()
+
+        opener = FakeOpener()
+        post = PostRecord(
+            post_id="fixture-post-1",
+            kol_id=1,
+            platform="X",
+            handle="fixture",
+            author_name="Fixture",
+            url="https://x.com/fixture/status/1",
+            text="text",
+            article_title="",
+            article_text="",
+            quoted_id="",
+            quoted_text="",
+            quoted_author="",
+            reply_to_id="",
+            reply_to_author="",
+            posted_at="2026-09-19T08:00:00+08:00",
+            posted_at_utc="2026-09-19T00:00:00+00:00",
+            post_type="post",
+            language="en",
+            media=[{"type": "photo", "url": "https://pbs.twimg.com/media/fixture.jpg"}],
+            metrics={},
+            raw_payload={},
+            content_hash="hash",
+            fetched_at="2026-09-19T00:00:00+00:00",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(media_module, "proxy_opener", lambda: opener):
+                saved, errors = media_module.download_images(post, Path(tmp))
+            self.assertEqual([], errors)
+            self.assertEqual(1, len(saved))
+            self.assertEqual(["https://pbs.twimg.com/media/fixture.jpg"], opener.urls)
+            self.assertTrue(Path(saved[0]["path"]).is_file())
 
     def test_daily_fetch_is_idempotent(self) -> None:
         class Provider:

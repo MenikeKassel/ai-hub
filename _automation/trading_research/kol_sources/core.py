@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
+import os
 import re
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
@@ -281,3 +283,23 @@ def _utc_and_local(value: str) -> tuple[str, str]:
     utc = parsed.astimezone(timezone.utc)
     local = parsed.astimezone(SHANGHAI)
     return utc.isoformat(timespec="seconds"), local.isoformat(timespec="seconds")
+
+
+DEFAULT_OUTBOUND_PROXY = "http://127.0.0.1:7897"
+
+
+def proxy_opener() -> urllib.request.OpenerDirector:
+    """urllib opener that carries the configured outbound proxy.
+
+    Media and public-backup hosts that are only reachable through the local
+    proxy otherwise stall every request until the socket timeout, which shows
+    up as multi-minute fetches and mass ``url: timeout`` media errors.
+    ``KOL_X_PROXY`` overrides the default; set it to an empty string to force
+    direct connections.
+    """
+    proxy = os.environ.get("KOL_X_PROXY", DEFAULT_OUTBOUND_PROXY).strip()
+    if not proxy:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    )

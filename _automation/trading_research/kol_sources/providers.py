@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from .core import ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XPostProvider, ZhihuProviderError
+from .core import ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XPostProvider, ZhihuProviderError, proxy_opener
 from .credentials import KeyringCredentialStore
 from .sessions import PublicBackupGate, PublicBackupNotFoundError, PublicBackupRateLimitError, XSessionManager
 
@@ -78,7 +78,7 @@ class FxTwitterPublicPostProvider:
         api_url = f"https://api.fxtwitter.com/{username}/status/{post_id}"
         try:
             request = urllib.request.Request(api_url, headers={"User-Agent": "ai-hub-x-public-backup/1"})
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with proxy_opener().open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(10 * 1024 * 1024 + 1)
                 if len(raw) > 10 * 1024 * 1024:
                     raise TwitterProviderError("FxTwitter response exceeded 10 MB")

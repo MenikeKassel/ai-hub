@@ -4,7 +4,7 @@ import mimetypes
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from .core import PostRecord
+from .core import PostRecord, proxy_opener
 
 
 def download_images(
@@ -23,7 +23,7 @@ def download_images(
             continue
         request = urllib.request.Request(url, headers={"User-Agent": "ai-hub-kol-research/2.0"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with proxy_opener().open(request, timeout=timeout) as response:
                 content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0]
                 if not content_type.startswith("image/"):
                     errors.append(f"{url}: non-image response")
