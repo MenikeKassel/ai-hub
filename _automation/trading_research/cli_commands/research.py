@@ -73,6 +73,31 @@ def kol_update(context: ModuleType, args: argparse.Namespace) -> None:
         lock.release()
 
 
+def kol_surge_alerts(context: ModuleType, args: argparse.Namespace) -> None:
+    """Report posts whose mentioned stocks gained within the forward window."""
+    from kol_surge_alerts import format_surge_message, scan_surge_alerts
+    from kol_tracker import WarehousePriceProvider
+
+    store = context._post_store()
+    provider = WarehousePriceProvider(context.MARKET_ROOT / "warehouse")
+    state_path = context.KOL_ROOT / "surge_alerts.json"
+    window_days = max(1, int(args.window_days))
+    threshold = max(0.0, float(args.threshold))
+    result = scan_surge_alerts(
+        store,
+        provider,
+        state_path=state_path,
+        lookback_days=max(1, int(args.lookback_days)),
+        window_days=window_days,
+        threshold=threshold,
+        dry_run=bool(args.dry_run),
+    )
+    if args.notify and not args.dry_run and result["new_alerts"]:
+        message = format_surge_message(result["new_alerts"], window_days=window_days, threshold=threshold)
+        result["notified"] = context._send_feishu(message)
+    print(context.json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def kol_performance_doctor(context: ModuleType, _: argparse.Namespace) -> None:
     context._require_returns_writes("kol-performance-doctor")
     service = context._performance_service()

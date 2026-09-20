@@ -564,6 +564,10 @@ def kol_update(args: argparse.Namespace) -> None:
     return kol_research_commands.kol_update(sys.modules[__name__], args)
 
 
+def kol_surge_alerts(args: argparse.Namespace) -> None:
+    return kol_research_commands.kol_surge_alerts(sys.modules[__name__], args)
+
+
 def _kol_update_locked(args: argparse.Namespace) -> None:
     store = KolStore(KOL_ROOT)
     if not store.events_path.exists():
@@ -3436,6 +3440,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_kol_update.add_argument("--dry-run", action="store_true")
     p_kol_update.add_argument("--event-id", help="update one event only")
     p_kol_update.set_defaults(func=kol_update)
+
+    p_kol_surge = sub.add_parser(
+        "kol-surge-alerts",
+        help="alert on posts whose mentioned stocks gained within a week",
+    )
+    p_kol_surge.add_argument("--lookback-days", type=int, default=21, help="how far back to scan posts (default 21)")
+    p_kol_surge.add_argument("--window-days", type=int, default=7, help="forward window in calendar days (default 7)")
+    p_kol_surge.add_argument("--threshold", type=float, default=0.10, help="gain threshold, e.g. 0.10 for +10%%")
+    p_kol_surge.add_argument("--notify", action="store_true", help="push new alerts through Hermes")
+    p_kol_surge.add_argument("--dry-run", action="store_true", help="do not persist state or notify")
+    p_kol_surge.set_defaults(func=kol_surge_alerts)
 
     p_kol_returns_backfill = sub.add_parser(
         "kol-returns-backfill",

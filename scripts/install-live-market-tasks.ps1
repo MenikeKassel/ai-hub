@@ -21,7 +21,7 @@ function Register-LiveTask {
 }
 
 $remove = @(
-    "FreeStockDB_Update_Daily", "Market_Data_Weekly", "KOL_Return_Tracker_Daily",
+    "FreeStockDB_Update_Daily", "Market_Data_Weekly", "KOL_Return_Tracker_Daily", "KOL_Surge_Alert_Daily",
     "KOL_Event_Method_Research", "KOL_Performance_Weekly", "Research_Data_Digest_Daily"
 )
 foreach ($name in $remove) {
@@ -32,6 +32,7 @@ $freeSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstan
 Register-LiveTask "FreeStockDB_Update_Daily" "freestockdb-update.ps1" "-DataRoot `"$(Join-Path (Split-Path -Parent $RepoRoot) 'freestock\stockdb')`"" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "17:50") "Verify and update the local FreeStockDB source before the daily market publication." $freeSettings
 Register-LiveTask "Market_Data_Sync_Daily" "market-data-sync.ps1" "" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "19:30") "Publish the latest completed daily market snapshot atomically." $settings
 Register-LiveTask "KOL_Return_Tracker_Daily" "kol-tracker.ps1" "" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "23:30") "Fallback update for audited KOL event returns; successful market publication triggers it immediately." $settings
+Register-LiveTask "KOL_Surge_Alert_Daily" "kol-surge-alert.ps1" "" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "23:40") "Push posts whose mentioned stocks gained 10 percent or more within a week of the post." $settings
 
 if ($RunNow) { Start-ScheduledTask -TaskName "Market_Data_Sync_Daily" }
 Write-Host "Installed live tasks: FreeStockDB 17:50, atomic market publication 19:30, and KOL returns after publication (23:30 fallback). Event research remains manual."
