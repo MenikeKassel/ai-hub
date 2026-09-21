@@ -38,7 +38,8 @@ $fetch = Join-Path $RepoRoot "scripts\kol-post-fetch.ps1"
 $morning = Join-Path $RepoRoot "scripts\kol-morning-pipeline.ps1"
 $nitter = Join-Path $RepoRoot "scripts\start-kol-nitter.ps1"
 $watchdog = Join-Path $RepoRoot "scripts\hermes-watchdog.ps1"
-foreach ($path in @($ui, $freestock, $fetch, $morning, $nitter, $watchdog)) {
+$watchdogLauncher = Join-Path $RepoRoot "scripts\hermes-watchdog-launcher.vbs"
+foreach ($path in @($ui, $freestock, $fetch, $morning, $nitter, $watchdog, $watchdogLauncher)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required script not found: $path" }
 }
 
@@ -99,7 +100,8 @@ if ($hermes) {
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -Hidden
     Register-ScheduledTask -TaskName "Hermes_Gateway_Logon" -Action $gatewayAction -Trigger $atLogon -Settings $settings -Principal $principal -Description "Start Hermes gateway on user logon." -Force | Out-Null
-    Register-KolTask -Name "Hermes_Gateway_Watchdog" -Script $watchdog -Arguments @("-LogPath", "`"$RepoRoot\_runtime\watchdog\hermes-watchdog.log`"") -Trigger $watchTrigger -Description "Check and recover the Hermes gateway every five minutes." -Limit (New-TimeSpan -Minutes 5)
+    $watchdogAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$watchdogLauncher`"" -WorkingDirectory $RepoRoot
+    Register-ScheduledTask -TaskName "Hermes_Gateway_Watchdog" -Action $watchdogAction -Trigger $watchTrigger -Settings $settings -Principal $principal -Description "Check and recover the Hermes gateway every five minutes without opening a console window." -Force | Out-Null
 }
 
 if ($RunUiNow) { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ui -RepoRoot $RepoRoot -NoBrowser }

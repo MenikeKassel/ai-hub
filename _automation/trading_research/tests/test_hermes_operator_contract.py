@@ -129,7 +129,10 @@ class HermesOperatorContractTests(unittest.TestCase):
         self.assertIn("if (-not $DryRun)", market_block.group("body"))
         self.assertIn("market-daily-publish --as-of $AsOf", market_block.group("body"))
         self.assertIn('NotePropertyValue "preview"', market_block.group("body"))
-        self.assertIn('$ErrorActionPreference = "Continue"', runner)
+        self.assertIn("Start-Process", runner)
+        self.assertIn("-RedirectStandardOutput $stdoutPath", runner)
+        self.assertIn("-RedirectStandardError $stderrPath", runner)
+        self.assertIn("$exitCode = $process.ExitCode", runner)
         self.assertIn("market-sync-failed-$attemptId.stderr.log", runner)
         self.assertIn('"--candidate-root", $CandidateRoot', runner)
         self.assertIn("$maxAttempts = 3", runner)
@@ -141,6 +144,17 @@ class HermesOperatorContractTests(unittest.TestCase):
             runner,
         )
 
+    def test_morning_pipeline_preserves_utf8_json_from_native_process(self) -> None:
+        runner = (ROOT / "scripts" / "kol-morning-pipeline.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Start-Process", runner)
+        self.assertIn("-RedirectStandardOutput $stdoutPath", runner)
+        self.assertIn("-RedirectStandardError $stderrPath", runner)
+        self.assertIn("$exitCode = $process.ExitCode", runner)
+        self.assertNotIn("& $python @orchestrateArgs 1> $stdoutPath 2> $stderrPath", runner)
+
     def test_freestockdb_start_task_can_stop_its_elevated_listener(self) -> None:
         starter = (ROOT / "scripts" / "start-freestockdb.ps1").read_text(encoding="utf-8")
         runtime = (
@@ -151,6 +165,35 @@ class HermesOperatorContractTests(unittest.TestCase):
         self.assertIn("freestockdb-stop.result.json", starter)
         self.assertIn("KOL_FreeStockDB_Start", runtime)
         self.assertIn("_save_process_metadata", runtime)
+
+    def test_hermes_watchdog_uses_relocatable_hidden_launcher(self) -> None:
+        launcher = (ROOT / "scripts" / "hermes-watchdog-launcher.vbs").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "scripts" / "install-hermes-watchdog.ps1").read_text(
+            encoding="utf-8"
+        )
+        recovery_installer = (
+            ROOT / "scripts" / "install-kol-recovery-tasks.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("WScript.ScriptFullName", launcher)
+        self.assertNotIn("D:\\aiworkspace", launcher)
+        self.assertIn('wscript.exe `"$launcher`"', installer)
+        self.assertIn('-Execute "wscript.exe"', recovery_installer)
+        self.assertIn("$watchdogLauncher", recovery_installer)
+
+    def test_nitter_launcher_starts_docker_and_treats_stderr_as_not_ready(self) -> None:
+        launcher = (ROOT / "scripts" / "start-kol-nitter.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function Test-DockerReady", launcher)
+        self.assertIn("$probe.WaitForExit(5000)", launcher)
+        self.assertIn("$probe.Kill()", launcher)
+        self.assertIn("Start-Process -FilePath $dockerDesktop -WindowStyle Hidden", launcher)
+        self.assertIn("$readyDeadline = (Get-Date).AddSeconds(120)", launcher)
+        self.assertIn("while ((Get-Date) -lt $readyDeadline)", launcher)
 
     def test_skill_stops_after_start_failure(self) -> None:
         skill = (ROOT / "_skills" / "kol-research-operator" / "SKILL.md").read_text(

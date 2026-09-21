@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-09-11.
+Status date: 2026-09-22.
 
 ## Start and inspect
 
@@ -84,13 +84,28 @@ Recovery promotion verifies the manifest digest, all raw/qfq end dates, the
 active symbol set, and the research/board table contents before the swap. The
 PowerShell task wrapper retains child stdout and stderr logs after any failure
 under `_runtime/trading/market-task-logs`, outside the atomically swapped market
-directory so open log handles cannot block publication on Windows.
+directory so open log handles cannot block publication on Windows. Child streams
+are redirected as raw UTF-8 bytes, preserving the Python traceback on Windows
+PowerShell 5.1.
 
 FreeStockDB uses the vendor Windows v0.3.5 client. Its HTTP responses are
 MessagePack. The update manager stages and verifies both `data` and `data1`,
 removes the vendor `disable` marker before each pass, then swaps both databases
 together. Acceptance requires current smoke symbols, at least 90% market
 cross-section coverage, and a matching external price sample.
+
+If `freestockdb-update-state.json` reports that the staged vendor snapshot is
+older than the expected session, keep the accepted live generation. Confirm
+that PID ownership and port 7899 agree, then inspect the staged latest date; do
+not bypass freshness or repeatedly repair a healthy listener. Daily publication
+continues through the normal provider chain and records which provider supplied
+each immutable run.
+
+If BaoStock cannot log in, automatic publication resolves the calendar from
+Tencent's `000001` daily series and opens a per-process BaoStock circuit breaker.
+For Beijing 920 symbols, Tencent raw data can satisfy qfq only when the candidate
+has at least five recent sessions with identical raw/qfq OHLC; those runs are
+explicitly audited as `tencent_identity_qfq`.
 
 Event research refresh remains manual. Return updates run after the daily market
 publication; a return-affecting event amendment is rejected before mutation if

@@ -21,6 +21,7 @@ from kol_posts import (  # noqa: E402
     ModelProviderUnavailableError,
     RapidOcrBatchClassifier,
     RuleClassifier,
+    RuleResult,
     TwitterAuthenticationError,
     TwitterCliProvider,
     TwitterProviderError,
@@ -805,6 +806,51 @@ class ClassificationTests(unittest.TestCase):
 
             self.assertEqual([], store.claim_posts_for_ocr(1))
             self.assertEqual("not_needed", store.get_post(post.post_id)["ocr_status"])
+
+    def test_requeues_only_exhausted_provider_availability_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = KolPostStore(root / "posts.db", root / "media")
+            kol_id, _ = store.add_kol("fixture", "fixture")
+            kol = store.get_kol(kol_id)
+            assert kol is not None
+
+            post_ids = []
+            for index in range(2):
+                post = normalise_twitter_post(
+                    tweet_payload(
+                        id=f"209800000000000001{index}",
+                        url=f"https://x.com/fixture/status/209800000000000001{index}",
+                        text="这家公司值得继续研究",
+                    ),
+                    kol,
+                )
+                store.upsert_post(post)
+                store.save_rule_classification(
+                    post.post_id,
+                    RuleResult(70, True, [], "", ["fixture"], "ambiguous", "analysis"),
+                )
+                post_ids.append(post.post_id)
+
+            for _ in range(3):
+                store.save_model_classification(
+                    post_ids[0],
+                    None,
+                    model_name="deepseek-v4-flash",
+                    prompt_version="fixture-v1",
+                    error="OpenCode Go API unavailable (HTTP 401)",
+                )
+                store.save_model_classification(
+                    post_ids[1],
+                    None,
+                    model_name="deepseek-v4-flash",
+                    prompt_version="fixture-v1",
+                    error="model returned invalid schema",
+                )
+
+            self.assertEqual(1, store.requeue_model_provider_failures())
+            self.assertEqual("not_requested", store.get_post(post_ids[0])["model_status"])
+            self.assertEqual("failed", store.get_post(post_ids[1])["model_status"])
 
 
 class ProviderAndFetchTests(unittest.TestCase):

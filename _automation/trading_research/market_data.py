@@ -2103,15 +2103,19 @@ class BaoStockMarketProvider:
     def __init__(self) -> None:
         self._client: Any | None = None
         self._logged_in = False
+        self._login_error = ""
 
     def _session(self) -> Any:
         if self._logged_in and self._client is not None:
             return self._client
+        if self._login_error:
+            raise RuntimeError(self._login_error)
         import baostock as bs  # type: ignore
 
         login = bs.login()
         if login.error_code != "0":
-            raise RuntimeError(f"BaoStock login failed: {login.error_msg}")
+            self._login_error = f"BaoStock login failed: {login.error_msg}"
+            raise RuntimeError(self._login_error)
         self._client = bs
         self._logged_in = True
         return bs
@@ -2265,7 +2269,10 @@ class TencentMarketProvider:
                 payload = json.loads(body)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"Tencent returned invalid daily JSON for {symbol}") from exc
-            values = (((payload.get("data") or {}).get(code) or {}).get("day") or []) if isinstance(payload, dict) else []
+            series_key = "qfqday" if adjustment == "qfq" else "day"
+            values = (
+                ((payload.get("data") or {}).get(code) or {}).get(series_key) or []
+            ) if isinstance(payload, dict) else []
             return values if isinstance(values, list) else []
 
         # The endpoint treats the end date as exclusive. Asking for the day
@@ -2292,6 +2299,9 @@ class TencentMarketProvider:
             if column not in frame:
                 frame[column] = pd.NA
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
+        # Tencent reports A-share/ETF/index volume in board lots while the
+        # canonical warehouse and BaoStock use shares.
+        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce") * 100.0
         frame = frame[frame["date"].between(start, end, inclusive="both")]
         return frame[["date", "open", "high", "low", "close", "volume", "amount"]].reset_index(drop=True)
 

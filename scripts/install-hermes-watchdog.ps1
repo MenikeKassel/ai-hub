@@ -14,11 +14,15 @@ if (-not $RepoRoot) {
 }
 
 $watchdog = Join-Path $RepoRoot "scripts\hermes-watchdog.ps1"
+$launcher = Join-Path $RepoRoot "scripts\hermes-watchdog-launcher.vbs"
 if (-not (Test-Path -LiteralPath $watchdog)) {
     throw "Hermes watchdog script not found: $watchdog"
 }
+if (-not (Test-Path -LiteralPath $launcher)) {
+    throw "Hermes watchdog launcher not found: $launcher"
+}
 
-$taskAction = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdog`""
+$taskAction = "wscript.exe `"$launcher`""
 $arguments = @(
     "/Create",
     "/TN", $TaskName,

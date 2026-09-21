@@ -584,9 +584,17 @@ class KolPerformanceService:
         return events, identities, primary
 
     def _outcomes(
-        self, *, as_of: date, horizon: str, primary_only: bool | None
+        self,
+        *,
+        as_of: date,
+        horizon: str,
+        primary_only: bool | None,
+        context: tuple[list[EventRecord], dict[str, KolIdentity], dict[str, bool]] | None = None,
     ) -> tuple[list[BatchOutcome], set[str], set[str], AuditCounts]:
-        events, identities, primary = self._events_and_identities()
+        # ``compute`` asks for the same event/checkpoint universe once per
+        # horizon.  Accepting a shared context keeps those calls from rereading
+        # both CSV files and resolving every post repeatedly for every KOL row.
+        events, identities, primary = context or self._events_and_identities()
         event_by_id = {event.event_id: event for event in events}
         all_batch_keys: set[str] = set()
         short_by_identity: dict[str, int] = {}
@@ -677,8 +685,14 @@ class KolPerformanceService:
         horizon: str,
         window_name: str,
         primary_only: bool | None,
+        outcomes_by_horizon: dict[str, tuple[list[BatchOutcome], set[str], set[str], AuditCounts]] | None = None,
     ) -> dict[str, Any]:
-        outcomes, unmatured_keys, _, audit_counts = self._outcomes(as_of=as_of, horizon=horizon, primary_only=primary_only)
+        if outcomes_by_horizon is None:
+            outcomes, unmatured_keys, _, audit_counts = self._outcomes(
+                as_of=as_of, horizon=horizon, primary_only=primary_only
+            )
+        else:
+            outcomes, unmatured_keys, _, audit_counts = outcomes_by_horizon[horizon]
         matching = [item for item in outcomes if item.identity.key == identity.key]
         if window_name != "all":
             days = int(window_name)
@@ -692,7 +706,12 @@ class KolPerformanceService:
         )
         tier_source = {}
         for item_horizon in HORIZONS:
-            values, _, _, horizon_audit = self._outcomes(as_of=as_of, horizon=item_horizon, primary_only=primary_only)
+            if outcomes_by_horizon is None:
+                values, _, _, horizon_audit = self._outcomes(
+                    as_of=as_of, horizon=item_horizon, primary_only=primary_only
+                )
+            else:
+                values, _, _, horizon_audit = outcomes_by_horizon[item_horizon]
             values = [item for item in values if item.identity.key == identity.key]
             horizon_metrics = _metrics(values, input_key=f"{as_of}|{identity.key}|{item_horizon}|all|{primary_only}")
             self._apply_audit_counts(horizon_metrics, identity, horizon_audit)
@@ -756,9 +775,29 @@ class KolPerformanceService:
         window_name = str(window)
         if window_name not in {"all", *(str(value) for value in RECENT_WINDOWS)}:
             raise ValueError("window must be 7, 30, 90, or all")
-        _, identities, _ = self._events_and_identities()
+        context = self._events_and_identities()
+        events, identities, _ = context
         selected = [item for item in identities.values() if not platform or platform == "all" or item.platform == platform]
-        rows = [self._row_for_identity(item, as_of=as_of, horizon=horizon, window_name=window_name, primary_only=primary_only) for item in selected]
+        outcomes_by_horizon = {
+            item_horizon: self._outcomes(
+                as_of=as_of,
+                horizon=item_horizon,
+                primary_only=primary_only,
+                context=context,
+            )
+            for item_horizon in HORIZONS
+        }
+        rows = [
+            self._row_for_identity(
+                item,
+                as_of=as_of,
+                horizon=horizon,
+                window_name=window_name,
+                primary_only=primary_only,
+                outcomes_by_horizon=outcomes_by_horizon,
+            )
+            for item in selected
+        ]
         # Rank within platform.  A combined view never compares X and Zhihu.
         for platform_name in sorted({row["platform"] for row in rows}):
             self._rank([row for row in rows if row["platform"] == platform_name], horizon)
@@ -782,13 +821,47 @@ class KolPerformanceService:
                 "sample_note": "主分析仅含已验证且可执行的事前看多推荐；看空事件保留审计记录但不计入A股收益，小样本只展示、不排名。",
             },
             "rows": rows,
-            "secondary": self.compute_secondary(as_of=as_of, platform=platform, window=window_name, horizon=horizon),
+            "secondary": self.compute_secondary(
+                as_of=as_of,
+                platform=platform,
+                window=window_name,
+                horizon=horizon,
+                context=context,
+            ),
         }
 
-    def compute_secondary(self, *, as_of: date, platform: str | None, window: str, horizon: str) -> dict[str, Any]:
-        _, identities, _ = self._events_and_identities()
+    def compute_secondary(
+        self,
+        *,
+        as_of: date,
+        platform: str | None,
+        window: str,
+        horizon: str,
+        context: tuple[list[EventRecord], dict[str, KolIdentity], dict[str, bool]] | None = None,
+    ) -> dict[str, Any]:
+        shared_context = context or self._events_and_identities()
+        _, identities, _ = shared_context
         selected = [item for item in identities.values() if not platform or platform == "all" or item.platform == platform]
-        rows = [self._row_for_identity(item, as_of=as_of, horizon=horizon, window_name=window, primary_only=False) for item in selected]
+        outcomes_by_horizon = {
+            item_horizon: self._outcomes(
+                as_of=as_of,
+                horizon=item_horizon,
+                primary_only=False,
+                context=shared_context,
+            )
+            for item_horizon in HORIZONS
+        }
+        rows = [
+            self._row_for_identity(
+                item,
+                as_of=as_of,
+                horizon=horizon,
+                window_name=window,
+                primary_only=False,
+                outcomes_by_horizon=outcomes_by_horizon,
+            )
+            for item in selected
+        ]
         return {
             "description": "不可执行、条件、来源受限或二手看多事件的观点表现，仅供审计，不参与能力判断；看空事件不纳入A股收益口径。",
             "rows": rows,

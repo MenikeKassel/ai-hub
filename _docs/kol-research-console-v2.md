@@ -7,7 +7,7 @@
 - Daily post task: `KOL_Post_Fetch_Daily`, every day at 19:00
 - Daily return task: `KOL_Return_Tracker_Daily`, triggered after successful
   market publication with a weekday 23:30 fallback
-- Nitter start task: `KOL_Nitter_Start`, at user logon
+- Nitter shadow start task: `KOL_Nitter_Shadow_Logon`, at user logon
 - Nitter URL: `http://127.0.0.1:9377`
 - Post database: `_runtime\trading\kol\posts.db`
 - Image cache: `_runtime\trading\kol\media`
@@ -28,7 +28,7 @@ are excluded from Git.
    exposed by the provider, metrics, and images are retained locally.
 4. Transparent rules detect A-share symbols, known company aliases,
    directional language, and financial image posts.
-5. Codex reviews candidates with a strict JSON schema. A model result is still
+5. DeepSeek V4 Flash through OpenCode Go reviews candidates with a strict JSON schema. A model result is still
    only a draft.
 6. The user approves, excludes, or ignores the post in the review queue.
 7. Approval binds the formal event directly to the immutable local post using

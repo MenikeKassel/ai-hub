@@ -141,12 +141,12 @@ automatic fallback, so these research jobs cannot consume Codex quota. Every
 hypothesis must cite a real field in the objective snapshot; failed validation
 is retained as an audit record while the objective evidence remains usable.
 
-The daily board job triggers `KOL_Event_Method_Research` only after its accepted
-snapshot and RPS work completes. A 02:00 trigger is retained as a fallback when
-the board source fails or the machine resumes late. The research task processes
-a bounded persistent queue. Re-running identical inputs is idempotent, while an
-event symbol, direction, thesis, name, or timestamp amendment invalidates the
-matching AI interpretation and preserves every prior version.
+Event method research is a manual maintenance action. The task installer removes
+the legacy `KOL_Event_Method_Research` schedule and does not retain a 02:00
+fallback. A manual run processes a bounded persistent queue. Re-running identical
+inputs is idempotent, while an event symbol, direction, thesis, name, or timestamp
+amendment invalidates the matching AI interpretation and preserves every prior
+version.
 
 Run market and context CLI commands serially. DuckDB protects the warehouse
 from cross-process writers, while the scheduled pipeline already preserves the
@@ -311,7 +311,12 @@ drafts from being published.
 Market runtime data lives under `_runtime\trading\market`: immutable raw
 snapshots, normalized Parquet, DuckDB catalog/coverage, manifests, and quality
 audits. BaoStock is the normal daily provider; FreeStockDB, Tencent, and AKShare
-are fallbacks.
+are fallbacks. BaoStock calendar failure falls back to Tencent's `000001` daily
+dates, while a process-local login circuit breaker prevents the same unavailable
+session from stalling every symbol. Tencent volume is converted from lots to
+shares and qfq reads the provider's `qfqday` series. Beijing 920 symbols may use
+raw-as-qfq only when recent stored raw/qfq OHLC are demonstrably identical; the
+audit provider is then `tencent_identity_qfq`.
 The local FreeStockDB service is fixed at
 `D:\aiworkspace\freestock\stockdb` and `http://127.0.0.1:7899`. It is a
 loopback-only read source running the vendor v0.3.5 Windows client. Its API uses
@@ -342,8 +347,9 @@ executable frozen checkpoints. Fewer than ten 1M samples never receive a rank;
 `scripts\install-kol-recovery-tasks.ps1` installs the D-drive operational
 schedule: X at 07:20 and 19:00, Zhihu at 06:30, 08:05 and 19:20, review-only
 morning finalization at 08:45, and the bounded OCR/AI backlog at 09:15. Market
-sync, return tracking and research recomputation tasks remain absent. To
-install only OCR, run `scripts\install-fast-ocr.ps1`.
+publication runs at 19:30 and return tracking runs after publication with a
+23:30 fallback. Research recomputation remains manual. To install only OCR, run
+`scripts\install-fast-ocr.ps1`.
 
 ## Legacy review agent
 

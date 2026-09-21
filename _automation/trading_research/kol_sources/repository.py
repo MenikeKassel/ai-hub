@@ -2531,6 +2531,33 @@ class KolPostStore:
             )
         return int(non_candidates.rowcount) + int(resolved_candidates.rowcount)
 
+    def requeue_model_provider_failures(self) -> int:
+        """Retry candidates exhausted only because the configured provider was down.
+
+        The normal three-attempt ceiling still protects deterministic content or
+        schema failures.  This maintenance path is deliberately limited to the
+        stable OpenCode Go availability errors so a recovered credential/service
+        can resume the durable queue under the existing daily budget.
+        """
+        timestamp = now_iso()
+        with self.connect() as db:
+            changed = db.execute(
+                """
+                UPDATE classifications SET
+                    model_status='not_requested',model_attempts=0,
+                    model_next_retry_at='',model_error='',updated_at=?
+                WHERE post_id IN (SELECT post_id FROM posts WHERE review_status='pending')
+                  AND is_candidate=1 AND model_status='failed' AND model_attempts>=3
+                  AND (
+                    model_error LIKE 'OpenCode Go API unavailable (HTTP %'
+                    OR model_error LIKE 'OpenCode Go connection failed:%'
+                    OR model_error='OpenCode Go / DeepSeek V4 Flash is not configured'
+                  )
+                """,
+                (timestamp,),
+            ).rowcount
+        return max(0, int(changed))
+
     def release_model_claim(self, post_id: str) -> None:
         with self.connect() as db:
             db.execute(

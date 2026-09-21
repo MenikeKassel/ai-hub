@@ -49,18 +49,19 @@ try {
         $attemptId = "$runId-attempt-$attempt"
         $stdoutPath = Join-Path $logDirectory (".market-sync-$attemptId.out")
         $stderrPath = Join-Path $logDirectory (".market-sync-$attemptId.err")
-        $exitCode = $null
-        # Windows PowerShell promotes native stderr to an ErrorRecord. With
-        # ErrorActionPreference=Stop that used to abort this block before the
-        # exit code and traceback could be recorded.
-        $savedErrorActionPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = "Continue"
-            & $python @arguments 1> $stdoutPath 2> $stderrPath
-            $exitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $savedErrorActionPreference
-        }
+        # Preserve the child's raw UTF-8 streams. Windows PowerShell 5.1 can
+        # otherwise decode native stderr into a formatted ErrorRecord before
+        # redirection, corrupting the traceback and interacting with Stop.
+        $process = Start-Process `
+            -FilePath $python `
+            -ArgumentList $arguments `
+            -WorkingDirectory $RepoRoot `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+        $exitCode = $process.ExitCode
         $stdout = [string]$(if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" })
         $stderr = [string]$(if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" })
         if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-MarketLog $stdout.Trim() }

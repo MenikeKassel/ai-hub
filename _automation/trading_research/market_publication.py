@@ -71,6 +71,31 @@ def _coverage_end_dates(store: MarketStore) -> tuple[dict[str, str], dict[str, s
     return raw, qfq
 
 
+class _IdentityQfqProvider:
+    """Expose a raw Tencent series as qfq after an identity-history check."""
+
+    name = "tencent_identity_qfq"
+
+    def __init__(self, provider: Any):
+        self.provider = provider
+
+    def fetch_daily(
+        self,
+        symbol: str,
+        instrument_type: str,
+        start: date,
+        end: date,
+        adjustment: str,
+    ) -> Any:
+        return self.provider.fetch_daily(
+            symbol,
+            instrument_type,
+            start,
+            end,
+            "raw",
+        )
+
+
 _RUNTIME_STATE_TABLES = (
     "board_catalog",
     "board_daily",
@@ -97,18 +122,78 @@ class MarketDailyPublisher:
         self.market_root = Path(market_root)
         self.post_store = post_store
         self.free_stockdb_url = free_stockdb_url
+        self._last_calendar_provider = ""
 
     def resolve_target_date(self, requested: str) -> date:
         if requested and requested != "auto":
             return date.fromisoformat(requested)
-        provider = BaoStockMarketProvider()
+        providers = [BaoStockMarketProvider(), TencentMarketProvider()]
         try:
-            values = provider.fetch_calendar(date.today() - timedelta(days=730), date.today())
+            values = self._fetch_calendar(
+                providers,
+                date.today() - timedelta(days=730),
+                date.today(),
+            )
         finally:
-            provider.close()
+            for provider in providers:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    close()
         if not values:
-            raise RuntimeError("BaoStock returned no completed trading date")
+            raise RuntimeError("market providers returned no completed trading date")
         return max(values)
+
+    def _fetch_calendar(
+        self,
+        providers: list[Any],
+        start: date,
+        end: date,
+        *,
+        required_date: date | None = None,
+    ) -> list[date]:
+        errors: list[str] = []
+        for provider in providers:
+            try:
+                fetch_calendar = getattr(provider, "fetch_calendar", None)
+                if callable(fetch_calendar):
+                    values = fetch_calendar(start, end)
+                elif getattr(provider, "name", "") == "tencent":
+                    frame = provider.fetch_daily(
+                        "000001", "index", start, end, "raw"
+                    )
+                    values = []
+                    for value in frame.get("date", []):
+                        if isinstance(value, datetime):
+                            values.append(value.date())
+                        elif isinstance(value, date):
+                            values.append(value)
+                        elif str(value or ""):
+                            values.append(date.fromisoformat(str(value)[:10]))
+                else:
+                    continue
+                values = sorted({value for value in values if start <= value <= end})
+                if values and (required_date is None or required_date in values):
+                    self._last_calendar_provider = str(
+                        getattr(provider, "name", type(provider).__name__)
+                    )
+                    return values
+            except Exception as exc:
+                errors.append(f"{getattr(provider, 'name', type(provider).__name__)}: {exc}")
+
+        # The persisted calendar is an audited last resort.  An explicitly
+        # resolved target can extend it by that one confirmed session.
+        try:
+            values = MarketStore(self.market_root).open_dates_between(start, end)
+        except Exception as exc:
+            errors.append(f"stored_calendar: {exc}")
+            values = []
+        if required_date is not None and start <= required_date <= end:
+            values.append(required_date)
+        values = sorted(set(values))
+        if values:
+            self._last_calendar_provider = "stored_calendar"
+            return values
+        raise RuntimeError("unable to resolve trading calendar: " + "; ".join(errors))
 
     def _providers(self) -> list[Any]:
         return [
@@ -267,8 +352,91 @@ class MarketDailyPublisher:
                 )
                 if current and current.get("end_date") and date.fromisoformat(str(current["end_date"])) >= target:
                     break
+            current = next(
+                (
+                    row for row in store.get_coverage(symbol)
+                    if row.get("dataset") == "daily" and row.get("adjustment") == adjustment
+                ),
+                None,
+            )
+            if (
+                adjustment == "qfq"
+                and not (
+                    current
+                    and current.get("end_date")
+                    and date.fromisoformat(str(current["end_date"])) >= target
+                )
+                and self._identity_qfq_allowed(store, symbol, str(instrument["instrument_type"]))
+            ):
+                tencent = next(
+                    (provider for provider in providers if getattr(provider, "name", "") == "tencent"),
+                    None,
+                )
+                if tencent is not None:
+                    try:
+                        result = sync_daily_bars(
+                            store,
+                            _IdentityQfqProvider(tencent),
+                            symbol,
+                            start,
+                            target,
+                            adjustment="qfq",
+                            promote=True,
+                            preserve_existing_before=preserve_before,
+                        )
+                        attempts.append(
+                            {
+                                "symbol": symbol,
+                                "adjustment": "qfq",
+                                "provider": "tencent_identity_qfq",
+                                "attempt": 1,
+                                **result.__dict__,
+                            }
+                        )
+                    except Exception as exc:
+                        attempts.append(
+                            {
+                                "symbol": symbol,
+                                "adjustment": "qfq",
+                                "provider": "tencent_identity_qfq",
+                                "attempt": 1,
+                                "error": str(exc)[:1000],
+                            }
+                        )
             results.extend(attempts)
         return results
+
+    @staticmethod
+    def _identity_qfq_allowed(
+        store: MarketStore,
+        symbol: str,
+        instrument_type: str,
+    ) -> bool:
+        if instrument_type == "index":
+            return True
+        if not symbol.startswith(("4", "8", "92")):
+            return False
+        try:
+            raw = store.read_daily(symbol, adjustment="raw")
+            qfq = store.read_daily(symbol, adjustment="qfq")
+            if raw.empty or qfq.empty:
+                return False
+            columns = ["trade_date", "open", "high", "low", "close"]
+            shared = raw[columns].merge(
+                qfq[columns],
+                on="trade_date",
+                suffixes=("_raw", "_qfq"),
+            ).sort_values("trade_date").tail(20)
+            if len(shared) < 5:
+                return False
+            for column in ("open", "high", "low", "close"):
+                raw_values = shared[f"{column}_raw"].astype(float)
+                qfq_values = shared[f"{column}_qfq"].astype(float)
+                if not ((raw_values - qfq_values).abs() <= 1e-8).all():
+                    return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
 
     def preview(self, target: date) -> dict[str, Any]:
         store = MarketStore(self.market_root)
@@ -729,12 +897,15 @@ class MarketDailyPublisher:
         calendar_start = calendar_end - timedelta(days=730)
         calendar_dates: list[date] = []
         try:
-            calendar_dates = providers[0].fetch_calendar(calendar_start, calendar_end)
-            if not calendar_dates:
-                raise RuntimeError("BaoStock returned no trading calendar rows")
+            calendar_dates = self._fetch_calendar(
+                providers,
+                calendar_start,
+                calendar_end,
+                required_date=target,
+            )
             candidate_store.replace_calendar(
                 calendar_dates,
-                provider="baostock",
+                provider=self._last_calendar_provider or "unknown",
                 start=calendar_start,
                 end=calendar_end,
             )
@@ -808,6 +979,7 @@ class MarketDailyPublisher:
             "calendar_start": calendar_start.isoformat(),
             "calendar_end": calendar_end.isoformat(),
             "calendar_open_dates": len(calendar_dates),
+            "calendar_provider": self._last_calendar_provider or "unknown",
             "results_count": len(results),
             "failures": failures[:200],
             "published": False,

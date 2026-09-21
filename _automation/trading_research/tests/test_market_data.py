@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -27,10 +29,64 @@ from market_data import (  # noqa: E402
 )
 from market_admissions import write_published_manifest  # noqa: E402
 from market_publication import MarketDailyPublisher  # noqa: E402
-from trading_cli import _completed_market_sync_date, _drain_market_queue, _sync_with_fallback  # noqa: E402
+from trading_cli import (  # noqa: E402
+    _completed_market_sync_date,
+    _drain_market_queue,
+    _sync_with_fallback,
+    market_doctor,
+)
+
+
+class MarketDoctorTests(unittest.TestCase):
+    def test_doctor_is_read_only(self) -> None:
+        provider = MagicMock()
+        provider.health.return_value = {"ok": True}
+        store = MagicMock()
+        store.health.return_value = {"ok": True}
+
+        with (
+            patch("trading_cli.FreeStockDBMarketProvider", return_value=provider),
+            patch("trading_cli._market_store", return_value=store),
+            patch("trading_cli._seed_market_instruments") as seed,
+            patch("trading_cli.dependency_available", return_value=True),
+            redirect_stdout(io.StringIO()),
+        ):
+            market_doctor(None)
+
+        seed.assert_not_called()
+        store.health.assert_called_once_with()
+        provider.close.assert_called_once_with()
 
 
 class TencentMarketProviderTests(unittest.TestCase):
+    def test_parses_qfq_series_from_tencent_specific_key(self) -> None:
+        payload = {
+            "data": {
+                "sh600900": {
+                    "qfqday": [["2026-09-21", "28.160", "28.100", "28.190", "28.020", "666700"]]
+                }
+            }
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()):
+            frame = TencentMarketProvider().fetch_daily(
+                "600900", "stock", date(2026, 9, 21), date(2026, 9, 21), "qfq"
+            )
+
+        self.assertEqual(["2026-09-21"], [value.isoformat() for value in frame["date"]])
+        self.assertEqual(28.1, float(frame.iloc[0]["close"]))
+        self.assertEqual(66_670_000.0, float(frame.iloc[0]["volume"]))
+
     def test_parses_public_bj_daily_payload_without_credentials(self) -> None:
         payload = {
             "data": {
@@ -56,6 +112,7 @@ class TencentMarketProviderTests(unittest.TestCase):
             )
         self.assertEqual(["2026-08-28"], [value.isoformat() for value in frame["date"]])
         self.assertEqual(520.0, float(frame.iloc[0]["open"]))
+        self.assertEqual(1_681_400.0, float(frame.iloc[0]["volume"]))
         request = opened.call_args.args[0]
         self.assertIn("bj920045", request.full_url)
         self.assertNotIn("auth", request.full_url.lower())
@@ -151,6 +208,122 @@ class FlakyTencentProvider:
 
 
 class MarketDataTests(unittest.TestCase):
+    def test_beijing_identity_history_allows_audited_qfq_fallback(self) -> None:
+        class BeijingTencentProvider:
+            name = "tencent"
+
+            def fetch_daily(self, symbol, instrument_type, start, end, adjustment):
+                if adjustment == "qfq":
+                    return pd.DataFrame()
+                return pd.DataFrame(
+                    [
+                        {
+                            "date": "2026-07-13",
+                            "open": 10.2,
+                            "high": 10.9,
+                            "low": 10.1,
+                            "close": 10.6,
+                            "preclose": 10.2,
+                            "volume": 1200,
+                            "amount": 10000,
+                        }
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketStore(Path(tmp) / "market")
+            store.upsert_instrument(
+                Instrument("920045", "fixture", "stock", "BJ", lifecycle="tracking")
+            )
+            history = pd.DataFrame(
+                [
+                    {
+                        "date": (date(2026, 7, 6) + timedelta(days=index)).isoformat(),
+                        "open": 10 + index / 10,
+                        "high": 10.5 + index / 10,
+                        "low": 9.5 + index / 10,
+                        "close": 10.2 + index / 10,
+                        "preclose": 10 + index / 10,
+                        "volume": 1000,
+                        "amount": 10000,
+                    }
+                    for index in range(5)
+                ]
+            )
+            for adjustment in ("raw", "qfq"):
+                sync_daily_bars(
+                    store,
+                    FixtureProvider(history),
+                    "920045",
+                    date(2026, 7, 6),
+                    date(2026, 7, 10),
+                    adjustment=adjustment,
+                )
+            sync_daily_bars(
+                store,
+                BeijingTencentProvider(),
+                "920045",
+                date(2026, 7, 13),
+                date(2026, 7, 13),
+                adjustment="raw",
+            )
+
+            results = MarketDailyPublisher(Path(tmp) / "market", None)._sync_symbol(
+                store,
+                "920045",
+                date(2026, 7, 13),
+                [BeijingTencentProvider()],
+            )
+
+            coverage = {
+                row["adjustment"]: row["end_date"]
+                for row in store.get_coverage("920045")
+            }
+            self.assertEqual("2026-07-13", coverage["qfq"])
+            self.assertTrue(
+                any(item.get("provider") == "tencent_identity_qfq" for item in results)
+            )
+
+    def test_baostock_login_failure_opens_process_circuit_breaker(self) -> None:
+        client = MagicMock()
+        client.login.return_value = MagicMock(error_code="100", error_msg="offline")
+        provider = BaoStockMarketProvider()
+
+        with patch.dict(sys.modules, {"baostock": client}):
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                provider._session()
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                provider._session()
+
+        client.login.assert_called_once_with()
+
+    def test_publication_calendar_falls_back_to_tencent_daily_reference(self) -> None:
+        class BrokenCalendarProvider:
+            name = "baostock"
+
+            @staticmethod
+            def fetch_calendar(start, end):
+                raise RuntimeError("calendar service unavailable")
+
+        class TencentCalendarProvider:
+            name = "tencent"
+
+            @staticmethod
+            def fetch_daily(symbol, instrument_type, start, end, adjustment):
+                return pd.DataFrame(
+                    {"date": [date(2026, 9, 18), date(2026, 9, 21)]}
+                )
+
+        publisher = MarketDailyPublisher(Path("unused"), None)
+        values = publisher._fetch_calendar(
+            [BrokenCalendarProvider(), TencentCalendarProvider()],
+            date(2026, 9, 1),
+            date(2026, 9, 21),
+        )
+
+        self.assertEqual([date(2026, 9, 18), date(2026, 9, 21)], values)
+        self.assertEqual("tencent", publisher._last_calendar_provider)
+
     def test_publication_powershell_capture_replaces_decode_errors(self) -> None:
         completed = object()
         with patch("market_publication.subprocess.run", return_value=completed) as run:

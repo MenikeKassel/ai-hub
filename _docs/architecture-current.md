@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 `returns_update_enabled=true` and `research_update_enabled=false`. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-09-09. Source version: 3.1.0.
+Status date: 2026-09-22. Source version: 3.1.0.
 
 ## Purpose and boundary
 
@@ -26,7 +26,7 @@ Zhihu CDP 9223 ─┘                                      │
                                                             │
                                              confirmed admissions
                                                             │
-CSV / FreeStockDB 7899 / BaoStock ─> candidate validation ─> market manifest
+BaoStock / FreeStockDB 7899 / Tencent / AKShare ─> candidate validation ─> market manifest
 
 FastAPI + built React UI: 127.0.0.1:8123
 Nitter shadow service:    127.0.0.1:9377
@@ -70,6 +70,19 @@ Ignored local state:
   formal market coverage.
 - A symbol is published only after raw and qfq daily series both pass the cutoff
   validation. Publication uses a candidate and rollback directory.
+- BaoStock supplies the primary trading calendar. If its login is unavailable,
+  Tencent's `000001` daily series supplies the open dates; the persisted calendar
+  is the last audited fallback. One failed BaoStock login opens a circuit breaker
+  for that process so every symbol does not repeat the same slow failure.
+- Tencent volume is normalized from lots to shares. Its `qfqday` payload is read
+  separately from raw `day`. For Beijing 920 symbols that expose only raw data,
+  the publisher may use an identity-qfq fallback only after at least five recent
+  shared sessions prove raw and qfq OHLC are identical; the derived provider is
+  recorded as `tencent_identity_qfq` in the run audit.
+- FreeStockDB is loopback-only supplementary storage. Its updater stages and
+  verifies both vendor databases before an atomic swap. A stale vendor candidate
+  never replaces the last accepted generation and never weakens publication
+  freshness requirements.
 
 ### X collection
 

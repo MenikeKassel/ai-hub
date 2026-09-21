@@ -3,8 +3,10 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -59,6 +61,33 @@ def checkpoint(event_id: str, trade_date: str, excess: float) -> dict[str, str]:
 
 
 class KolPerformanceTests(unittest.TestCase):
+    def test_compute_batches_outcome_scans_across_kol_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolStore(Path(tmp))
+            events = [
+                replace(
+                    event(f"E{index}", f"POST-{index}", f"60000{index}"),
+                    kol_id=str(index),
+                    kol_handle=f"fixture-{index}",
+                    kol_name=f"Fixture KOL {index}",
+                )
+                for index in range(1, 4)
+            ]
+            store.save_events(events, backup=False)
+            store.freeze_checkpoints([
+                checkpoint(item.event_id, "2026-01-10", 0.02 * index)
+                for index, item in enumerate(events, 1)
+            ])
+            service = KolPerformanceService(store)
+
+            # One outcome scan per horizon for the primary and secondary views;
+            # the scan must not repeat once for every KOL row.
+            with patch.object(service, "_outcomes", wraps=service._outcomes) as outcomes:
+                result = service.compute(as_of=date(2026, 1, 12), horizon="1W", window="all")
+
+            self.assertEqual(3, result["coverage"]["kol_count"])
+            self.assertEqual(8, outcomes.call_count)
+
     def test_narrative_provider_uses_opencode_go_deepseek_v4_flash(self) -> None:
         self.assertEqual("deepseek-v4-flash", DeepSeekPerformanceInterpreter.model_name)
         self.assertEqual(

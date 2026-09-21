@@ -72,8 +72,22 @@ try {
         # when -NoFetch was not yet registered by an elevated task update.
         $reviewOnlyWindow = $Platform -eq "all" -and (Get-Date).Hour -eq 8 -and (Get-Date).Minute -ge 40
         if ($NoFetch -or $reviewOnlyWindow) { $orchestrateArgs += "--skip-fetch" }
-        & $python @orchestrateArgs 1> $stdoutPath 2> $stderrPath
-        $exitCode = $LASTEXITCODE
+        # Windows PowerShell 5.1 decodes native stdout before applying `>`.
+        # UTF-8 Chinese immediately followed by an escaped quote can therefore
+        # consume the JSON backslash as part of a legacy code-page character,
+        # leaving otherwise valid orchestrator output impossible to parse.
+        # Start-Process redirects the child byte streams without that decode /
+        # re-encode step, while PYTHONIOENCODING above fixes their encoding.
+        $process = Start-Process `
+            -FilePath $python `
+            -ArgumentList $orchestrateArgs `
+            -WorkingDirectory $RepoRoot `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+        $exitCode = $process.ExitCode
         $stdout = if (Test-Path $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 } else { "" }
         $stderr = if (Test-Path $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 } else { "" }
     } finally {

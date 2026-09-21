@@ -452,12 +452,18 @@ def kol_ai_queue_maintain(context: ModuleType, args: argparse.Namespace) -> None
     store = context._post_store()
     before = store.model_queue_summary(daily_limit=args.daily_limit)
     recovered = store.recover_stale_classification() if args.recover_stale else {"ocr": 0, "model": 0}
+    requeued_provider_failures = (
+        store.requeue_model_provider_failures()
+        if args.apply and args.requeue_provider_failures
+        else 0
+    )
     changed = store.prepare_model_queue() if args.apply else 0
     after = store.model_queue_summary(daily_limit=args.daily_limit) if args.apply else before
     print(context.json.dumps({
         "ok": True,
         "dry_run": not bool(args.apply),
         "changed": changed,
+        "requeued_provider_failures": requeued_provider_failures,
         "recovered_stale": recovered,
         "before": before,
         "after": after,

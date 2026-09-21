@@ -1966,7 +1966,6 @@ def market_doctor(_: argparse.Namespace) -> None:
         freestockdb.close()
     try:
         store = _market_store()
-        _seed_market_instruments(store)
         checks["health"] = store.health()
     except Exception as exc:
         checks["ok"] = False
@@ -3635,6 +3634,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ai_maintain.add_argument("--daily-limit", type=int, default=250)
     p_ai_maintain.add_argument("--recover-stale", action="store_true")
+    p_ai_maintain.add_argument(
+        "--requeue-provider-failures",
+        action="store_true",
+        help="reset exhausted OpenCode Go availability failures after provider recovery",
+    )
     p_ai_maintain.add_argument("--apply", action="store_true")
     p_ai_maintain.set_defaults(func=kol_ai_queue_maintain)
 

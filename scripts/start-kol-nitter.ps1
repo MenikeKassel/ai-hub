@@ -19,10 +19,49 @@ if (-not $docker) { $docker = Join-Path $env:ProgramFiles "Docker\Docker\resourc
 if (-not (Test-Path -LiteralPath $docker)) { throw "Docker Desktop is not installed." }
 $env:PATH = "$(Split-Path $docker -Parent);$env:PATH"
 
+function Test-DockerReady {
+    # A stopped or starting Docker daemon is an expected readiness state.  Use
+    # Process directly so Windows PowerShell cannot promote native stderr to a
+    # terminating error, and cap each probe because docker.exe can otherwise
+    # wait indefinitely for the named pipe.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $docker
+    $startInfo.Arguments = "info"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $probe = New-Object System.Diagnostics.Process
+    $probe.StartInfo = $startInfo
+    try {
+        if (-not $probe.Start()) { return $false }
+        $stdoutTask = $probe.StandardOutput.ReadToEndAsync()
+        $stderrTask = $probe.StandardError.ReadToEndAsync()
+        if (-not $probe.WaitForExit(5000)) {
+            $probe.Kill()
+            $probe.WaitForExit()
+            return $false
+        }
+        $stdoutTask.GetAwaiter().GetResult() | Out-Null
+        $stderrTask.GetAwaiter().GetResult() | Out-Null
+        return ($probe.ExitCode -eq 0)
+    } finally {
+        $probe.Dispose()
+    }
+}
+
+$dockerDesktop = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+if (-not (Test-DockerReady) -and (Test-Path -LiteralPath $dockerDesktop)) {
+    $desktopProcess = Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue
+    if (-not $desktopProcess) {
+        Start-Process -FilePath $dockerDesktop -WindowStyle Hidden
+    }
+}
+
 $ready = $false
-for ($attempt = 0; $attempt -lt 60; $attempt++) {
-    & $docker info *> $null
-    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+$readyDeadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $readyDeadline) {
+    if (Test-DockerReady) { $ready = $true; break }
     Start-Sleep -Seconds 2
 }
 if (-not $ready) { throw "Docker Desktop did not become ready within 120 seconds." }

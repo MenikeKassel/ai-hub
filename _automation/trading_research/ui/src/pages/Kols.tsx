@@ -17,10 +17,10 @@ const availabilityClass: Record<Kol['availability_status'], string> = {
 export default function Kols() {
   const client = useQueryClient()
   const query = useQuery({ queryKey: ['kols'], queryFn: api.kols })
-  const leaderboard = useQuery({ queryKey: ['kol-leaderboard'], queryFn: api.kolLeaderboard })
   const digestAuthors = useQuery({ queryKey: ['digest-authors'], queryFn: api.digestAuthors })
   const [showAdd, setShowAdd] = useState(false)
   const [view, setView] = useState<'accounts' | 'attributions' | 'performance'>('accounts')
+  const leaderboard = useQuery({ queryKey: ['kol-leaderboard'], queryFn: api.kolLeaderboard, enabled: view === 'performance' })
   const [platformFilter, setPlatformFilter] = useState<'all' | 'X' | 'Zhihu'>('all')
   const [form, setForm] = useState<{ display_name: string; handle: string; domain: string; platform: 'X' | 'Zhihu' }>({ display_name: '', handle: '', domain: '', platform: 'X' })
   const [editingId, setEditingId] = useState<number | null>(null)

@@ -1,6 +1,6 @@
 # KOL 研究台 · 运行问题台账（Issue Ledger）
 
-- 维护：Hermes（桌面会话）· 建立 2026-09-13 · 最后更新 2026-09-13
+- 维护：Hermes / Codex（桌面会话）· 建立 2026-09-13 · 最后更新 2026-09-22
 - 对象：ai-hub `_automation/trading_research`（本地控制台 http://127.0.0.1:8123）
 - 用途：把 KOL 研究台的**运行问题**集中管理 —— 未闭环（Open）→ 已修复（Resolved）→ 周期性风险（Watch），避免重复诊断、交接丢失。
 - 用法约定：处理任何一项后更新本文件（状态 + 变更日志）；给 GPT / Codex 的问题单统一从 §1 取。
@@ -8,27 +8,27 @@
 
 ---
 
-## 0. 当前快照（2026-09-13 16:30 · 周日实测）
+## 0. 当前快照（2026-09-22 07:46 · 运行验收）
 
 | 项 | 现状 |
 |---|---|
-| 控制台 8123 | ✅ running（health=true，Hermes gateway=running，operator=available） |
-| 晨报 | 今日 **14:07 补跑完成**（delivery_status=late，属正常标记）；采集 status=partial（2 个 X 账号 TimeoutError） |
-| AI 队列 | pending_ai=12 ｜ 新帖 40 ｜ 模型日预算按上海日历日计 |
-| 行情（发布态） | ✅ as_of **2026-09-11**，published=904，raw/qfq=904/904 |
-| 控制台行情视图 | latest/expected/published 均为 2026-09-11 ｜ lagging_symbol_count=0 ｜ market_status=current |
-| FreeStockDB | state=healthy（repair_failures=0）；数据更新 9/11 18:01 完成（expected_trade_date=2026-09-10） |
-| 今晚窗口 | KOL_Post_Fetch_Daily 19:00 ｜ Zhihu_Fetch_Evening 19:20（周日照常） |
-| 收益 | ✅ 16:27 静默重算完成：events=1287，marks=42866，errors=0；周末新事件 KOL-1290/1291 正常等待 9/14 首个交易日 |
-| 下一个行情窗口 | **9/14（周一）19:30** 自动任务；成功发布后立即触发收益，23:30 为收益兜底 |
+| 控制台 8123 | ✅ `/api/ready`：ok=true，version=4.0.0 |
+| Hermes 连接 | ✅ watchdog 隐藏启动；operator 以健康 API 与进程所有权判定实例 |
+| 晨报 | ✅ Windows PowerShell 5.1 原始 UTF-8 重定向；`-Platform all -NoFetch -NoNotify` 实测 exit=0 |
+| 行情（发布态） | ✅ as_of **2026-09-21**，published=969，raw/qfq=969/969 |
+| 920 股票 | ✅ 920010/045/179/367/478/608/670/895 均发布到 2026-09-21；920010 raw/qfq 各 174 行 |
+| 控制台行情视图 | market_status=current，969/969 |
+| FreeStockDB | ✅ 07:39–07:46 更新成功；7899 可达；样本均到 9/21；截面 7506/7563=99.2463%，Baostock 对账差异 0 |
+| 收益 | ✅ run_id=`20260922T073125+0800`：events=1411，marks=52245，snapshots=600，errors=0 |
+| 研究分析 | 按运行策略保持手动更新 |
 
-> 备注：今日 13:05 一批启动/补跑把整套拉了起来（UI、FreeStockDB、Nitter、晨报管线补跑），13:14 另有一批补跑；其中若干返回码非 0，见 Watch-7。
+> 备注：收益中的历史事件 KOL-1298 仍等待其对应行情；这不是本轮发布缺口。内容采集与模型分析不属于本轮架构收口范围。
 
 ---
 
 ## 1. 未闭环问题（Open）
 
-当前无 Open 项。9/14 首次无人值守运行仍按 §3 Watch 观测。
+当前无阻断性 Open 项。行情、收益、FreeStockDB 和控制台均已完成运行验收；缓存显示与可选 shadow 服务留在 §3 观察。
 
 ### O-5 决策看板（GPT 评审 Q1–Q4）
 
@@ -61,6 +61,12 @@
 | R-12 | 晚间行情与收益任务重叠、致命崩溃后只能人工重来 | 候选支持受控续跑；包装器识别 `Fatal Python error`/`PyEval_SaveThread` 并最多三次换新 Python 进程续跑；行情成功后触发收益，收益检测行情互斥锁，23:30 兜底 | 9/13；48 项定向回归通过 |
 | R-13 | v4 文档仍写“收益/研究均关闭” | 修正为收益自动更新、研究分析手动 | 9/13；`_docs/kol-refactor-v4.md` |
 | R-14 | **v4 生产代码未提交、无法按版本回滚** | 完整验证后拆分本地提交：研究台/行情 `c6cc2a6`、KOL Wiki `c7b23cc`、Notion 辅助 `2632067`、运行文档；未推送远端 | 9/13；后端 408 + 12 subtests、前端 14、构建、Wiki lint 全过 |
+| R-15 | **9/21 行情候选在末段失败，920 股票缺 raw/qfq** | BaoStock 登录失败改为进程级熔断；日历自动降级到腾讯；腾讯 qfq/成交量规范化；920 股票仅在历史 OHLC 一致时启用可审计 identity-qfq | 9/22；发布报告 ok/published=true，969/969，8 个 920 股票全部到 9/21 |
+| R-16 | **PowerShell 吞掉 Python traceback / 晨报 JSON 乱码** | 行情和晨报包装器改用 `Start-Process` 原始 stdout/stderr 重定向；失败日志保留在原子发布目录外 | 9/22；晨报 exit=0；行情最终发布成功 |
+| R-17 | **market doctor 有隐式写入** | 移除 doctor 中的 instrument seed，恢复只读诊断语义 | 9/22；市场回归测试 |
+| R-18 | **Hermes watchdog 弹窗及工作区路径耦合** | 新增按脚本位置解析仓库根目录的 VBS 隐藏启动器；两个任务安装入口统一使用 `wscript.exe` | 9/22；计划任务实测 LastResult=0 |
+| R-19 | **KOL 绩效页重复扫描全部事件** | 后端按 horizon 批量计算并复用上下文；前端仅在绩效页签打开时请求榜单 | 9/22；1411 事件计算约 1.54s，前端测试与构建通过 |
+| R-20 | **FreeStockDB 本机更新链状态不清** | 保持 staging→验证→原子交换，不放宽 freshness；本机 v0.3.5 更新与 7899 服务完成实测 | 9/22；`freestockdb-update-state.json`=ok/updated，覆盖 99.2463% |
 
 ---
 
@@ -70,11 +76,12 @@
 |---|---|---|
 | W-1 | **X 采集限流与缺口** | 常态：`gap_detected` 告警反复、部分账号 TimeoutError（9/13 有 2 个）、曾出现 `X reader rate limit` 暂停窗口。纪律：auth / 限流 / 供应商 / 本地预算四态区分，**不绕限流换源**；X 与知乎分母分开报。**红线：采集凭据不用主账号** |
 | W-2 | 知乎通道 | 单批 CDP 预检 + 独立浏览器会话；`degraded` 属常态；缺口统计同上框架 |
-| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 经代理时断时续 → 会拖挂晨报 / 分类（帖子采集不受影响）；2026-09-01 残渣 16 条为 provider 断连（不再自动重试） |
+| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 经代理仍可能 ReadTimeout。仅明确的 provider 可用性失败可由维护命令重新入队；内容与 schema 错误保留原三次上限。内容侧后续由 Luna 处理 |
 | W-4 | 晨报 "late" 补跑模式 | 错过 09:00 线后由补跑完成并标 late（正常标记，不影响数据）；关注频度 |
-| W-5 | 周末 / 假期无人值守 | 行情候选现可在致命崩溃后自动续跑；仍需观察 9/14 首次无人值守运行及长假前状态 |
-| W-6 | 行情健康语义 | 9/13 恢复后周末口径已为 `current`，`lagging_symbol_count=0`；继续观察节假日口径 |
-| W-7 | 计划任务杂项返回码 | `KOL_FreeStockDB_Start` 已于 16:37 复跑为 result=0；Nitter 保持 shadow/unavailable，晨报与分类待 9/14 下一次计划运行复核，若复现升级为 Open |
+| W-5 | 周末 / 假期无人值守 | 候选可续跑且日历有腾讯与持久化审计回退；继续观察长假口径与供应商可用性 |
+| W-6 | FreeStockDB 健康缓存 | 直接 doctor 已 exit=0/data_fresh=true，但 API 健康缓存暂显示 `checking`；计划任务元数据仍保留上次失败码 1，等待下一次调度刷新 |
+| W-7 | 可选 Nitter shadow | Docker Desktop 被本机不可访问的 `dockerInference` AF_UNIX reparse point 阻断；主研究台不依赖该 shadow 服务 |
+| W-8 | AKShare 代理 | 仍有代理错误；当前 BaoStock 主链路和 Tencent/FreeStockDB 降级链已通过，不阻断发布 |
 
 ---
 
@@ -94,3 +101,4 @@
 - **2026-09-13 16:30**：关闭 O-1/O-2/O-4；修复可续跑发布、任务日志句柄占用和行情/收益重叠；发布 9/11 行情并完成收益重算。
 - **2026-09-13 16:40**：关闭 O-3/Q3；完成四段本地版本冻结，完整回归通过，Open 清零。
 - **2026-09-13 15:57** 用户将本台账移交 **Codex Desktop 线程**（`01a08060-5fb3-7f92-a624-755b4ba1b95f`）执行；Codex 开工计划：稳定性修复 → 9/11 行情恢复 + 收益重算 → 文档口径修正 → 计划任务异常核验 → 未提交变更边界审计。Hermes 跟踪中。
+- **2026-09-22 07:46**：完成残留问题收口。发布 2026-09-21 行情 969/969，补齐 8 个 920 股票；收益重算 1411 事件且 0 错误；FreeStockDB v0.3.5 本机更新成功并通过覆盖率与 Baostock 对账。Hermes、晨报、只读 doctor、绩效页性能和失败取证同步加固。
