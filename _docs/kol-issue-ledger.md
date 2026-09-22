@@ -71,6 +71,7 @@
 | R-21 | **历史事件 KOL-1298 长期无基线并反复等待行情** | 在完整备份后删除 1 条无 baseline/marks/checkpoints 的正式事件及 2 条 pending context；保留源帖子与审批审计；未发现候选/排除项混入或孤儿收益记录 | 9/22；`kol-doctor`、`kol-performance-doctor`、`kol-context-doctor` 均通过，正式事件 1410，KOL-1298 不再出现 |
 | R-22 | **审核工作台历史待办长期堆积** | 备份后逐条核对 114 篇帖子；可验证草稿批准，其余按复盘、重复、非股票或证据不足拒绝；现有 active backlog 清零。UI/API/晨报/reprocess/repair 统一只允许今日与下一晨报窗口，历史仅保留审计读取 | 9/23；pending/ready/needs_attention 均为 0；架构与前后端回归通过 |
 | R-23 | **新增 KOL 的旧帖仍等待 AI/草稿生成** | ids 121–150 的 76 条 failed/not_requested 均不在两个活跃窗口，标记为 `archive-only-v1 / historical_archive_only`，不再生成历史待办；另由 Luna 逐篇核对并关闭今日 7 条 provider 失败（均为复盘、方法论或非明确个股推荐） | 9/23；76/76 归档；9/23 与 9/24 pending/failed 均为 0 |
+| R-24 | **X 采集被 "no verified X session" 整体阻断**（09-21/22 限流后三槽位全部 `cooldown`+`enabled=0` 未复位；且验证子进程未传 `TWITTER_PROXY` → twitter-cli 直连 x.com 超时，槽位无法经 UI/API 恢复） | `sessions.py` 验证流程注入代理解析链（KOL_X_PROXY→TWITTER_PROXY→默认 127.0.0.1:7897）；带代理手动验证复位三槽位后 07:27 续跑 **46/83** 号成功并触发真实 X 限流（系统按设计冷却+全局暂停至 09:33，不绕限流）；09:33 单次自动续跑剩余 36 号 + 定向批 11 个新号；控制台已重启加载修复 | 9/23；`f11e40b`（含回归测试）、`x_session_slots`=ready×2/cooldown×1、`kol-post-fetch` 日志、`x-resume-20260923.log` |
 
 ---
 
@@ -110,3 +111,4 @@
 - **2026-09-22 23:40**：备份后清理唯一异常历史正式事件 KOL-1298，并移除其 2 条 pending context。事件总数 1411→1410；marks/checkpoints 无孤儿，无需删除；源帖子和审批记录保留。
 - **2026-09-23 02:07**：历史审核待办清零并退役 backlog 写入路径；工作台只保留今日审核/下一晨报。新增 KOL 的 76 条窗口外未完成帖子转为可审计历史归档；定向抓取受无已验证 X 会话阻断，仅保留一次未执行队列。
 - **2026-09-23 02:29**：Luna 逐篇核对今日 7 条因 HTTP 402 失败的帖子，均为复盘、方法论、板块观点或重复内容，不构成可核验的当前个股推荐；全部保留原文审计并关闭，今日/下一晨报 pending=0、failed=0。
+- **2026-09-23 07:55**：修复 X 会话验证缺代理（`f11e40b`，控制台已重启加载）；三槽位复位 ready 后恢复 X 采集，46/83 号成功后触发真实限流保护（冷却+全局暂停至 09:33），09:33 自动单次续跑剩余 36 号与定向批 11 号。OpenCode Go 新 API 已生效（分类通道恢复）。
