@@ -12,7 +12,7 @@ function isReviewQueuePage(value: unknown): value is ReviewQueuePage {
 }
 
 function legacyReviewQueue(value: MorningReview, params: URLSearchParams): ReviewQueuePage {
-  const scope: QueueScope = params.get('scope') === 'backlog' ? 'backlog' : 'morning'
+  const scope: QueueScope = 'morning'
   const view = (params.get('view') || 'pending') as ReviewView
   const posts = Array.isArray(value.posts) ? value.posts : []
   const drafts = [...(value.drafts || []), ...(value.approved_drafts || [])]
@@ -93,7 +93,7 @@ export const api = {
     }
     if (isReviewQueuePage(compact)) return compact
     return legacyReviewQueue(await request<MorningReview>(
-      `/api/morning-review?review_date=${encodeURIComponent(params.get('review_date') || '')}&include_history=true&history_page=${params.get('page') || '1'}`,
+      `/api/morning-review?review_date=${encodeURIComponent(params.get('review_date') || '')}`,
       { signal },
     ), params)
   },
@@ -171,10 +171,10 @@ export const api = {
   retryRecommendationDraft: (id: number) =>
     request<{ ok: boolean; drafts: RecommendationDraft[] }>(`/api/recommendation-drafts/${id}/retry`, { method: 'POST' }),
   recommendationDraftRevisions: (id: number) => request<DraftRevision[]>(`/api/recommendation-drafts/${id}/revisions`),
-  bulkPreviewRecommendationDrafts: (reviewDate: string, queueScope: 'morning' | 'backlog' = 'morning') =>
+  bulkPreviewRecommendationDrafts: (reviewDate: string) =>
     request<BulkApprovalPreview>('/api/recommendation-drafts/bulk-preview', {
       method: 'POST',
-      body: JSON.stringify({ review_date: reviewDate, queue_scope: queueScope, status: 'ready', limit: 200 }),
+      body: JSON.stringify({ review_date: reviewDate, queue_scope: 'morning', status: 'ready', limit: 200 }),
     }),
   bulkApproveRecommendationDrafts: (snapshotToken: string, note = '') =>
     request<BulkApprovalResult>('/api/recommendation-drafts/bulk-approve', {

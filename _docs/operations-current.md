@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-09-22.
+Status date: 2026-09-23.
 
 ## Start and inspect
 
@@ -25,7 +25,7 @@ Expected local listeners:
 - 07:20 — X morning collection.
 - 08:05 — Zhihu refresh.
 - 08:45 — review-only morning finalization.
-- 09:15 — bounded OCR/model backlog.
+- 09:15 — bounded OCR/model retry for the active review windows.
 - 17:50 — FreeStockDB validation/update (local D: drive).
 - 19:00 — X evening collection.
 - 19:20 — Zhihu evening collection.
@@ -52,6 +52,13 @@ latest completed trading day; `returns_update_enabled` and
 
 `processed_kols` means the scheduler considered those queue items. Use
 `successful_kols`, `failed_kols`, `blocked`, and `pending` for the actual result.
+
+The review workbench contains only today's 09:00-to-09:00 window and the next
+morning preview. Historical posts and prior approvals stay available through
+the audit APIs, but they are archive-only: fetch repair, AI retry, and morning
+orchestration must not recreate a historical pending queue. A targeted X fetch
+that reports `no verified X session is currently available` remains blocked
+until a locally verified session is enabled; do not loop the same batch.
 
 ## Market maintenance
 

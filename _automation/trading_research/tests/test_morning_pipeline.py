@@ -75,7 +75,7 @@ class UnavailableBatchClassifier(FakeBatchClassifier):
 
 
 class MorningPipelineTests(unittest.TestCase):
-    def test_current_window_is_materialized_before_backlog(self) -> None:
+    def test_current_window_excludes_historical_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             posts = KolPostStore(root / "posts.db", root / "media")
@@ -116,7 +116,7 @@ class MorningPipelineTests(unittest.TestCase):
             result = pipeline.run(
                 as_of=date(2026, 7, 17),
                 fetch=False,
-                backlog_limit=1,
+                backlog_limit=0,
                 max_runtime_minutes=2,
             )
             repository = RecommendationDraftRepository(posts)
@@ -125,12 +125,32 @@ class MorningPipelineTests(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertEqual(["2078000000000001001"], [item["post_id"] for item in morning])
-            self.assertEqual(["2077000000000001002"], [item["post_id"] for item in backlog])
-            self.assertEqual(2, result["reviewed_posts"])
+            self.assertEqual([], backlog)
+            self.assertEqual(1, result["reviewed_posts"])
             self.assertEqual(1, result["ready_drafts"])
-            self.assertEqual(1, result["backlog_drafts"])
+            self.assertEqual(1, result["out_of_window_candidates"])
+            posts.set_draft_generation_status(
+                "2077000000000001002",
+                "not_applicable",
+                version="archive-only-v1",
+                error="historical_archive_only",
+            )
+            rerun = pipeline.run(
+                as_of=date(2026, 7, 17),
+                fetch=False,
+                backlog_limit=0,
+                max_runtime_minutes=2,
+            )
+            self.assertEqual(0, rerun["out_of_window_candidates"])
+            with self.assertRaisesRegex(ValueError, "historical review backlog processing is retired"):
+                pipeline.run(
+                    as_of=date(2026, 7, 17),
+                    fetch=False,
+                    backlog_limit=1,
+                    max_runtime_minutes=2,
+                )
 
-    def test_completed_non_recommendations_do_not_starve_unresolved_recommendation(self) -> None:
+    def test_completed_non_recommendations_do_not_starve_current_window_recommendation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             posts = KolPostStore(root / "posts.db", root / "media")
@@ -146,7 +166,7 @@ class MorningPipelineTests(unittest.TestCase):
                         "text": "板块观察，002580 仅作记录。",
                         "url": f"https://x.com/fixture/status/{post_id}",
                         "author": {"screenName": "fixture", "name": "Fixture KOL"},
-                        "createdAtISO": "2026-07-10T00:20:00+00:00",
+                        "createdAtISO": "2026-07-17T00:20:00+00:00",
                         "media": [],
                         "isRetweet": False,
                     },
@@ -171,7 +191,7 @@ class MorningPipelineTests(unittest.TestCase):
                     "text": "周一建仓计划【圣阳股份】\n圣阳股份\n重点：算力 IDC 备电龙头。",
                     "url": "https://x.com/fixture/status/2077000000000002999",
                     "author": {"screenName": "fixture", "name": "Fixture KOL"},
-                    "createdAtISO": "2026-07-10T00:30:00+00:00",
+                    "createdAtISO": "2026-07-17T00:30:00+00:00",
                     "media": [],
                     "isRetweet": False,
                 },
@@ -189,7 +209,7 @@ class MorningPipelineTests(unittest.TestCase):
                 rule_classifier=RuleClassifier({"002580": "圣阳股份"}),
                 batch_classifier=FakeBatchClassifier(),
             )
-            result = pipeline.run(as_of=date(2026, 7, 17), fetch=False, backlog_limit=1, max_runtime_minutes=2)
+            result = pipeline.run(as_of=date(2026, 7, 17), fetch=False, backlog_limit=0, max_runtime_minutes=2)
             drafts = RecommendationDraftRepository(posts).list_drafts(post_id=target.post_id)
 
             self.assertTrue(result["ok"], result)

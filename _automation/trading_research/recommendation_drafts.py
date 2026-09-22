@@ -376,7 +376,8 @@ class RecommendationDraftRepository:
         window_end: str,
         phase: str = "initial",
     ) -> str:
-        run_id = f"morning-{review_date}-{now_iso().replace(':', '').replace('+', '-')}"
+        readable_started_at = now_iso().replace(":", "").replace("+", "-")
+        run_id = f"morning-{review_date}-{readable_started_at}-{secrets.token_hex(8)}"
         with self.post_store.connect() as db:
             running = db.execute(
                 "SELECT run_id FROM morning_runs WHERE status='running' LIMIT 1"

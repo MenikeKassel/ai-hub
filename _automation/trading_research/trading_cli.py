@@ -1125,7 +1125,8 @@ def _recommendation_repair_ids(
               AND ({'1=1' if include_non_candidates else 'c.is_candidate=1'})
               AND (
                   c.draft_generation_status IN ('pending','failed','needs_attention')
-                  OR (c.model_status='completed'
+                  OR (c.draft_generation_status<>'not_applicable'
+                      AND c.model_status='completed'
                       AND c.content_type='recommendation'
                       AND c.evidence_type='original_pre_event')
               )
@@ -1136,10 +1137,15 @@ def _recommendation_repair_ids(
     return values if limit <= 0 else values[:limit]
 
 
-def _repair_queue_scope(post: dict[str, Any], review_date: str) -> str:
-    start, end = review_window_utc(review_date)
+def _repair_queue_target(post: dict[str, Any], review_date: str) -> str:
     posted_at = str(post.get("posted_at_utc") or "")
-    return "morning" if start <= posted_at < end else "backlog"
+    reference = date.fromisoformat(review_date)
+    for offset in (0, 1):
+        target_date = (reference + timedelta(days=offset)).isoformat()
+        start, end = review_window_utc(target_date)
+        if start <= posted_at < end:
+            return target_date
+    return ""
 
 
 def _run_recommendation_rules_repair(
@@ -1156,14 +1162,30 @@ def _run_recommendation_rules_repair(
     results: list[dict[str, Any]] = []
     for post_id in post_ids:
         post = store.get_post(post_id)
+        target_date = _repair_queue_target(post, review_date)
+        if not target_date:
+            store.set_draft_generation_status(
+                post_id,
+                "not_applicable",
+                version="archive-only-v1",
+                error="historical_archive_only",
+            )
+            counters["archive_only"] += 1
+            results.append({
+                "post_id": post_id,
+                "status": "archive_only",
+                "drafts": 0,
+                "structured": False,
+            })
+            continue
         result = materialize_recommendation_drafts(
             store,
             repository,
             classifier,
             post_id,
             instruments=market.instrument_map(),
-            queue_scope=_repair_queue_scope(post, review_date),
-            review_date=review_date,
+            queue_scope="morning",
+            review_date=target_date,
             rules_first=True,
         )
         counters[result["draft_generation_status"]] += 1
@@ -1209,6 +1231,22 @@ def _run_recommendation_ai_repair(
                     stopped_reason = "time_budget_exhausted"
                     break
                 post = store.get_post(post_id)
+                target_date = _repair_queue_target(post, review_date)
+                if not target_date:
+                    store.set_draft_generation_status(
+                        post_id,
+                        "not_applicable",
+                        version="archive-only-v1",
+                        error="historical_archive_only",
+                    )
+                    counters["archive_only"] += 1
+                    results.append({
+                        "post_id": post_id,
+                        "status": "archive_only",
+                        "drafts": 0,
+                        "structured": False,
+                    })
+                    continue
                 structured = rule_classifier.classify_structured_text(post)
                 stop_after = False
                 if structured is not None:
@@ -1248,8 +1286,8 @@ def _run_recommendation_ai_repair(
                     rule_classifier,
                     post_id,
                     instruments=market.instrument_map(),
-                    queue_scope=_repair_queue_scope(post, review_date),
-                    review_date=review_date,
+                    queue_scope="morning",
+                    review_date=target_date,
                     rules_first=False,
                 )
                 counters[result["draft_generation_status"]] += 1
@@ -3748,7 +3786,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_morning.add_argument("--provider", choices=["auto", "twitter", "nitter"], default="auto")
     p_morning.add_argument("--platform", choices=["all", "x", "zhihu", "douyin"], default="all")
     p_morning.add_argument("--fetch-count", type=int, default=50)
-    p_morning.add_argument("--backlog-limit", type=int, default=20)
+    p_morning.add_argument(
+        "--backlog-limit",
+        type=int,
+        choices=[0],
+        default=0,
+        help="retired compatibility flag; historical posts are archive-only",
+    )
     p_morning.add_argument("--phase", choices=["initial", "refresh", "final", "preview"], default="initial")
     p_morning.add_argument("--max-runtime", type=float, default=85)
     p_morning.add_argument("--skip-fetch", action="store_true")

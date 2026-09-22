@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 `returns_update_enabled=true` and `research_update_enabled=false`. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-09-22. Source version: 3.1.0.
+Status date: 2026-09-23. Source version: 3.1.0.
 
 ## Purpose and boundary
 
@@ -59,6 +59,12 @@ Ignored local state:
 - Empty public-dataset records may be hydrated, but inaccessible content is not
   fabricated.
 - AI creates evidence drafts; a human approves formal recommendation events.
+- The review workbench exposes only the current 09:00-to-09:00 window and the
+  next morning preview. Historical drafts remain readable through audit and
+  event history, but cannot re-enter an actionable queue or be retried.
+- Morning orchestration, recommendation reprocessing, and repair may create
+  drafts only for those two active windows. Older candidates are marked
+  `historical_archive_only` instead of becoming a persistent backlog.
 
 ### Daily market
 

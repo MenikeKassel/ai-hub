@@ -21,6 +21,7 @@
 | FreeStockDB | ✅ 07:39–07:46 更新成功；7899 可达；样本均到 9/21；截面 7506/7563=99.2463%，Baostock 对账差异 0 |
 | 收益 | ✅ 23:30 重算：events=1411，marks=53655，errors=0；随后清理无基线历史残留 KOL-1298，正式事件现为 1410 |
 | 研究分析 | 按运行策略保持手动更新 |
+| 审核工作台 | ✅ 历史待办 114 篇 / 224 条草稿已清零；主界面只保留今日审核与下一晨报 |
 
 > 备注：KOL-1298 没有 baseline、marks 或 checkpoints，长期停留在 `awaiting_market_data`。2026-09-22 已在完整备份后删除该正式事件及两条 pending context；源帖子和审批记录继续保留。
 
@@ -68,6 +69,8 @@
 | R-19 | **KOL 绩效页重复扫描全部事件** | 后端按 horizon 批量计算并复用上下文；前端仅在绩效页签打开时请求榜单 | 9/22；1411 事件计算约 1.54s，前端测试与构建通过 |
 | R-20 | **FreeStockDB 本机更新链状态不清** | 保持 staging→验证→原子交换，不放宽 freshness；本机 v0.3.5 更新与 7899 服务完成实测 | 9/22；`freestockdb-update-state.json`=ok/updated，覆盖 99.2463% |
 | R-21 | **历史事件 KOL-1298 长期无基线并反复等待行情** | 在完整备份后删除 1 条无 baseline/marks/checkpoints 的正式事件及 2 条 pending context；保留源帖子与审批审计；未发现候选/排除项混入或孤儿收益记录 | 9/22；`kol-doctor`、`kol-performance-doctor`、`kol-context-doctor` 均通过，正式事件 1410，KOL-1298 不再出现 |
+| R-22 | **审核工作台历史待办长期堆积** | 备份后逐条核对 114 篇帖子；可验证草稿批准，其余按复盘、重复、非股票或证据不足拒绝；现有 active backlog 清零。UI/API/晨报/reprocess/repair 统一只允许今日与下一晨报窗口，历史仅保留审计读取 | 9/23；pending/ready/needs_attention 均为 0；架构与前后端回归通过 |
+| R-23 | **新增 KOL 的旧帖仍等待 AI/草稿生成** | ids 121–150 的 76 条 failed/not_requested 均不在两个活跃窗口，标记为 `archive-only-v1 / historical_archive_only`，不再生成历史待办；原文和模型失败审计保留 | 9/23；76/76 写入校验，9/23 与 9/24 pending drafts 均为 0 |
 
 ---
 
@@ -77,12 +80,13 @@
 |---|---|---|
 | W-1 | **X 采集限流与缺口** | 常态：`gap_detected` 告警反复、部分账号 TimeoutError（9/13 有 2 个）、曾出现 `X reader rate limit` 暂停窗口。纪律：auth / 限流 / 供应商 / 本地预算四态区分，**不绕限流换源**；X 与知乎分母分开报。**红线：采集凭据不用主账号** |
 | W-2 | 知乎通道 | 单批 CDP 预检 + 独立浏览器会话；`degraded` 属常态；缺口统计同上框架 |
-| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 经代理仍可能 ReadTimeout。仅明确的 provider 可用性失败可由维护命令重新入队；内容与 schema 错误保留原三次上限。内容侧后续由 Luna 处理 |
+| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 当前完整晨报仍报 HTTP 402；provider 可用性失败保留审计并等待服务恢复，历史帖不会因此重新进入待办。内容与 schema 错误保留原三次上限 |
 | W-4 | 晨报 "late" 补跑模式 | 错过 09:00 线后由补跑完成并标 late（正常标记，不影响数据）；关注频度 |
 | W-5 | 周末 / 假期无人值守 | 候选可续跑且日历有腾讯与持久化审计回退；继续观察长假口径与供应商可用性 |
 | W-6 | FreeStockDB 健康缓存 | 直接 doctor 已 exit=0/data_fresh=true，但 API 健康缓存暂显示 `checking`；计划任务元数据仍保留上次失败码 1，等待下一次调度刷新 |
 | W-7 | 可选 Nitter shadow | Docker Desktop 被本机不可访问的 `dockerInference` AF_UNIX reparse point 阻断；主研究台不依赖该 shadow 服务 |
 | W-8 | AKShare 代理 | 仍有代理错误；当前 BaoStock 主链路和 Tencent/FreeStockDB 降级链已通过，不阻断发布 |
+| W-9 | 新增 X KOL 首次抓取 | ids 121–150 中 19 个成功；9 个尚未抓取、2 个 NotFound。一次定向抓取被 `no verified X session is currently available` 阻断，队列 attempts=0；启用经验证会话后再续跑，不循环重试 |
 
 ---
 
@@ -104,3 +108,4 @@
 - **2026-09-13 15:57** 用户将本台账移交 **Codex Desktop 线程**（`01a08060-5fb3-7f92-a624-755b4ba1b95f`）执行；Codex 开工计划：稳定性修复 → 9/11 行情恢复 + 收益重算 → 文档口径修正 → 计划任务异常核验 → 未提交变更边界审计。Hermes 跟踪中。
 - **2026-09-22 07:46**：完成残留问题收口。发布 2026-09-21 行情 969/969，补齐 8 个 920 股票；收益重算 1411 事件且 0 错误；FreeStockDB v0.3.5 本机更新成功并通过覆盖率与 Baostock 对账。Hermes、晨报、只读 doctor、绩效页性能和失败取证同步加固。
 - **2026-09-22 23:40**：备份后清理唯一异常历史正式事件 KOL-1298，并移除其 2 条 pending context。事件总数 1411→1410；marks/checkpoints 无孤儿，无需删除；源帖子和审批记录保留。
+- **2026-09-23 02:07**：历史审核待办清零并退役 backlog 写入路径；工作台只保留今日审核/下一晨报。新增 KOL 的 76 条窗口外未完成帖子转为可审计历史归档；定向抓取受无已验证 X 会话阻断，仅保留一次未执行队列。

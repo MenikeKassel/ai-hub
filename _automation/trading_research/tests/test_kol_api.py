@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +36,30 @@ class ApiTests(unittest.TestCase):
 
             self.assertEqual(200, response.status_code, response.text)
             self.assertIn("/api/review-queue", response.json()["paths"])
+
+    def test_primary_review_api_rejects_historical_work_queue_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(ApiSettings(
+                runtime_root=root / "runtime",
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            client = TestClient(app)
+
+            queue = client.get("/api/review-queue", params={"scope": "backlog"})
+            bulk = client.post(
+                "/api/recommendation-drafts/bulk-preview",
+                json={
+                    "review_date": date.today().isoformat(),
+                    "queue_scope": "backlog",
+                    "status": "ready",
+                    "limit": 200,
+                },
+            )
+
+            self.assertEqual(422, queue.status_code, queue.text)
+            self.assertEqual(422, bulk.status_code, bulk.text)
 
     def test_gateway_pid_reader_supports_legacy_and_json_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,7 +113,7 @@ class ApiTests(unittest.TestCase):
             self.assertIn("queue_review_date", response.json())
             self.assertIn("next_preview", response.json())
 
-    def test_recommendation_reprocess_materializes_historical_bracketed_plan(self) -> None:
+    def test_recommendation_reprocess_routes_only_active_windows_and_preserves_archive_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             app = create_app(ApiSettings(
@@ -108,7 +132,7 @@ class ApiTests(unittest.TestCase):
                     "text": "周一建仓计划【圣阳股份】【利欧股份】\n圣阳股份\n重点：算力 IDC 备电龙头。\n利欧股份\n重点：英伟达液冷泵供应商。",
                     "url": "https://x.com/fixture/status/2078000000000000055",
                     "author": {"screenName": "fixture", "name": "Fixture KOL"},
-                    "createdAtISO": "2026-07-31T14:09:43+00:00",
+                    "createdAtISO": datetime.now(timezone.utc).isoformat(),
                     "media": [],
                     "isRetweet": False,
                 },
@@ -124,14 +148,45 @@ class ApiTests(unittest.TestCase):
             response = client.post(f"/api/posts/{post.post_id}/recommendation-reprocess")
             self.assertEqual(200, response.status_code, response.text)
             self.assertEqual({"002580", "002131"}, {item["symbol"] for item in response.json()["drafts"]})
+            self.assertEqual({"morning"}, {item["queue_scope"] for item in response.json()["drafts"]})
+            self.assertTrue(
+                {item["review_date"] for item in response.json()["drafts"]}
+                <= {date.today().isoformat(), (date.today() + timedelta(days=1)).isoformat()}
+            )
             with store.connect() as db:
                 db.execute(
-                    "UPDATE recommendation_drafts SET review_date=? WHERE post_id=?",
+                    "UPDATE recommendation_drafts SET queue_scope='backlog',review_date=? WHERE post_id=?",
                     ("2026-01-01", post.post_id),
                 )
+            retry = client.post(
+                f"/api/recommendation-drafts/{response.json()['drafts'][0]['id']}/retry"
+            )
+            self.assertEqual(422, retry.status_code, retry.text)
             morning = client.get(f"/api/morning-review?review_date={date.today().isoformat()}&include_history=true")
             self.assertEqual(200, morning.status_code, morning.text)
             self.assertIn(post.post_id, {item["post_id"] for item in morning.json()["history_drafts"]})
+
+            historical = normalise_twitter_post(
+                {
+                    "id": "2078000000000000056",
+                    "text": "周一建仓计划【圣阳股份】",
+                    "url": "https://x.com/fixture/status/2078000000000000056",
+                    "author": {"screenName": "fixture", "name": "Fixture KOL"},
+                    "createdAtISO": "2026-07-31T14:09:43+00:00",
+                    "media": [],
+                    "isRetweet": False,
+                },
+                {"id": kol_id, "handle": "fixture", "display_name": "Fixture KOL"},
+            )
+            store.upsert_post(historical)
+            store.save_rule_classification(
+                historical.post_id,
+                RuleClassifier({"002580": "圣阳股份"}).classify(historical),
+            )
+            rejected = client.post(f"/api/posts/{historical.post_id}/recommendation-reprocess")
+            self.assertEqual(422, rejected.status_code, rejected.text)
+            self.assertIn("archive-only", rejected.json()["detail"])
+            self.assertEqual([], RecommendationDraftRepository(store).list_drafts(post_id=historical.post_id))
 
     def test_pipeline_status_degrades_when_market_database_is_locked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

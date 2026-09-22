@@ -57,7 +57,7 @@ def register_routes(services: ApiServices) -> None:
 
     @app.get("/api/review-queue")
     def review_queue(review_date: date = Query(default_factory=date.today),
-                     scope: str = Query(default="morning", pattern="^(morning|backlog)$"),
+                     scope: str = Query(default="morning", pattern="^morning$"),
                      view: str = Query(default="pending", pattern="^(new|processed|pending|failed|approved)$"),
                      attention_only: bool = False, page: int = Query(default=1, ge=1),
                      page_size: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
@@ -115,6 +115,8 @@ def register_routes(services: ApiServices) -> None:
             result = reprocess_recommendation_post(post_id)
         except ModelWorkerBusyError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"recommendation processing failed: {exc}") from exc
         response = _sanitize_post(post_store.get_post(post_id))
@@ -140,6 +142,8 @@ def register_routes(services: ApiServices) -> None:
             raise HTTPException(404, str(exc)) from exc
         except ModelWorkerBusyError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"recommendation reprocess failed: {exc}") from exc
 
@@ -389,6 +393,8 @@ def register_routes(services: ApiServices) -> None:
     def retry_draft(draft_id: int) -> dict[str, Any]:
         try:
             current = recommendation_drafts.get_draft(draft_id)
+            if current["queue_scope"] != "morning":
+                raise ValueError("historical drafts are audit-only and cannot be retried")
             with post_store.model_worker():
                 claimed = post_store.claim_posts_for_model(
                     1,
@@ -438,6 +444,8 @@ def register_routes(services: ApiServices) -> None:
             raise HTTPException(404, str(exc)) from exc
         except ModelWorkerBusyError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"draft retry failed: {exc}") from exc
 

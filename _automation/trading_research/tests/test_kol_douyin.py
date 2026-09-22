@@ -272,6 +272,18 @@ class DouyinMorningPhaseTest(unittest.TestCase):
             ["kol-morning-run", "--platform", "douyin", "--as-of", "2026-09-19"]
         )
         self.assertEqual("douyin", morning_run.platform)
+        self.assertEqual(0, morning_run.backlog_limit)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["kol-morning-run", "--backlog-limit", "1"])
+
+    def test_recommendation_repair_routes_only_active_review_windows(self) -> None:
+        import trading_cli
+
+        current = {"posted_at_utc": "2026-09-18T08:00:00+00:00"}
+        historical = {"posted_at_utc": "2026-08-18T08:00:00+00:00"}
+
+        self.assertEqual("2026-09-19", trading_cli._repair_queue_target(current, "2026-09-19"))
+        self.assertEqual("", trading_cli._repair_queue_target(historical, "2026-09-19"))
 
 
 if __name__ == "__main__":

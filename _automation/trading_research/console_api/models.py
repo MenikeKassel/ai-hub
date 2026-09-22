@@ -139,7 +139,7 @@ class RecommendationDraftAction(BaseModel):
 
 class RecommendationDraftBulkPreviewRequest(BaseModel):
     review_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-    queue_scope: str = Field(default="morning", pattern="^(morning|backlog)$")
+    queue_scope: str = Field(default="morning", pattern="^morning$")
     status: str = Field(default="ready", pattern="^ready$")
     limit: int = Field(default=200, ge=1, le=200)
 

@@ -57,6 +57,7 @@ from .dependencies import (
     build_x_post_provider,
     date,
     datetime,
+    timedelta,
     docker_container_health,
     docker_health as _docker_health_impl,
     event_context_input_hash,
@@ -582,17 +583,22 @@ def create_app(
             ),
         }
 
-    def recommendation_queue_scope(post: dict[str, Any]) -> str:
-        review_date = date.today().isoformat()
-        window_start, window_end = review_window_utc(review_date)
+    def recommendation_queue_target(post: dict[str, Any]) -> tuple[str, str]:
         posted_at = str(post.get("posted_at_utc") or "")
-        return "morning" if window_start <= posted_at < window_end else "backlog"
+        today = date.today()
+        for offset in (0, 1):
+            review_date = (today + timedelta(days=offset)).isoformat()
+            window_start, window_end = review_window_utc(review_date)
+            if window_start <= posted_at < window_end:
+                return "morning", review_date
+        raise ValueError(
+            "historical posts are archive-only and cannot create a new review task"
+        )
 
     def reprocess_recommendation_post(post_id: str) -> dict[str, Any]:
+        post = post_store.get_post(post_id)
+        queue_scope, review_date = recommendation_queue_target(post)
         with post_store.model_worker():
-            post = post_store.get_post(post_id)
-            queue_scope = recommendation_queue_scope(post)
-            review_date = date.today().isoformat()
             rule_classifier = RuleClassifier(classification_aliases())
             structured = rule_classifier.classify_structured_text(post)
             if structured is not None:

@@ -56,10 +56,14 @@ class MorningPipeline:
         *,
         as_of: date,
         fetch: bool = True,
-        backlog_limit: int = 20,
+        backlog_limit: int = 0,
         max_runtime_minutes: float = 85,
         phase: str = "initial",
     ) -> dict[str, Any]:
+        if backlog_limit != 0:
+            raise ValueError(
+                "historical review backlog processing is retired; morning runs only accept backlog_limit=0"
+            )
         scheduled_end = datetime.combine(as_of, clock_time(9, 0), SHANGHAI)
         current = self.now_provider()
         if current.tzinfo is None:
@@ -198,9 +202,8 @@ class MorningPipeline:
                 post for post in pending
                 if window_start <= self._posted_at(post) < window_end
             ]
-            morning_ids = {post["post_id"] for post in morning}
-            backlog = [post for post in pending if post["post_id"] not in morning_ids][:max(0, backlog_limit)]
-            total_review_posts = len(morning) + len(backlog)
+            total_review_posts = len(morning)
+            stages["out_of_window_candidates"] = len(pending) - total_review_posts
             self.drafts.update_morning_run(
                 run_id,
                 stage="ai_review",
@@ -215,8 +218,6 @@ class MorningPipeline:
                 progress_total=total_review_posts,
                 stages=stages,
             )
-            if time.monotonic() < deadline and backlog:
-                self._process_scope(backlog, "backlog", as_of, deadline, stages, errors)
 
             self.drafts.update_morning_run(
                 run_id,
@@ -226,15 +227,15 @@ class MorningPipeline:
                 stages=stages,
             )
 
-            visible = self.drafts.list_drafts(review_date=as_of.isoformat(), limit=1000)
-            morning_visible = [item for item in visible if item["queue_scope"] == "morning"]
+            morning_visible = self.drafts.list_drafts(
+                review_date=as_of.isoformat(), queue_scope="morning", limit=1000
+            )
             stages["ready_drafts"] = sum(item["status"] == "ready" for item in morning_visible)
             stages["attention_drafts"] = sum(
                 item["status"] == "needs_attention" for item in morning_visible
             )
-            stages["backlog_drafts"] = sum(item["queue_scope"] == "backlog" for item in visible)
             prefetch_symbols = sorted(
-                {item["symbol"] for item in visible if item["status"] in {"ready", "needs_attention"}}
+                {item["symbol"] for item in morning_visible if item["status"] in {"ready", "needs_attention"}}
             )
             if self.market_writes_enabled:
                 for symbol in prefetch_symbols:
@@ -513,7 +514,8 @@ class MorningPipeline:
                 WHERE p.review_status='pending' AND c.is_candidate=1
                   AND (
                       c.draft_generation_status IN ('pending','failed','needs_attention')
-                      OR (c.model_status='completed'
+                      OR (c.draft_generation_status<>'not_applicable'
+                          AND c.model_status='completed'
                           AND c.content_type='recommendation'
                           AND c.evidence_type='original_pre_event')
                   )

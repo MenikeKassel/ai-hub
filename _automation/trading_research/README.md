@@ -296,8 +296,11 @@ analysis, retrospectives, and secondhand references. It is read-only in the
 normal UI and has no pending-task badge. Legacy non-candidate posts are marked
 as system-screened with an audit record; source posts are never deleted.
 
-The morning window has priority over historical backlog. Numbered recommendation
-lists are parsed deterministically before OCR or model classification. RapidOCR
+The review workbench contains only the fixed 09:00-to-09:00 delivery window for
+today and the next morning preview. Historical posts are archive-only and never
+re-enter the user review queue; approved history remains available through the
+draft/event audit APIs. Numbered recommendation lists are parsed deterministically
+before OCR or model classification. RapidOCR
 runs locally through an isolated ONNX runtime, handles at most eight posts per
 scope, and has a 90-second batch ceiling. OCR text, line boxes, confidence, and
 provider are kept with the classification audit. Unlimited-OCR remains an

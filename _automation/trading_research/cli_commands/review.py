@@ -18,6 +18,7 @@ def kol_recommendation_repair(context: ModuleType, args: argparse.Namespace) -> 
                     WHERE p.review_status='pending' AND c.content_type='recommendation'
                       AND c.evidence_type='original_pre_event'
                       AND c.model_status='completed'
+                      AND c.draft_generation_status<>'not_applicable'
                       AND NOT EXISTS(
                           SELECT 1 FROM recommendation_drafts d
                           WHERE d.post_id=p.post_id
@@ -268,10 +269,7 @@ def kol_morning_orchestrate(context: ModuleType, args: argparse.Namespace) -> No
         return pipeline.run(
             as_of=review_date,
             fetch=not args.skip_fetch,
-            # Archived Douyin items can be months old, so their phase also
-            # drains the pending backlog instead of relying on the 09:00-to-
-            # 09:00 review window alone.
-            backlog_limit=50 if args.platform == "douyin" else 0,
+            backlog_limit=0,
             max_runtime_minutes=runtime,
             phase=phase,
         )

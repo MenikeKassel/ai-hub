@@ -28,13 +28,13 @@ class ReviewQueueService:
 
     def page(self, review_date: str, *, scope: str = "morning", view: str = "pending",
              attention_only: bool = False, page: int = 1, page_size: int = 50) -> dict[str, Any]:
-        if scope not in {"morning", "backlog"} or view not in {"new", "processed", "pending", "failed", "approved"}:
+        if scope != "morning" or view not in {"new", "processed", "pending", "failed", "approved"}:
             raise ValueError("invalid review queue scope or view")
         start, end = review_window_utc(review_date)
         page, page_size = max(1, page), max(1, min(page_size, 100))
-        draft_scope = "d.queue_scope='morning' AND d.review_date=:day" if scope == "morning" else "(d.queue_scope='backlog' OR d.review_date<:day)"
-        source_scope = "p.posted_at_utc>=:start AND p.posted_at_utc<:end" if scope == "morning" else "EXISTS (SELECT 1 FROM scoped d WHERE d.post_id=p.post_id)"
-        approval_scope = "substr(d.reviewed_at,1,10)=:day" if scope == "morning" else draft_scope
+        draft_scope = "d.queue_scope='morning' AND d.review_date=:day"
+        source_scope = "p.posted_at_utc>=:start AND p.posted_at_utc<:end"
+        approval_scope = "substr(d.reviewed_at,1,10)=:day"
         sql = f"""
             WITH scoped AS (SELECT d.* FROM recommendation_drafts d WHERE {draft_scope}),
             draft_counts AS (

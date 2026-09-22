@@ -1,7 +1,7 @@
 import type { MorningReview, Post, RecommendationDraft } from '../../types'
 
 export type ReviewView = 'new' | 'processed' | 'pending' | 'failed' | 'approved'
-export type QueueScope = 'morning' | 'backlog'
+export type QueueScope = 'morning'
 export interface ReviewQueueRow {
   post_id: string; posted_at: string; platform: string; handle: string; display_name: string
   excerpt: string; model_status: string; draft_count: number; attention_count: number; failure_kind: string

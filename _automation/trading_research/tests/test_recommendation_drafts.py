@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -253,6 +254,34 @@ class RecommendationDraftRepositoryTests(unittest.TestCase):
             self.assertEqual(1, interrupted)
             self.assertEqual("interrupted", runs["stale"]["status"])
             self.assertEqual("running", runs["fresh"]["status"])
+
+    @patch("recommendation_drafts.now_iso", return_value="2026-07-17T08:00:00+08:00")
+    def test_morning_run_ids_remain_unique_within_the_same_second(self, _now_iso) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            repository = RecommendationDraftRepository(store)
+            values = []
+            for _ in range(2):
+                run_id = repository.start_morning_run(
+                    "2026-07-17",
+                    window_start="2026-07-16T09:00:00+08:00",
+                    window_end="2026-07-17T09:00:00+08:00",
+                    phase="refresh",
+                )
+                values.append(run_id)
+                repository.finish_morning_run(
+                    run_id,
+                    status="completed",
+                    stages={},
+                    errors=[],
+                )
+
+            self.assertEqual(2, len(set(values)))
+            for run_id in values:
+                self.assertRegex(
+                    run_id,
+                    r"^morning-2026-07-17-2026-07-17T080000-0800-[0-9a-f]{16}$",
+                )
 
     def test_final_morning_run_reports_on_time_delivery_and_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
