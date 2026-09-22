@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,41 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(2, usage_one)
                 self.assertEqual(2, usage_two)
                 self.assertTrue(manager.policy_status()["slots"][1]["duplicate_identity"])
+
+    def test_verify_slot_injects_twitter_proxy_for_the_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            payload = {"auth_token": "a" * 20, "ct0": "b" * 20}
+            captured: dict = {}
+
+            class Completed:
+                returncode = 0
+                stdout = '{"id": "12345", "screen_name": "probe"}'
+                stderr = ""
+
+            def fake_run(command, **kwargs):
+                captured["env"] = dict(kwargs.get("env") or {})
+                return Completed()
+
+            def verify_with(env_overrides: dict) -> dict:
+                with patch.object(
+                    XSessionManager, "_read_payload", classmethod(lambda cls, slot: payload)
+                ):
+                    manager = XSessionManager(store)
+                    with patch.dict(os.environ, env_overrides, clear=False):
+                        for key in ("KOL_X_PROXY", "TWITTER_PROXY"):
+                            if key not in env_overrides:
+                                os.environ.pop(key, None)
+                        with patch("kol_sources.sessions.subprocess.run", side_effect=fake_run):
+                            manager.verify_slot(1, "twitter")
+                return captured["env"]
+
+            default_env = verify_with({})
+            self.assertEqual("http://127.0.0.1:7897", default_env.get("TWITTER_PROXY"))
+            override_env = verify_with({"KOL_X_PROXY": "http://127.0.0.1:9999"})
+            self.assertEqual("http://127.0.0.1:9999", override_env.get("TWITTER_PROXY"))
+            direct_env = verify_with({"KOL_X_PROXY": ""})
+            self.assertNotIn("TWITTER_PROXY", direct_env)
 
     def test_x_fetch_is_blocked_once_without_account_failures_when_no_session_is_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

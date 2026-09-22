@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from filelock import FileLock, Timeout as FileLockTimeout
 from kol_tracker import SHANGHAI, now_iso
-from .core import CredentialStorageError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XSessionUnavailableError, validate_twitter_credentials
+from .core import DEFAULT_OUTBOUND_PROXY, CredentialStorageError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XSessionUnavailableError, validate_twitter_credentials
 
 
 class XSessionManager:
@@ -240,6 +240,19 @@ class XSessionManager:
         env = os.environ.copy()
         env.update(credential_env)
         env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        # twitter-cli resolves its outbound proxy solely from TWITTER_PROXY;
+        # without it every verification stalls on a direct connection because
+        # x.com is unreachable from this network.  Mirror proxy_opener():
+        # KOL_X_PROXY overrides, an explicit empty value forces direct.
+        proxy = (
+            os.environ["KOL_X_PROXY"]
+            if "KOL_X_PROXY" in os.environ
+            else os.environ.get("TWITTER_PROXY") or DEFAULT_OUTBOUND_PROXY
+        ).strip()
+        if proxy:
+            env["TWITTER_PROXY"] = proxy
+        else:
+            env.pop("TWITTER_PROXY", None)
         try:
             completed = subprocess.run(
                 [command, "whoami", "--json"], capture_output=True, text=True,
