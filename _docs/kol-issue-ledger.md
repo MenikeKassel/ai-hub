@@ -70,7 +70,7 @@
 | R-20 | **FreeStockDB 本机更新链状态不清** | 保持 staging→验证→原子交换，不放宽 freshness；本机 v0.3.5 更新与 7899 服务完成实测 | 9/22；`freestockdb-update-state.json`=ok/updated，覆盖 99.2463% |
 | R-21 | **历史事件 KOL-1298 长期无基线并反复等待行情** | 在完整备份后删除 1 条无 baseline/marks/checkpoints 的正式事件及 2 条 pending context；保留源帖子与审批审计；未发现候选/排除项混入或孤儿收益记录 | 9/22；`kol-doctor`、`kol-performance-doctor`、`kol-context-doctor` 均通过，正式事件 1410，KOL-1298 不再出现 |
 | R-22 | **审核工作台历史待办长期堆积** | 备份后逐条核对 114 篇帖子；可验证草稿批准，其余按复盘、重复、非股票或证据不足拒绝；现有 active backlog 清零。UI/API/晨报/reprocess/repair 统一只允许今日与下一晨报窗口，历史仅保留审计读取 | 9/23；pending/ready/needs_attention 均为 0；架构与前后端回归通过 |
-| R-23 | **新增 KOL 的旧帖仍等待 AI/草稿生成** | ids 121–150 的 76 条 failed/not_requested 均不在两个活跃窗口，标记为 `archive-only-v1 / historical_archive_only`，不再生成历史待办；原文和模型失败审计保留 | 9/23；76/76 写入校验，9/23 与 9/24 pending drafts 均为 0 |
+| R-23 | **新增 KOL 的旧帖仍等待 AI/草稿生成** | ids 121–150 的 76 条 failed/not_requested 均不在两个活跃窗口，标记为 `archive-only-v1 / historical_archive_only`，不再生成历史待办；另由 Luna 逐篇核对并关闭今日 7 条 provider 失败（均为复盘、方法论或非明确个股推荐） | 9/23；76/76 归档；9/23 与 9/24 pending/failed 均为 0 |
 
 ---
 
@@ -80,7 +80,7 @@
 |---|---|---|
 | W-1 | **X 采集限流与缺口** | 常态：`gap_detected` 告警反复、部分账号 TimeoutError（9/13 有 2 个）、曾出现 `X reader rate limit` 暂停窗口。纪律：auth / 限流 / 供应商 / 本地预算四态区分，**不绕限流换源**；X 与知乎分母分开报。**红线：采集凭据不用主账号** |
 | W-2 | 知乎通道 | 单批 CDP 预检 + 独立浏览器会话；`degraded` 属常态；缺口统计同上框架 |
-| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 当前完整晨报仍报 HTTP 402；provider 可用性失败保留审计并等待服务恢复，历史帖不会因此重新进入待办。内容与 schema 错误保留原三次上限 |
+| W-3 | LLM 依赖（OpenCode Go / opencode.ai） | 9/23 完整晨报记录 HTTP 402，但当日 7 条失败已由 Luna 读原文后逐项关闭，当前审核队列 failed=0。后续 provider 可用性失败保留审计并等待服务恢复；历史帖不会重新进入待办 |
 | W-4 | 晨报 "late" 补跑模式 | 错过 09:00 线后由补跑完成并标 late（正常标记，不影响数据）；关注频度 |
 | W-5 | 周末 / 假期无人值守 | 候选可续跑且日历有腾讯与持久化审计回退；继续观察长假口径与供应商可用性 |
 | W-6 | FreeStockDB 健康缓存 | 直接 doctor 已 exit=0/data_fresh=true，但 API 健康缓存暂显示 `checking`；计划任务元数据仍保留上次失败码 1，等待下一次调度刷新 |
@@ -109,3 +109,4 @@
 - **2026-09-22 07:46**：完成残留问题收口。发布 2026-09-21 行情 969/969，补齐 8 个 920 股票；收益重算 1411 事件且 0 错误；FreeStockDB v0.3.5 本机更新成功并通过覆盖率与 Baostock 对账。Hermes、晨报、只读 doctor、绩效页性能和失败取证同步加固。
 - **2026-09-22 23:40**：备份后清理唯一异常历史正式事件 KOL-1298，并移除其 2 条 pending context。事件总数 1411→1410；marks/checkpoints 无孤儿，无需删除；源帖子和审批记录保留。
 - **2026-09-23 02:07**：历史审核待办清零并退役 backlog 写入路径；工作台只保留今日审核/下一晨报。新增 KOL 的 76 条窗口外未完成帖子转为可审计历史归档；定向抓取受无已验证 X 会话阻断，仅保留一次未执行队列。
+- **2026-09-23 02:29**：Luna 逐篇核对今日 7 条因 HTTP 402 失败的帖子，均为复盘、方法论、板块观点或重复内容，不构成可核验的当前个股推荐；全部保留原文审计并关闭，今日/下一晨报 pending=0、failed=0。
