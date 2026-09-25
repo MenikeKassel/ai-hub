@@ -142,6 +142,24 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(2, usage_two)
                 self.assertTrue(manager.policy_status()["slots"][1]["duplicate_identity"])
 
+    def test_expired_x_cooldown_is_eligible_for_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            payload = {"auth_token": "a" * 20, "ct0": "b" * 20}
+            with patch.object(XSessionManager, "_read_payload", classmethod(lambda cls, slot: payload)):
+                manager = XSessionManager(store)
+                manager.mark_verified(1, "1001", "reader-one")
+                manager.record_failure(1, "rate_limited", "429")
+                with store.connect() as db:
+                    db.execute(
+                        "UPDATE x_session_slots SET cooldown_until=? WHERE slot_id=1",
+                        ((datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=1)).isoformat(),),
+                    )
+                slot = manager.policy_status()["slots"][0]
+                self.assertEqual("ready", slot["status"])
+                self.assertEqual(1, slot["enabled"])
+                self.assertEqual(1, manager.batch_slot("after-cooldown", "collection"))
+
     def test_verify_slot_injects_twitter_proxy_for_the_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")

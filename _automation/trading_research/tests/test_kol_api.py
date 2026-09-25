@@ -23,6 +23,38 @@ from review_agent import PolicyDecision  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
+    def test_market_health_includes_archived_symbols_in_published_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            app = create_app(ApiSettings(
+                runtime_root=runtime,
+                frontend_dist=root / "dist",
+                codex_schema=Path(__file__).resolve().parents[1] / "kol_classifier_schema.json",
+            ))
+            (runtime / "market" / "recovery-mode.json").write_text(
+                '{"mode":"live","as_of":"2026-09-24","write_enabled":true}',
+                encoding="utf-8",
+            )
+            coverage = [
+                {"symbol": "600001", "dataset": "daily", "adjustment": adjustment, "end_date": "2026-09-24"}
+                for adjustment in ("raw", "qfq")
+            ]
+            market = app.state.market_store
+            with (
+                patch.object(market, "health", return_value={"ok": True, "market_session_status": "closed", "latest_open_date": "2026-09-24"}),
+                patch.object(market, "list_instruments", return_value=[{"symbol": "600001", "lifecycle": "archived"}]),
+                patch.object(market, "get_coverage", return_value=coverage),
+                patch("console_api.factory.read_published_manifest", return_value={"published_symbols": ["600001"], "as_of": "2026-09-24"}),
+            ):
+                response = TestClient(app).get("/api/market/health")
+            self.assertEqual(200, response.status_code, response.text)
+            payload = response.json()
+            self.assertEqual(1, payload["published_target_sequence_count"])
+            self.assertEqual(1, payload["published_raw_current_sequence_count"])
+            self.assertEqual(1, payload["published_qfq_current_sequence_count"])
+            self.assertTrue(payload["publication_complete"])
+
     def test_openapi_schema_builds_after_route_modules_are_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

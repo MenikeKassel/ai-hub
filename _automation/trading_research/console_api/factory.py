@@ -358,12 +358,14 @@ def create_app(
             cutoff = str(mode.get("as_of") or "")
             formal_raw = {
                 str(row.get("symbol")): str(row.get("end_date") or "")
-                for row in daily_rows
+                for row in coverage_rows
+                if str(row.get("dataset")) == "daily"
                 if str(row.get("adjustment")) == "raw" and str(row.get("symbol")) in published_symbols
             }
             formal_qfq = {
                 str(row.get("symbol")): str(row.get("end_date") or "")
-                for row in daily_rows
+                for row in coverage_rows
+                if str(row.get("dataset")) == "daily"
                 if str(row.get("adjustment")) == "qfq" and str(row.get("symbol")) in published_symbols
             }
             formal_lagging = sorted(

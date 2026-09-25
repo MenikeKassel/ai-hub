@@ -142,8 +142,10 @@ class XSessionManager:
         for row in rows:
             row["credential_configured"] = self._read_payload(int(row["slot_id"])) is not None
             cooldown = self._parse_time(str(row.get("cooldown_until") or ""))
-            if row["status"] == "cooldown" and (cooldown is None or cooldown <= now):
-                row["status"] = "ready" if row["user_id"] and row["credential_configured"] else "pending_verification"
+            if row["status"] == "cooldown" and cooldown is not None and cooldown <= now:
+                eligible = bool(row["user_id"] and row["credential_configured"])
+                row["status"] = "ready" if eligible else "pending_verification"
+                row["enabled"] = int(eligible)
             row["cooldown_active"] = bool(cooldown and cooldown > now)
             row["duplicate_identity"] = bool(row.get("user_id") and identities.get(str(row["user_id"]), 0) > 1)
         return rows
