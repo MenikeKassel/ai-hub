@@ -1879,22 +1879,28 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
     writes_enabled = _market_writes_enabled()
     if writes_enabled:
         _seed_market_instruments(market)
+    instruments = market.instrument_map()
     result = extract_stock_leads(
         posts,
-        instruments=market.instrument_map(),
+        instruments=instruments,
         aliases=load_stock_aliases(WATCHLIST, KOL_ROOT / "events.csv"),
     )
-    reconciled = reconcile_exact_stock_leads(posts, market.instrument_map())
+    reconciled = reconcile_exact_stock_leads(posts, instruments)
+    replay_symbols = posts.list_market_lead_replay() if writes_enabled else []
     confirmed_symbols = sorted(
         set(result.confirmed_symbols)
         | set(reconciled)
+        | set(replay_symbols)
     )
     queued: list[str] = []
     admission_symbols: list[str] = []
     if writes_enabled:
+        # Persist the full worklist before touching the market database. A lock
+        # timeout or killed process leaves it available to the next fetch.
+        posts.queue_market_lead_replay(confirmed_symbols)
         for symbol in confirmed_symbols:
             leads = posts.list_stock_leads(status="confirmed", symbol=symbol, limit=1)
-            if not leads or market.get_instrument(symbol) is None:
+            if not leads or symbol not in instruments:
                 continue
             try:
                 mentioned = datetime.fromisoformat(str(leads[0]["posted_at"]).replace("Z", "+00:00")).date()
@@ -1903,6 +1909,7 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
             market.touch_mention(symbol, mentioned)
             market.enqueue_sync(symbol, reason=f"kol_lead:{leads[0]['post_id']}")
             queued.append(symbol)
+        posts.clear_market_lead_replay(confirmed_symbols)
     else:
         mode = _market_recovery_mode()
         admission_symbols = MarketAdmissionRepository(posts).queue_confirmed_symbols(
@@ -1918,6 +1925,7 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
         "confirmed_symbols": result.confirmed_symbols,
         "failed": result.failed,
         "reconciled_symbols": reconciled,
+        "replayed_symbol_count": len(replay_symbols),
         "queued_symbol_count": len(set(queued)),
         "queued_symbols": sorted(set(queued))[:20],
         "admission_symbol_count": len(set(admission_symbols)),

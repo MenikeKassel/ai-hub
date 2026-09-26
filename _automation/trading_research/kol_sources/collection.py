@@ -590,7 +590,7 @@ def run_post_fetch(
                 attempt.error_code == "rate_limited" for attempt in attempts
             )
             blocked_account = isinstance(exc, (XSessionUnavailableError, XBudgetDeferredError))
-            zhihu_incompatible = platform == "zhihu" and "10003" in str(exc)
+            zhihu_transient = platform == "zhihu" and "10003" in str(exc)
             if not blocked_account:
                 failed += 1
                 errors.append(f"@{kol['handle']}: {exc}")
@@ -632,8 +632,8 @@ def run_post_fetch(
                     if isinstance(exc, XBudgetDeferredError)
                     else "blocked_auth"
                     if isinstance(exc, XSessionUnavailableError)
-                    else "provider_incompatible"
-                    if zhihu_incompatible
+                    else "provider_transient"
+                    if zhihu_transient
                     else
                     "rate_limited"
                     if rate_limited_this_account
@@ -651,8 +651,8 @@ def run_post_fetch(
                         if error_code == "budget_deferred"
                         else 0
                         if error_code == "blocked_auth"
-                        else 21600
-                        if error_code == "provider_incompatible"
+                        else 300
+                        if error_code == "provider_transient"
                         else
                         rate_limit_cooldown_seconds
                         if error_code in {"rate_limited", "authentication_failed"}

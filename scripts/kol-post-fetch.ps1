@@ -55,6 +55,12 @@ try {
     # Automated collection selects a verified slot from the guarded X session
     # pool. Nitter remains shadow-only and cannot bypass a primary pause.
     $arguments = @($cli, "kol-post-fetch", "--provider", "auto", "--platform", $Platform, "--backfill", $FetchCount, "--as-of", $AsOf, "--batch-key", $batchKey, "--skip-classify")
+    # Evening collection may overlap the 19:30 market publisher. The next
+    # morning fetch scans saved posts for stock leads after that lock is free.
+    if ((Get-Date).Hour -ge 19) {
+        $arguments += "--skip-leads"
+        Write-FetchLog "Deferred stock-lead reconciliation to the next morning fetch."
+    }
     & $python $cli kol-post-db-backup *> $null
     if ($LASTEXITCODE -ne 0) { throw "Unable to back up posts.db before fetch." }
     if (-not $NoNotify) { $arguments += @("--notify", "--alerts-only") }

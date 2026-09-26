@@ -189,7 +189,7 @@ def fetch_answers(
     expression = PROFILE_FETCH_SCRIPT.replace("__HANDLE__", json.dumps(handle)).replace(
         "__LIMIT__", str(requested)
     ).replace("__MAX_CHARS__", str(max(1000, min(int(max_chars), 200000))))
-    value = local.evaluate(cdp, expression, timeout=45, await_promise=True)
+    value = local.evaluate(cdp, expression, timeout=75, await_promise=True)
     return value if isinstance(value, dict) else {
         "ok": False,
         "error": "unexpected Zhihu profile API result",
@@ -220,15 +220,24 @@ PROFILE_FETCH_SCRIPT = r"""
       .replace(/\n{3,}/g, '\n\n').trim();
   };
   while (posts.length < requested) {
-    const pageLimit = Math.min(20, requested - posts.length);
-    const api = `/api/v4/members/${encodeURIComponent(handle)}/answers?include=${include}` +
-      `&offset=${offset}&limit=${pageLimit}&sort_by=created`;
-    const response = await fetch(api, {
-      credentials: 'include',
-      headers: {accept: 'application/json'}
-    });
-    const raw = await response.text();
-    if (!response.ok) {
+    let pageLimit = Math.min(20, requested - posts.length);
+    let response;
+    let raw;
+    let transient10003 = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const api = `/api/v4/members/${encodeURIComponent(handle)}/answers?include=${include}` +
+        `&offset=${offset}&limit=${pageLimit}&sort_by=created`;
+      response = await fetch(api, {
+        credentials: 'include',
+        headers: {accept: 'application/json'}
+      });
+      raw = await response.text();
+      transient10003 = /"code"\s*:\s*10003/.test(raw);
+      if (!transient10003) break;
+      pageLimit = Math.min(5, pageLimit);
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, attempt ? 15000 : 5000));
+    }
+    if (!response.ok || transient10003) {
       return {ok: false, status: response.status, error: raw.slice(0, 500), posts};
     }
     let payload;

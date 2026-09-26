@@ -28,13 +28,18 @@ Expected local listeners:
 - 09:15 — bounded OCR/model retry for the active review windows.
 - 17:50 — FreeStockDB validation/update (local D: drive).
 - 19:00 — X evening collection.
-- 19:20 — Zhihu evening collection.
+- 18:00 — configured Zhihu evening collection, ahead of the market publication lock. The installed task on this host still runs at 19:20 until an administrator updates it.
 - 19:30 — atomic daily market publication through BaoStock and fallbacks.
 - After a successful market publication — audited KOL event return update.
 - 23:30 — fallback return update if the publication-triggered run did not occur.
 
 The daily market publisher and KOL return tracker are the scheduled market write tasks. Event
 research and performance recomputation remain manual.
+Evening fetches started at or after 19:00 defer stock-lead reconciliation to the
+next morning fetch so they do not wait behind market publication. The CLI also
+reports a deferred lead pass if it encounters the market file lock. Confirmed
+symbols waiting for market writes are kept in the post database replay table
+until a later lead pass successfully queues them.
 After a successful first catch-up the mode is `live` with `as_of` set to the
 latest completed trading day; `returns_update_enabled` and
 `market_update_enabled` are `true`, while `research_update_enabled` remains `false`.

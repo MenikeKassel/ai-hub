@@ -74,7 +74,7 @@ Register-KolTask -Name "KOL_Post_Fetch_Daily" -Script $fetch -Arguments @("-Repo
 # Keep one canonical scheduled task per Zhihu time window. The API starts
 # these stable names directly, so a second alias would run the fetch twice.
 Register-KolTask -Name "KOL_Zhihu_Fetch_Morning" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "06:30") -Description "Operator entrypoint for the morning Zhihu fetch."
-Register-KolTask -Name "KOL_Zhihu_Fetch_Evening" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "19:20") -Description "Operator entrypoint for the evening Zhihu fetch."
+Register-KolTask -Name "KOL_Zhihu_Fetch_Evening" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "18:00") -Description "Operator entrypoint for the evening Zhihu fetch before market publication."
 
 Register-KolTask -Name "KOL_Post_Fetch_Manual_X" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual X collection entrypoint."
 Register-KolTask -Name "KOL_Post_Fetch_Manual_Zhihu" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual Zhihu collection entrypoint."

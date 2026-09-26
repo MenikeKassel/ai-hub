@@ -20,7 +20,16 @@ class KolPostStore:
         self.media_root = Path(media_root)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.media_root.mkdir(parents=True, exist_ok=True)
-        initialize_schema(self.path, self._migrate)
+        initialize_schema(
+            self.path,
+            self._migrate,
+            migrations=((2, """
+                CREATE TABLE IF NOT EXISTS market_lead_replay (
+                    symbol TEXT PRIMARY KEY,
+                    queued_at TEXT NOT NULL
+                );
+            """),),
+        )
 
     @contextmanager
     def connect(self):
@@ -1985,6 +1994,30 @@ class KolPostStore:
                 (post_id, signature, "failed" if error else "completed", error[:2000], now_iso()),
             )
 
+    def list_market_lead_replay(self) -> list[str]:
+        with self.connect() as db:
+            rows = db.execute("SELECT symbol FROM market_lead_replay ORDER BY symbol").fetchall()
+        return [str(row[0]) for row in rows]
+
+    def queue_market_lead_replay(self, symbols: list[str]) -> None:
+        if not symbols:
+            return
+        timestamp = now_iso()
+        with self.connect() as db:
+            db.executemany(
+                "INSERT OR IGNORE INTO market_lead_replay(symbol,queued_at) VALUES(?,?)",
+                [(symbol, timestamp) for symbol in symbols],
+            )
+
+    def clear_market_lead_replay(self, symbols: list[str]) -> None:
+        if not symbols:
+            return
+        with self.connect() as db:
+            db.executemany(
+                "DELETE FROM market_lead_replay WHERE symbol=?",
+                [(symbol,) for symbol in symbols],
+            )
+
     def save_model_classification(
         self,
         post_id: str,
@@ -2965,7 +2998,7 @@ class KolPostStore:
             current + timedelta(seconds=max(0, int(cooldown_seconds)))
         ).isoformat(timespec="seconds")
         state = "cooldown" if error_code in {
-            "rate_limited", "authentication_failed", "provider_incompatible"
+            "rate_limited", "authentication_failed", "provider_incompatible", "provider_transient"
         } else "queued"
         with self.connect() as db:
             db.execute(
@@ -3118,12 +3151,15 @@ class KolPostStore:
                 "SELECT batch_key FROM fetch_queue WHERE updated_at<? GROUP BY batch_key",
                 (cutoff,),
             ).fetchall()
-            keys = [str(row["batch_key"]) for row in rows]
-            for key in keys:
-                db.execute(
+            keys: list[str] = []
+            for row in rows:
+                key = str(row["batch_key"])
+                cursor = db.execute(
                     "INSERT OR IGNORE INTO fetch_batch_archive(batch_key,reason,archived_at) VALUES(?,?,?)",
                     (key, "superseded_legacy", timestamp),
                 )
+                if cursor.rowcount:
+                    keys.append(key)
         return keys
 
     def create_fetch_batch(

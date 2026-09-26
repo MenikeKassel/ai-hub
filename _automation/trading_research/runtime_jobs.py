@@ -13,16 +13,18 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 
 
-def initialize_schema(path: Path, migrate_legacy) -> None:
-    """Serialize schema upgrades; opening a repository never reruns old migrations."""
+def initialize_schema(path: Path, migrate_legacy, *, migrations: tuple[tuple[int, str], ...] = ()) -> None:
+    """Serialize schema upgrades and run each numbered migration once."""
     with FileLock(str(path.with_suffix('.schema.lock')), timeout=30):
         with closing(sqlite3.connect(path)) as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='workbench_schema_migrations'").fetchone()
-            if exists and db.execute('SELECT 1 FROM workbench_schema_migrations WHERE version=1').fetchone():
-                return
-        migrate_legacy()
-        with closing(sqlite3.connect(path)) as db:
-            db.executescript('''
+            base_applied = bool(
+                exists and db.execute('SELECT 1 FROM workbench_schema_migrations WHERE version=1').fetchone()
+            )
+        if not base_applied:
+            migrate_legacy()
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript('''
                 CREATE TABLE IF NOT EXISTS workbench_schema_migrations (
                     version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS morning_targets (
@@ -35,6 +37,20 @@ def initialize_schema(path: Path, migrate_legacy) -> None:
                 CREATE INDEX IF NOT EXISTS idx_review_approved_date ON recommendation_drafts(substr(reviewed_at,1,10),status,post_id);
                 INSERT OR IGNORE INTO workbench_schema_migrations(version) VALUES(1);
             ''')
+        if migrations:
+            with closing(sqlite3.connect(path)) as db:
+                for version, statements in sorted(migrations):
+                    if db.execute(
+                        'SELECT 1 FROM workbench_schema_migrations WHERE version=?',
+                        (version,),
+                    ).fetchone():
+                        continue
+                    db.executescript(statements)
+                    db.execute(
+                        'INSERT INTO workbench_schema_migrations(version) VALUES(?)',
+                        (version,),
+                    )
+                    db.commit()
 
 
 def worker_paths(database: Path, kind: str) -> tuple[Path, Path]:

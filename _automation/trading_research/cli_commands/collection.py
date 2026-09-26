@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 from types import ModuleType
+from filelock import Timeout as FileLockTimeout
 
 
 def _platform_providers(context: ModuleType) -> dict[str, object]:
@@ -634,7 +635,12 @@ def kol_post_fetch(context: ModuleType, args: argparse.Namespace) -> None:
         store.save_fetch_model_result(result.run_id, codex_completed, codex_failed)
     lead_payload: dict[str, Any] = {}
     if not args.dry_run and not getattr(args, "skip_leads", False):
-        lead_payload = context._extract_leads_to_market(store)
+        try:
+            lead_payload = context._extract_leads_to_market(store)
+        except FileLockTimeout:
+            # Posts and their fetch audit are already durable. The next fetch
+            # reprocesses saved posts after the market publisher releases its lock.
+            lead_payload = {"deferred": True, "reason": "market_locked", "retry": "next_fetch"}
     codex_failure_streak = store.codex_failure_streak()
     payload = {
         **result.__dict__,
