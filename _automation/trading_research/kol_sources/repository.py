@@ -1104,6 +1104,15 @@ class KolPostStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"KOL not found: {kol_id}")
+            # An explicit retry starts at the newest page. Keep the verified
+            # user ID but discard any cursor from an older backfill request.
+            db.execute(
+                """UPDATE x_page_checkpoints
+                   SET phase='freshness',cursor='',pages_completed=0,
+                       last_page_new_ids=0,stop_reason='',updated_at=?
+                   WHERE kol_id=?""",
+                (timestamp, kol_id),
+            )
         result = self.get_kol(kol_id)
         assert result is not None
         return result
@@ -1116,6 +1125,9 @@ class KolPostStore:
         *,
         fetched_count: int = 0,
         requested_count: int = 0,
+        backfill_page: bool = True,
+        backfill_paginated: bool = False,
+        backfill_has_more: bool = False,
     ) -> None:
         timestamp = now_iso()
         with self.connect() as db:
@@ -1135,13 +1147,30 @@ class KolPostStore:
             backfill_completed_depth = int(row["backfill_completed_depth"] or 0)
             backfill_result_count = int(row["backfill_result_count"] or 0)
             backfill_warning = str(row["backfill_warning"] or "")
-            if backfill_status == "queued" and backfill_requested > 0:
+            if backfill_status == "queued" and backfill_requested > 0 and backfill_page:
                 backfill_result_count = max(0, fetched_count)
-                if status == "success" and fetched_count >= max(1, requested_count):
+                if status == "success" and backfill_paginated and fetched_count > 0:
+                    backfill_completed_depth = min(
+                        backfill_requested, backfill_completed_depth + fetched_count
+                    )
+                    if backfill_completed_depth >= backfill_requested:
+                        backfill_requested = 0
+                        backfill_status = "completed"
+                        backfill_warning = ""
+                    elif backfill_has_more:
+                        backfill_warning = ""
+                    else:
+                        backfill_status = "needs_review"
+                        backfill_warning = (
+                            f"provider returned no next cursor after {backfill_completed_depth} "
+                            f"of {backfill_requested} requested posts; source may be exhausted"
+                        )
+                elif status == "success" and fetched_count >= max(1, requested_count):
                     backfill_completed_depth = max(
                         backfill_completed_depth,
                         min(requested_count, backfill_requested),
                     )
+                    backfill_warning = ""
                     if backfill_completed_depth >= backfill_requested:
                         backfill_requested = 0
                         backfill_status = "completed"

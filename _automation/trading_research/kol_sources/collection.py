@@ -128,7 +128,8 @@ def _fetch_with_cursor_search(
     # The guarded provider persists and advances one real cursor page per
     # invocation.  Never emulate pagination by re-requesting an expanded count
     # (that both defeats the request budget and can skip a page on restart).
-    if getattr(provider, "session_manager", None) is not None:
+    guarded = getattr(provider, "primary", provider)
+    if getattr(guarded, "session_manager", None) is not None:
         return result
     if (
         not previous_last_id
@@ -291,6 +292,7 @@ def run_post_fetch(
     if getattr(guarded_provider, "session_manager", None) is None:
         guarded_provider = getattr(guarded_provider, "primary", guarded_provider)
     session_manager = getattr(guarded_provider, "session_manager", None)
+    x_history_mode = bool(getattr(guarded_provider, "history_mode", False))
     has_x_targets = any(
         str(kol.get("platform") or "X").casefold() == "x" for kol in selected_kols
     )
@@ -400,6 +402,7 @@ def run_post_fetch(
         backfill_queued = (
             not fresh_first_page
             and str(kol.get("backfill_status") or "") == "queued"
+            and (platform != "x" or session_manager is None or x_history_mode)
         )
         archive_only_backfill = (
             platform == "zhihu"
@@ -526,18 +529,26 @@ def run_post_fetch(
                 history_mode = bool(getattr(guarded_provider, "history_mode", False))
                 first_id = seen_ids[0] if seen_ids else ""
                 page_end_id = seen_ids[-1] if seen_ids else ""
-                session_manager.save_checkpoint(
-                    int(kol["id"]),
-                    int(session_slot),
-                    phase="completed" if history_mode and fetch_result.exhausted else "history" if history_mode else "freshness",
-                    user_id=fetch_result.user_id or str((checkpoint or {}).get("user_id") or ""),
-                    latest_seen_post_id=first_id,
-                    contiguous_post_id=page_end_id if history_mode else first_id,
-                    cursor=fetch_result.next_cursor if history_mode else "",
-                    pages_completed=int((checkpoint or {}).get("pages_completed") or 0) + 1,
-                    last_page_new_ids=len(seen_ids),
-                    stop_reason="source_exhausted" if history_mode and fetch_result.exhausted else "",
+                # The first-page sweep and the historical backfill share one
+                # checkpoint row. Keep the historical cursor during freshness.
+                preserve_history_cursor = (
+                    not history_mode
+                    and str(kol.get("backfill_status") or "") == "queued"
+                    and (checkpoint or {}).get("phase") == "history"
                 )
+                if not preserve_history_cursor:
+                    session_manager.save_checkpoint(
+                        int(kol["id"]),
+                        int(session_slot),
+                        phase="completed" if history_mode and fetch_result.exhausted else "history" if history_mode else "freshness",
+                        user_id=fetch_result.user_id or str((checkpoint or {}).get("user_id") or ""),
+                        latest_seen_post_id=first_id,
+                        contiguous_post_id=page_end_id if history_mode else first_id,
+                        cursor=fetch_result.next_cursor if history_mode else "",
+                        pages_completed=int((checkpoint or {}).get("pages_completed") or 0) + 1,
+                        last_page_new_ids=len(seen_ids),
+                        stop_reason="source_exhausted" if history_mode and fetch_result.exhausted else "",
+                    )
             gap_search_incomplete = any(
                 warning.startswith("gap_search_incomplete:")
                 for warning in fetch_result.warnings
@@ -555,7 +566,7 @@ def run_post_fetch(
                 gaps.append(kol["handle"])
             newest = (
                 previous_last_id
-                if gap_detected and previous_last_id
+                if previous_last_id and (gap_detected or (platform == "x" and backfill_queued))
                 else seen_ids[0]
                 if seen_ids
                 else previous_last_id
@@ -567,6 +578,9 @@ def run_post_fetch(
                     "gap_detected" if gap_detected else "success",
                     fetched_count=len(seen_ids),
                     requested_count=requested,
+                    backfill_page=backfill_queued,
+                    backfill_paginated=bool(platform == "x" and session_manager is not None and x_history_mode),
+                    backfill_has_more=bool(fetch_result.next_cursor) if platform == "x" and session_manager is not None else False,
                 )
                 if batch_key:
                     if gap_search_incomplete:

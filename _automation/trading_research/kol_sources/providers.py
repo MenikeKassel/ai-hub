@@ -220,7 +220,9 @@ class TwitterCliProvider:
         slot_id = self._slot_id
         kol_id = self.session_manager.kol_id_for_handle(handle)
         checkpoint = self.session_manager.checkpoint(kol_id) if kol_id else None
-        cursor = str(checkpoint.get("cursor") or "") if checkpoint else ""
+        # A freshness pass must start at the head even when a historical
+        # backfill has a saved cursor waiting for the next history window.
+        cursor = str(checkpoint.get("cursor") or "") if checkpoint and self.history_mode else ""
         user_id = str(checkpoint.get("user_id") or "") if checkpoint else ""
         operation = "history_page" if self.history_mode else "freshness_page"
         # Each page includes one authenticated profile lookup and one

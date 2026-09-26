@@ -31,6 +31,7 @@ from kol_posts import (  # noqa: E402
     FxTwitterPublicPostProvider,
     PublicBackupGate,
     PublicBackupNotFoundError,
+    ProviderFetchResult,
     extract_zhihu_digest_attributions,
     initialize_seed_kols,
     load_stock_aliases,
@@ -1618,6 +1619,137 @@ class ProviderAndFetchTests(unittest.TestCase):
             self.assertEqual("needs_review", kol["backfill_status"])
             self.assertEqual(1, kol["backfill_result_count"])
             self.assertIn("returned 1 of 100", kol["backfill_warning"])
+
+    def test_freshness_page_does_not_consume_a_queued_backfill(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def fetch_user_posts(self, handle, max_count):
+                return [tweet_payload()]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Example", "example")
+            store.queue_backfill(kol_id, 50)
+            run_post_fetch(
+                store, Provider(), fresh_first_page=True, max_count=20,
+                sleep_seconds=0, download_media=False,
+            )
+            kol = store.get_kol(kol_id)
+            self.assertEqual("queued", kol["backfill_status"])
+            self.assertEqual(0, kol["backfill_completed_depth"])
+            self.assertEqual("", kol["backfill_warning"])
+
+    def test_requeue_backfill_resets_only_the_historical_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Example", "example")
+            manager = XSessionManager(store)
+            manager.save_checkpoint(
+                kol_id, 1, phase="history", user_id="verified-user",
+                cursor="old-page", pages_completed=8,
+            )
+            store.queue_backfill(kol_id, 50)
+            checkpoint = manager.checkpoint(kol_id)
+            self.assertEqual("verified-user", checkpoint["user_id"])
+            self.assertEqual("freshness", checkpoint["phase"])
+            self.assertEqual("", checkpoint["cursor"])
+            self.assertEqual(0, checkpoint["pages_completed"])
+
+    def test_paginated_backfill_reports_actual_terminal_shortfall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Example", "example")
+            store.queue_backfill(kol_id, 50)
+            store.update_fetch_state(
+                kol_id, "first", "success", fetched_count=20, requested_count=50,
+                backfill_paginated=True, backfill_has_more=True,
+            )
+            store.update_fetch_state(
+                kol_id, "last", "success", fetched_count=5, requested_count=50,
+                backfill_paginated=True, backfill_has_more=False,
+            )
+            kol = store.get_kol(kol_id)
+            self.assertEqual("needs_review", kol["backfill_status"])
+            self.assertEqual(25, kol["backfill_completed_depth"])
+            self.assertIn("after 25 of 50", kol["backfill_warning"])
+
+    def test_guarded_x_backfill_resumes_cursor_after_freshness_page(self) -> None:
+        def page(start: int, count: int):
+            return [
+                tweet_payload(
+                    id=str(2076000000000000001 + value),
+                    url=f"https://x.com/example/status/{2076000000000000001 + value}",
+                )
+                for value in range(start, start + count)
+            ]
+
+        class Session:
+            saved = None
+
+            def policy_status(self):
+                return {"enabled": True, "paused_until": "", "slots": [{
+                    "status": "ready", "enabled": True,
+                    "credential_configured": True, "user_id": "reader",
+                }]}
+
+            def checkpoint(self, kol_id):
+                return self.saved
+
+            def save_checkpoint(self, kol_id, slot_id, **values):
+                self.saved = values
+
+        class Provider:
+            name = "twitter-cli"
+            history_mode = True
+            _slot_id = 1
+
+            def __init__(self, session):
+                self.session_manager = session
+                self.history_calls = 0
+
+            def fetch_user_posts(self, handle, max_count):
+                if not self.history_mode:
+                    return ProviderFetchResult(self.name, page(100, 1), [], [], next_cursor="head")
+                self.history_calls += 1
+                index = self.history_calls
+                count = 10 if index == 3 else 20
+                return ProviderFetchResult(
+                    self.name, page((index - 1) * 20, count), [], [],
+                    next_cursor=f"cursor-{index}" if index < 3 else "",
+                    exhausted=index == 3,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            kol_id, _ = store.add_kol("Example", "example")
+            store.update_fetch_state(kol_id, "saved-newest", "success")
+            store.queue_backfill(kol_id, 50)
+            session = Session()
+            provider = Provider(session)
+            run_post_fetch(store, provider, max_count=50, sleep_seconds=0, download_media=False)
+            self.assertEqual("queued", store.get_kol(kol_id)["backfill_status"])
+            self.assertEqual(20, store.get_kol(kol_id)["backfill_completed_depth"])
+            self.assertEqual("cursor-1", session.saved["cursor"])
+
+            provider.history_mode = False
+            run_post_fetch(
+                store, provider, fresh_first_page=True, max_count=20,
+                sleep_seconds=0, download_media=False,
+            )
+            self.assertEqual("cursor-1", session.saved["cursor"])
+            self.assertEqual(20, store.get_kol(kol_id)["backfill_completed_depth"])
+            newest_after_freshness = store.get_kol(kol_id)["last_post_id"]
+
+            provider.history_mode = True
+            run_post_fetch(store, provider, max_count=50, sleep_seconds=0, download_media=False)
+            self.assertEqual(40, store.get_kol(kol_id)["backfill_completed_depth"])
+            run_post_fetch(store, provider, max_count=50, sleep_seconds=0, download_media=False)
+            kol = store.get_kol(kol_id)
+            self.assertEqual("completed", kol["backfill_status"])
+            self.assertEqual(50, kol["backfill_completed_depth"])
+            self.assertEqual(newest_after_freshness, kol["last_post_id"])
+            self.assertEqual(3, provider.history_calls)
 
     def test_failed_backfill_remains_queued_and_increments_failure_count(self) -> None:
         class Provider:

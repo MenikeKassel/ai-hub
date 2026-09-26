@@ -14,6 +14,7 @@ Recent incidents were mostly contract drift, not isolated exceptions:
 | Market lock interrupted a successful fetch | Posts and market metadata live in separate databases | Persist confirmed symbols in a SQLite replay table before market writes |
 | Scheduled work ran at an old time or with old arguments | Multiple installers registered or removed the same task names | One task contract, one registration owner, and read-only installed-state comparison |
 | Queue counts looked like missing accounts | Batch queue rows were treated as unique account gaps | Report account coverage, current batch work, and historical batch audit separately |
+| X backfill showed 20/50 as a failed retry | A freshness page and a historical cursor page were both settled against the full target | Keep freshness outside backfill accounting; advance one persisted history page per run and accumulate verified depth |
 
 ## Enforced now
 
@@ -32,6 +33,9 @@ Recent incidents were mostly contract drift, not isolated exceptions:
 5. The doctor reads the live X policy and warns when it differs from the
    documented 180/90/60 reference. The current high-budget override is
    operator-approved and remains active; the doctor never writes policy.
+6. X backfill progress is cumulative across cursor pages. A freshness sweep
+   leaves its historical cursor intact, and an explicit retry resets the old
+   cursor without changing the verified reader identity.
 
 ## Next boundaries
 

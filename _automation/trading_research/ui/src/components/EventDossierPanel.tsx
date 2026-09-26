@@ -5,8 +5,8 @@ import type { EventDossierSection } from '../types'
 import EventMethodResearch from './EventMethodResearch'
 
 const sectionLabels: Record<string, string> = {
-  recommendation: 'Recommendation',
-  minute_data: 'Minute data',
+  recommendation: '观点与草稿',
+  minute_data: '可选分钟数据',
   evidence: '原帖与证据',
   event_market: '推荐时行情',
   technical: '技术环境',
@@ -15,6 +15,14 @@ const sectionLabels: Record<string, string> = {
   board_context: '板块归属',
   performance: '收益与节点',
 }
+
+const contextWarningLabels: Record<string, string> = {
+  not_computed: '技术或分钟上下文尚未计算',
+  minute_data_not_collected: '可选分钟数据未采集；日常同步不会自动下载',
+  board_membership_unavailable: '缺少事件时点的板块成分快照',
+}
+const optionalContextWarnings = new Set(Object.keys(contextWarningLabels))
+function warningLabel(code: string): string { return contextWarningLabels[code] || code }
 
 function statusLabel(status: string): string {
   return ({ ready: '完整', partial: '部分可用', pending: '待补齐', unavailable: '暂无数据', failed: '失败' } as Record<string, string>)[status] || status
@@ -136,10 +144,13 @@ export default function EventDossierPanel({ eventId }: { eventId: string }) {
   const sections = value.sections || {}
   const completeness = value.completeness || { ready: 0, total: 0 }
   const warnings = Array.isArray(value.warnings) ? value.warnings : []
+  const contextWarnings = warnings.filter((warning) => optionalContextWarnings.has(warning))
+  const otherWarnings = warnings.filter((warning) => !optionalContextWarnings.has(warning))
   return <section className="event-dossier-panel">
     <div className="section-heading dossier-heading"><div><span className="eyebrow">AUDIT DOSSIER</span><h3>证据与数据档案</h3><small>{completeness.ready}/{completeness.total} 个分区可用 · {value.status || 'pending'}</small></div><div className="header-actions"><a className="icon-button" href={api.exportEventDossier(eventId)} target="_blank" rel="noreferrer" title="导出档案"><Download size={15} /></a><button className="secondary-button" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw size={15} className={refresh.isPending ? 'spin' : ''} />刷新数据</button></div></div>
-    {warnings.length > 0 && <div className="warning-banner"><AlertTriangle size={15} /><span>{warnings.join(' · ')}</span></div>}
-    <div className="dossier-sections">{Object.entries(sections).map(([key, section]) => <details key={key} className="dossier-section" open={key === 'evidence' || key === 'event_market'}><summary><span>{sectionLabels[key] || key}</span><span className={`badge ${statusClass(section.status)}`}>{statusLabel(section.status)}</span></summary><div className="dossier-section-body">{renderSectionBody(key, section)}{section.warnings && section.warnings.length > 0 && <small className="dossier-warning">{section.warnings.join(' · ')}</small>}</div></details>)}</div>
+    {otherWarnings.length > 0 && <div className="warning-banner"><AlertTriangle size={15} /><span>{otherWarnings.map(warningLabel).join(' · ')}</span></div>}
+    {contextWarnings.length > 0 && <div className="scope-note">可选或待计算的上下文：{contextWarnings.map(warningLabel).join(' · ')}</div>}
+    <div className="dossier-sections">{Object.entries(sections).map(([key, section]) => <details key={key} className="dossier-section" open={key === 'evidence' || key === 'event_market'}><summary><span>{sectionLabels[key] || key}</span><span className={`badge ${statusClass(section.status)}`}>{statusLabel(section.status)}</span></summary><div className="dossier-section-body">{renderSectionBody(key, section)}{section.warnings && section.warnings.length > 0 && <small className="dossier-warning">{section.warnings.map(warningLabel).join(' · ')}</small>}</div></details>)}</div>
     <EventMethodResearch eventId={eventId} />
     {refresh.isError && <div className="error-banner">刷新失败：{String(refresh.error)}</div>}
   </section>

@@ -56,4 +56,23 @@ describe('KOL management performance loading', () => {
     expect(await screen.findByRole('heading', { name: 'KOL阶段表现' })).toBeInTheDocument()
     await waitFor(() => expect(leaderboard).toHaveBeenCalledTimes(1))
   })
+
+  it('requeues an incomplete backfill at its original target', async () => {
+    const incomplete: Kol = {
+      ...kol,
+      backfill_status: 'needs_review',
+      backfill_requested: 50,
+      backfill_completed_depth: 20,
+      backfill_result_count: 5,
+      backfill_warning: 'provider returned no next cursor after 20 of 50 requested posts',
+    }
+    vi.spyOn(api, 'kols').mockResolvedValue([incomplete])
+    vi.spyOn(api, 'digestAuthors').mockResolvedValue([])
+    const queue = vi.spyOn(api, 'queueKolBackfill').mockResolvedValue({ ...incomplete, backfill_status: 'queued' })
+
+    renderKols()
+    expect(await screen.findByText('需复核 20/50')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重新排队补抓 50 条' }))
+    await waitFor(() => expect(queue).toHaveBeenCalledWith(1, 50))
+  })
 })
