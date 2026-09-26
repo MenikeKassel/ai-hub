@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+if ($TaskName -ne "KOL_Post_Fetch_Daily") { throw "Custom KOL fetch task names are unsupported; use the canonical collection installer." }
 
 $venv = Join-Path $RepoRoot "_runtime\venv-trading"
 $python = Join-Path $venv "Scripts\python.exe"
@@ -42,24 +43,9 @@ if ($LASTEXITCODE -ne 0) { throw "Unable to install x-tweet-fetcher." }
 & $python $cli kol-post-doctor
 if ($LASTEXITCODE -ne 0) { throw "KOL post doctor failed." }
 
-$actionArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -RepoRoot `"$RepoRoot`""
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArguments
-$trigger = New-ScheduledTaskTrigger -Daily -At "19:00"
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1) -Hidden
-$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Fetch watched X KOL posts and prepare the review queue." -Force | Out-Null
-
-$manualSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1) -Hidden
-foreach ($manual in @(
-    @{ Name = "KOL_Post_Fetch_Manual_X"; Platform = "x" },
-    @{ Name = "KOL_Post_Fetch_Manual_Zhihu"; Platform = "zhihu" }
-)) {
-    $manualArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -RepoRoot `"$RepoRoot`" -Platform $($manual.Platform) -SkipAiPrefill -NoNotify -NotifyOnCompletion"
-    $manualAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $manualArguments
-    Register-ScheduledTask -TaskName $manual.Name -Action $manualAction -Settings $manualSettings -Principal $principal -Description "Hermes-triggered $($manual.Platform) KOL post collection without AI review." -Force | Out-Null
-}
+$canonicalInstaller = Join-Path $RepoRoot "scripts\install-kol-recovery-tasks.ps1"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $canonicalInstaller -RepoRoot $RepoRoot -CollectionOnly
+if ($LASTEXITCODE -ne 0) { throw "Unable to install canonical KOL collection tasks." }
 
 if ($RunNow) { Start-ScheduledTask -TaskName $TaskName }
-Write-Host "Installed scheduled task: $TaskName (daily at 19:00)"
-Write-Host "Installed manual tasks: KOL_Post_Fetch_Manual_X, KOL_Post_Fetch_Manual_Zhihu"
+Write-Host "Installed canonical KOL collection tasks through install-kol-recovery-tasks.ps1."

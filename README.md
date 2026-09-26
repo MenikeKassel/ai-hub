@@ -122,6 +122,7 @@ Install the KOL-to-stock and market data tasks:
 
 ```powershell
 & "$env:AI_HUB_HOME\scripts\install-kol-recovery-tasks.ps1"
+& "$env:AI_HUB_HOME\scripts\kol-task-doctor.ps1"
 ```
 
 Historical mode intentionally does not install market update, return tracking,

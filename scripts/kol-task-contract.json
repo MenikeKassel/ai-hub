@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "owner": "install-kol-recovery-tasks.ps1",
+  "market_publication_at": "19:30",
+  "x_policy_reference": {
+    "global_limit_24h": 180,
+    "session_limit_24h": 90,
+    "min_interval_seconds": 60
+  },
+  "tasks": [
+    {
+      "name": "KOL_Post_Fetch_Daily",
+      "at": "19:00",
+      "script": "kol-post-fetch.ps1",
+      "arguments": ["-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill"],
+      "description": "Collect watched X KOL posts with isolated reader credentials."
+    },
+    {
+      "name": "KOL_Zhihu_Fetch_Morning",
+      "at": "06:30",
+      "script": "kol-post-fetch.ps1",
+      "arguments": ["-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill"],
+      "description": "Operator entrypoint for the morning Zhihu fetch."
+    },
+    {
+      "name": "KOL_Zhihu_Fetch_Evening",
+      "at": "18:00",
+      "script": "kol-post-fetch.ps1",
+      "arguments": ["-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill"],
+      "description": "Operator entrypoint for the evening Zhihu fetch before market publication."
+    },
+    {
+      "name": "KOL_Morning_Pipeline_0700",
+      "at": "07:00",
+      "script": "kol-morning-pipeline.ps1",
+      "arguments": ["-Platform", "douyin", "-FetchCount", "20"],
+      "description": "Run the KOL morning review pipeline in historical market mode."
+    },
+    {
+      "name": "KOL_Morning_Pipeline_0720",
+      "at": "07:20",
+      "script": "kol-morning-pipeline.ps1",
+      "arguments": ["-Platform", "x", "-FetchCount", "20"],
+      "description": "Run the KOL morning review pipeline in historical market mode."
+    },
+    {
+      "name": "KOL_Morning_Pipeline_0805",
+      "at": "08:05",
+      "script": "kol-morning-pipeline.ps1",
+      "arguments": ["-Platform", "zhihu", "-FetchCount", "20"],
+      "description": "Run the KOL morning review pipeline in historical market mode."
+    },
+    {
+      "name": "KOL_Morning_Pipeline_0845",
+      "at": "08:45",
+      "script": "kol-morning-pipeline.ps1",
+      "arguments": ["-Platform", "all", "-FetchCount", "20", "-NoFetch"],
+      "description": "Run the KOL morning review pipeline in historical market mode."
+    }
+  ]
+}

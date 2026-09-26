@@ -6,6 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$taskContractPath = Join-Path $PSScriptRoot "kol-task-contract.json"
+$taskContract = Get-Content -LiteralPath $taskContractPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $requirements = Join-Path $RepoRoot "_automation\trading_research\requirements.txt"
@@ -37,36 +39,15 @@ function Register-ResearchTask([string]$Name, [string]$ScriptName, $Trigger, [st
 }
 
 Register-ResearchTask "Market_Data_Sync_Daily" "market-data-sync.ps1" @(
-    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "19:30"),
+    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At ([string]$taskContract.market_publication_at)),
     (New-ScheduledTaskTrigger -Daily -At "23:30"),
     (New-ScheduledTaskTrigger -Daily -At "06:30")
 ) "Read the current unified A-share foundation release and refresh derived market data only when the release changes."
 Register-ResearchTask "FreeStockDB_Update_Daily" "freestockdb-update.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "17:50") "Verify and update the isolated local FreeStockDB mirror before market sync." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 90) -Hidden)
-Register-ResearchTask "KOL_Zhihu_Fetch_Morning" "kol-post-fetch.ps1" (New-ScheduledTaskTrigger -Daily -At "06:30") "Fetch active Zhihu KOL answers before the morning review queue." $settings "-Platform zhihu -FetchCount 10 -NoNotify -SkipAiPrefill"
-Register-ResearchTask "KOL_Zhihu_Fetch_Evening" "kol-post-fetch.ps1" (New-ScheduledTaskTrigger -Daily -At "18:00") "Fetch active Zhihu KOL answers before market publication." $settings "-Platform zhihu -FetchCount 10 -NoNotify"
-$morningSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 55) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
-$morningTriggers = @(
-    (New-ScheduledTaskTrigger -Daily -At "07:20"),
-    (New-ScheduledTaskTrigger -Daily -At "08:05"),
-    (New-ScheduledTaskTrigger -Daily -At "08:45")
-)
-foreach ($legacyTask in "KOL_Morning_Initial", "KOL_Morning_Refresh") {
-    if (Get-ScheduledTask -TaskName $legacyTask -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $legacyTask -Confirm:$false
-    }
-}
-Register-ResearchTask "KOL_Morning_Pipeline" "kol-morning-pipeline.ps1" $morningTriggers "Prepare and finalize the evidence-first KOL morning review queue before 09:00." $morningSettings "-Platform x"
 Register-ResearchTask "Research_Data_Digest_Daily" "research-data-digest.ps1" (New-ScheduledTaskTrigger -Daily -At "02:30") "Send one combined KOL, review-agent, and market data digest."
 Register-ResearchTask "Market_Data_Weekly" "market-weekly-refresh.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "10:00") "Refresh instrument master, financial, announcement, and vendor-labelled fund-flow snapshots."
 Register-ResearchTask "KOL_Event_Method_Research" "event-method-research.ps1" (New-ScheduledTaskTrigger -Daily -At "02:00") "Complete point-in-time multi-method evidence and AI interpretation." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3) -Hidden)
 Register-ResearchTask "KOL_Performance_Weekly" "kol-performance-weekly.ps1" (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At "08:50") "Send the weekly batch-weighted KOL performance summary after mature checkpoints settle." (New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -Hidden)
 
-if (Get-ScheduledTask -TaskName "KOL_Post_Classify_Daily" -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName "KOL_Post_Classify_Daily" -Confirm:$false
-}
-if (Get-ScheduledTask -TaskName "KOL_Review_Agent" -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName "KOL_Review_Agent" -Confirm:$false
-}
-
 if ($RunNow) { Start-ScheduledTask -TaskName "Market_Data_Sync_Daily" }
-Write-Host "Installed Zhihu fetch, morning orchestration, market sync, event research, digest, and weekly market tasks."
+Write-Host "Installed market sync, event research, digest, and weekly market tasks. KOL collection and morning tasks are owned by install-kol-recovery-tasks.ps1."

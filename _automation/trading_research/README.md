@@ -182,7 +182,7 @@ to the local post record and registers an active return event without network
 dependencies.
 
 ```powershell
-& 'D:\aiworkspace\ai-hub\scripts\install-kol-post-fetch.ps1'
+& 'D:\aiworkspace\ai-hub\scripts\install-kol-recovery-tasks.ps1'
 & 'D:\aiworkspace\ai-hub\scripts\start-kol-ui.ps1'
 ```
 
@@ -348,11 +348,12 @@ executable frozen checkpoints. Fewer than ten 1M samples never receive a rank;
 10 verified 6M events form the long-term tier.
 
 `scripts\install-kol-recovery-tasks.ps1` installs the D-drive operational
-schedule: X at 07:20 and 19:00, Zhihu at 06:30, 08:05 and 19:20, review-only
+schedule from `scripts\kol-task-contract.json`: X at 07:20 and 19:00, Zhihu at 06:30, 08:05 and 18:00, review-only
 morning finalization at 08:45, and the bounded OCR/AI backlog at 09:15. Market
 publication runs at 19:30 and return tracking runs after publication with a
 23:30 fallback. Research recomputation remains manual. To install only OCR, run
-`scripts\install-fast-ocr.ps1`.
+`scripts\install-fast-ocr.ps1`. Run `scripts\kol-task-doctor.ps1` to compare
+installed tasks with the contract; it reports drift without changing tasks.
 
 ## Legacy review agent
 

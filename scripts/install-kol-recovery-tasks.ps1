@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot = "",
-    [switch]$RunUiNow
+    [switch]$RunUiNow,
+    [switch]$CollectionOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,7 @@ $isAdministrator = ([Security.Principal.WindowsPrincipal][Security.Principal.Win
 if (-not $isAdministrator) {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RepoRoot `"$RepoRoot`""
     if ($RunUiNow) { $arguments += " -RunUiNow" }
+    if ($CollectionOnly) { $arguments += " -CollectionOnly" }
     $elevated = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     exit $elevated.ExitCode
 }
@@ -43,50 +45,47 @@ foreach ($path in @($ui, $freestock, $fetch, $morning, $nitter, $watchdog, $watc
     if (-not (Test-Path -LiteralPath $path)) { throw "Required script not found: $path" }
 }
 
-$disabledTasks = @(
-    "FreeStockDB_Update_Daily",
-    "Market_Data_Sync_Daily",
-    "Market_Data_Weekly",
-    "KOL_Return_Tracker_Daily",
-    "KOL_Review_Agent",
-    "KOL_Event_Method_Research",
-    "KOL_Performance_Weekly",
-    "Research_Data_Digest_Daily",
-    "KOL_Morning_Initial",
-    "KOL_Morning_Refresh",
-    "KOL_Post_Fetch_Zhihu_Morning",
-    "KOL_Post_Fetch_Zhihu_Evening"
-)
-foreach ($task in $disabledTasks) {
-    if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $task -Confirm:$false
+if (-not $CollectionOnly) {
+    $disabledTasks = @(
+        "KOL_Review_Agent",
+        "KOL_Morning_Initial",
+        "KOL_Morning_Refresh",
+        "KOL_Post_Fetch_Zhihu_Morning",
+        "KOL_Post_Fetch_Zhihu_Evening"
+    )
+    foreach ($task in $disabledTasks) {
+        if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $task -Confirm:$false
+        }
     }
+    $atLogon = New-ScheduledTaskTrigger -AtLogOn
+    $workspaceRoot = Split-Path -Parent $RepoRoot
+    $freeStockRoot = Join-Path $workspaceRoot "freestock\stockdb"
+    Register-KolTask -Name "KOL_FreeStockDB_Start" -Script $freestock -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-FreeStockRoot", "`"$freeStockRoot`"") -Trigger $atLogon -Description "Start the local read-only FreeStockDB service before the KOL console." -Limit (New-TimeSpan -Minutes 5)
+    Register-KolTask -Name "KOL_UI_Start" -Script $ui -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-NoBrowser") -Trigger $atLogon -Description "Start the local KOL research console on logon." -Limit (New-TimeSpan -Hours 1)
+    Register-KolTask -Name "KOL_Nitter_Shadow_Logon" -Script $nitter -Arguments @("-RepoRoot", "`"$RepoRoot`"") -Trigger $atLogon -Description "Start Nitter as an optional shadow fallback; never the primary collector." -Limit (New-TimeSpan -Hours 2)
 }
 
-$atLogon = New-ScheduledTaskTrigger -AtLogOn
-$workspaceRoot = Split-Path -Parent $RepoRoot
-$freeStockRoot = Join-Path $workspaceRoot "freestock\stockdb"
-Register-KolTask -Name "KOL_FreeStockDB_Start" -Script $freestock -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-FreeStockRoot", "`"$freeStockRoot`"") -Trigger $atLogon -Description "Start the local read-only FreeStockDB service before the KOL console." -Limit (New-TimeSpan -Minutes 5)
-Register-KolTask -Name "KOL_UI_Start" -Script $ui -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-NoBrowser") -Trigger $atLogon -Description "Start the local KOL research console on logon." -Limit (New-TimeSpan -Hours 1)
-Register-KolTask -Name "KOL_Nitter_Shadow_Logon" -Script $nitter -Arguments @("-RepoRoot", "`"$RepoRoot`"") -Trigger $atLogon -Description "Start Nitter as an optional shadow fallback; never the primary collector." -Limit (New-TimeSpan -Hours 2)
-
-Register-KolTask -Name "KOL_Post_Fetch_Daily" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "19:00") -Description "Collect watched X KOL posts with isolated reader credentials."
-# Keep one canonical scheduled task per Zhihu time window. The API starts
-# these stable names directly, so a second alias would run the fetch twice.
-Register-KolTask -Name "KOL_Zhihu_Fetch_Morning" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "06:30") -Description "Operator entrypoint for the morning Zhihu fetch."
-Register-KolTask -Name "KOL_Zhihu_Fetch_Evening" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill") -Trigger (New-ScheduledTaskTrigger -Daily -At "18:00") -Description "Operator entrypoint for the evening Zhihu fetch before market publication."
-
-Register-KolTask -Name "KOL_Post_Fetch_Manual_X" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual X collection entrypoint."
-Register-KolTask -Name "KOL_Post_Fetch_Manual_Zhihu" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual Zhihu collection entrypoint."
-
-$morningTimes = @(@("KOL_Morning_Pipeline_0700", "07:00", "douyin"), @("KOL_Morning_Pipeline_0720", "07:20", "x"), @("KOL_Morning_Pipeline_0805", "08:05", "zhihu"), @("KOL_Morning_Pipeline_0845", "08:45", "all"))
-foreach ($item in $morningTimes) {
-    $morningArguments = @("-RepoRoot", "`"$RepoRoot`"", "-Platform", $item[2], "-FetchCount", "20")
-    if ($item[0] -eq "KOL_Morning_Pipeline_0845") { $morningArguments += "-NoFetch" }
-    Register-KolTask -Name $item[0] -Script $morning -Arguments $morningArguments -Trigger (New-ScheduledTaskTrigger -Daily -At $item[1]) -Description "Run the KOL morning review pipeline in historical market mode."
+$taskContractPath = Join-Path $PSScriptRoot "kol-task-contract.json"
+$taskContract = Get-Content -LiteralPath $taskContractPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($taskContract.owner -ne "install-kol-recovery-tasks.ps1") { throw "Unexpected KOL task owner in $taskContractPath" }
+foreach ($spec in $taskContract.tasks) {
+    $taskScript = Join-Path $PSScriptRoot ([string]$spec.script)
+    if (-not (Test-Path -LiteralPath $taskScript)) { throw "Required script not found: $taskScript" }
+    $taskArguments = @("-RepoRoot", "`"$RepoRoot`"") + @($spec.arguments)
+    Register-KolTask -Name ([string]$spec.name) -Script $taskScript -Arguments $taskArguments -Trigger (New-ScheduledTaskTrigger -Daily -At ([string]$spec.at)) -Description ([string]$spec.description)
 }
+
+Register-KolTask -Name "KOL_Post_Fetch_Manual_X" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "x", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify", "-NotifyOnCompletion") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual X collection entrypoint."
+Register-KolTask -Name "KOL_Post_Fetch_Manual_Zhihu" -Script $fetch -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "zhihu", "-FetchCount", "50", "-SkipAiPrefill", "-NoNotify", "-NotifyOnCompletion") -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)) -Description "Manual Zhihu collection entrypoint."
+
 $manualTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)
 Register-KolTask -Name "KOL_Morning_Pipeline" -Script $morning -Arguments @("-RepoRoot", "`"$RepoRoot`"", "-Platform", "all", "-FetchCount", "20") -Trigger $manualTrigger -Description "Manual operator entrypoint for the KOL morning review pipeline in historical market mode."
+
+if ($CollectionOnly) {
+    Write-Host "Installed canonical KOL collection and morning tasks from $taskContractPath."
+    exit 0
+}
 
 $classifier = Join-Path $RepoRoot "scripts\kol-post-classify.ps1"
 if (-not (Test-Path -LiteralPath $classifier)) { throw "Required script not found: $classifier" }

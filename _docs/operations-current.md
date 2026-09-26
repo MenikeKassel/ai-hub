@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-09-23.
+Status date: 2026-09-26.
 
 ## Start and inspect
 
@@ -27,14 +27,26 @@ Expected local listeners:
 - 08:45 — review-only morning finalization.
 - 09:15 — bounded OCR/model retry for the active review windows.
 - 17:50 — FreeStockDB validation/update (local D: drive).
-- 19:00 — X evening collection.
 - 18:00 — configured Zhihu evening collection, ahead of the market publication lock. The installed task on this host still runs at 19:20 until an administrator updates it.
+- 19:00 — X evening collection.
 - 19:30 — atomic daily market publication through BaoStock and fallbacks.
 - After a successful market publication — audited KOL event return update.
 - 23:30 — fallback return update if the publication-triggered run did not occur.
 
 The daily market publisher and KOL return tracker are the scheduled market write tasks. Event
 research and performance recomputation remain manual.
+`scripts/kol-task-contract.json` defines the KOL collection and morning task
+schedule. `scripts/install-kol-recovery-tasks.ps1` owns those tasks;
+`scripts/install-research-data-tasks.ps1` owns market and research tasks. The
+legacy post-fetch installer delegates collection task registration to the owner.
+Run `scripts/kol-task-doctor.ps1` after either installer or any schedule change;
+it exits 2 and lists each installed task that differs from the contract. An
+administrator must apply task changes on this host. For only the KOL tasks, run
+`scripts/install-kol-recovery-tasks.ps1 -CollectionOnly` from an administrator
+PowerShell, then rerun the doctor.
+The same read-only report warns when the live X request limits differ from the
+180/90/60 reference. The current 999999/999999/0 override is intentional;
+the doctor does not change it, and this warning alone does not fail the check.
 Evening fetches started at or after 19:00 defer stock-lead reconciliation to the
 next morning fetch so they do not wait behind market publication. The CLI also
 reports a deferred lead pass if it encounters the market file lock. Confirmed

@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 `returns_update_enabled=true` and `research_update_enabled=false`. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-09-23. Source version: 3.1.0.
+Status date: 2026-09-26. Source version: 3.1.0.
 
 ## Purpose and boundary
 
@@ -31,6 +31,27 @@ BaoStock / FreeStockDB 7899 / Tencent / AKShare ─> candidate validation ─> m
 FastAPI + built React UI: 127.0.0.1:8123
 Nitter shadow service:    127.0.0.1:9377
 ```
+
+## Operational contract
+
+The failure-to-guardrail map and remaining boundaries are in
+[`kol-architecture-guardrails.md`](kol-architecture-guardrails.md).
+
+- `scripts/kol-task-contract.json` is the desired schedule for KOL collection
+  and morning orchestration. `install-kol-recovery-tasks.ps1` is its sole task
+  owner. Market and research tasks belong to `install-research-data-tasks.ps1`.
+  The legacy post-fetch installer delegates to the owner.
+- `scripts/kol-task-doctor.ps1` compares the contract with installed Windows
+  tasks and warns on live X policy deviation. Source changes alone do not alter
+  installed triggers, actions, or the operator-approved X budget override.
+- Collection coverage counts distinct active accounts and their latest
+  successful fetch. Fetch queue rows are per batch and may repeat one account;
+  archived rows remain in SQLite for audit.
+- A market lead replay table in `posts.db` persists confirmed symbols before
+  touching DuckDB. A lock timeout or process interruption leaves those symbols
+  for the next successful reconciliation.
+- Schema changes use numbered, additive migrations. Existing databases and
+  newly created databases must both pass migration tests.
 
 ## Source layout
 
