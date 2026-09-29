@@ -8,7 +8,7 @@ from runtime_jobs import initialize_schema, owned_worker, worker_active
 from .core import FetchSummary, ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XPostProvider, XSessionUnavailableError
 from .media import download_images as _download_images_impl
 from .normalization import normalise_douyin_post, normalise_twitter_post, normalise_zhihu_answer
-from .providers import _post_provider_warning, _provider_result
+from .providers import _post_provider_warning, _provider_result, _resolve_twitter_command
 from .repository import KolPostStore
 from .rules import RuleClassifier
 
@@ -313,7 +313,27 @@ def run_post_fetch(
                 + str(session_status.get("paused_until"))
             )
         elif not ready_slots:
-            platform_blocked_errors["x"] = "no verified X session is currently available"
+            # No leaseable slot: try the sanctioned auto-recovery (whoami
+            # verification of stale/never-verified slots) before blocking the
+            # whole platform.  Still-cooling slots are left to their cooldown.
+            recovered: list[int] = []
+            try:
+                recovered = session_manager.recover_stale_slots(
+                    _resolve_twitter_command("twitter")
+                )
+            except Exception:
+                recovered = []
+            if recovered:
+                session_status = session_manager.policy_status()
+                ready_slots = [
+                    row for row in session_status.get("slots", [])
+                    if row.get("status") == "ready"
+                    and row.get("enabled")
+                    and row.get("credential_configured")
+                    and row.get("user_id")
+                ]
+            if not ready_slots:
+                platform_blocked_errors["x"] = "no verified X session is currently available"
     for kol in selected_kols:
         platform_key = str(kol.get("platform") or "X").casefold()
         platform_breakdown.setdefault(

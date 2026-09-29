@@ -285,6 +285,30 @@ class XSessionManager:
             self.finish_request(request_id, status="failed", error_code="provider_error", error="verification timed out")
             return next(item for item in self.slots() if int(item["slot_id"]) == slot_id)
 
+    def recover_stale_slots(self, command: str, *, timeout_seconds: int = 60) -> list[int]:
+        """Auto-verify slots that block collection but can be repaired.
+
+        Covers slots left in pending_verification (fresh credentials, first
+        use) or cooldown-expired without a verified identity.  Slots still
+        cooling down and manually disabled slots are never touched: verifying
+        is the sanctioned recovery (see kol-issue-ledger R-24), not a way to
+        bypass a live rate limit.  One recovered slot is enough to unblock.
+        """
+        recovered: list[int] = []
+        for row in self.slots():
+            if str(row.get("status")) == "disabled":
+                continue
+            if row.get("status") == "ready" and row.get("enabled"):
+                continue
+            if row.get("cooldown_active") or not row.get("credential_configured"):
+                continue
+            slot_id = int(row["slot_id"])
+            result = self.verify_slot(slot_id, command, timeout_seconds=timeout_seconds)
+            if str(result.get("status")) == "ready" and result.get("enabled"):
+                recovered.append(slot_id)
+                break
+        return recovered
+
     def mark_verified(self, slot_id: int, user_id: str, screen_name: str = "") -> None:
         timestamp = self._timestamp()
         with FileLock(str(self.gate_path), timeout=10):

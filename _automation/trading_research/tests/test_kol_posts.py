@@ -161,6 +161,40 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(1, slot["enabled"])
                 self.assertEqual(1, manager.batch_slot("after-cooldown", "collection"))
 
+    def test_stale_slots_auto_verify_skips_cooling_and_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            payload = {"auth_token": "a" * 20, "ct0": "b" * 20}
+            with patch.object(XSessionManager, "_read_payload", classmethod(lambda cls, slot: payload)):
+                manager = XSessionManager(store)
+                verified: list[int] = []
+
+                def fake_verify(_self, slot_id, command, **kwargs):
+                    verified.append(int(slot_id))
+                    manager.mark_verified(int(slot_id), "1001", "reader-one")
+                    return next(
+                        item for item in manager.slots() if int(item["slot_id"]) == int(slot_id)
+                    )
+
+                # Cooling-down and manually disabled slots are never verified.
+                manager.record_failure(1, "rate_limited", "429")
+                manager.record_failure(2, "rate_limited", "429")
+                with store.connect() as db:
+                    db.execute("UPDATE x_session_slots SET status='disabled',enabled=0 WHERE slot_id=3")
+                with patch.object(XSessionManager, "verify_slot", fake_verify):
+                    self.assertEqual([], manager.recover_stale_slots("twitter"))
+                self.assertEqual([], verified)
+
+                # Cooldown expired but identity missing -> one verify recovers it.
+                with store.connect() as db:
+                    db.execute(
+                        "UPDATE x_session_slots SET cooldown_until=?,user_id='',status='cooldown',enabled=0 WHERE slot_id=1",
+                        ((datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=1)).isoformat(),),
+                    )
+                with patch.object(XSessionManager, "verify_slot", fake_verify):
+                    self.assertEqual([1], manager.recover_stale_slots("twitter"))
+                self.assertEqual([1], verified)
+
     def test_verify_slot_injects_twitter_proxy_for_the_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
