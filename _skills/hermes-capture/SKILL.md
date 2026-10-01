@@ -28,3 +28,11 @@ window. Never copy browser cookies or credential values into a prompt.
 
 Return the pipeline's structured result. If `ok=false`, report the error and do
 not claim that the capture was saved.
+
+Successful captures also dual-write the Obsidian main vault (`vault_path` /
+`obsidian_inbox_dir` in `config.yaml`, e.g. `.../obsidian-vaults/00-Inbox`);
+note filename is `YYYY-MM-DD__title.md`. Directory semantics and the
+re-record procedure for fixing titles live in `hermes-capture-repair`.
+
+Health check: `python _automation/hermes-capture/hermes_capture_doctor.py`
+(expect all OK). Fetch-backend health: `backend_doctor.py` in the same folder.
