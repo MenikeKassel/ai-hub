@@ -83,6 +83,23 @@ def test_parse_auto_command_plain_text_log():
     assert parsed["note"] == "today handled hermes capture"
 
 
+def test_split_url_note_stops_at_glued_chinese_text():
+    url, note = pipeline.split_url_note(
+        "查看Ta的主页>> https://xhslink.cn/o/8CPv9jWjc06，链接加入这个时隔一年再次在全网征集好股票，集体的智慧是无穷的"
+    )
+    assert url == "https://xhslink.cn/o/8CPv9jWjc06"
+    assert url.encode("ascii")
+    assert "链接加入这个" in note
+
+    parsed = parse_message(
+        "/auto 小红书博主加入这个@trustnoone 在小红书已经有7346个粉丝，点击链接或复制口令查看Ta的主页>>"
+        " https://xhslink.cn/o/8CPv9jWjc06，链接加入这个时隔一年再次在全网征集好股票，集体的智慧是无穷的。."
+    )
+    assert parsed["command"] == "clip"
+    assert parsed["url"] == "https://xhslink.cn/o/8CPv9jWjc06"
+    assert "链接加入这个" in parsed["note"]
+
+
 def test_gateway_rewrites_raw_link_only():
     assert (
         gateway_capture_rewrite_text("share https://example.com/a", "feishu")
@@ -99,6 +116,7 @@ def test_gateway_rewrites_raw_link_only():
 def test_classify_source_type():
     assert classify_source_type("https://x.com/user/status/1") == "X"
     assert classify_source_type("https://www.zhihu.com/question/1") == "知乎"
+    assert classify_source_type("https://xhslink.cn/o/8CPv9jWjc06") == "小红书"
     assert classify_source_type(None) == "自己想法"
 
 
@@ -237,6 +255,7 @@ if __name__ == "__main__":
     test_parse_day_alias()
     test_parse_auto_raw_url_share()
     test_parse_auto_command_plain_text_log()
+    test_split_url_note_stops_at_glued_chinese_text()
     test_gateway_rewrites_raw_link_only()
     test_classify_source_type()
     test_extract_x_profile_handle()

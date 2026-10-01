@@ -26,6 +26,14 @@ from mediacrawler_runner import is_zhihu_question_page
 URL_RE = re.compile(r"https?://[^\s<>()\"']+")
 TWEET_ID_RE = re.compile(r"(?:status|statuses)/(\d+)|\b(\d{15,25})\b")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) hermes-capture/1.1"
+
+# 允许出现在（已百分号编码的）URL 中的字符；遇到其它字符即视为链接结束。
+# 背景：中文分享文案常把说明文字直接粘在链接后（"…/8CPv9jWjc06，链接加入…"），
+# 若不截断，非 ASCII 字符会混入 URL，并在 urllib 请求行 ASCII 编码处直接崩溃。
+URL_SAFE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "-._~:/?#[]@!$&'()*+,;=%"
+)
 TRAILING_URL_CHARS = ".,;:!?)]}\"'" + "\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F"
 COMMAND_ALIASES = {
     "clip": "clip",
@@ -190,8 +198,15 @@ def split_url_note(text: str) -> tuple[str | None, str]:
     if not match:
         return None, text.strip()
 
-    url = match.group(0).rstrip(TRAILING_URL_CHARS)
-    note = (text[: match.start()] + text[match.end() :]).strip()
+    raw = match.group(0)
+    cut = len(raw)
+    for index, char in enumerate(raw):
+        if char not in URL_SAFE_CHARS:
+            cut = index
+            break
+
+    url = raw[:cut].rstrip(TRAILING_URL_CHARS)
+    note = (text[: match.start()] + raw[cut:] + text[match.end() :]).strip()
     note = re.sub(r"\s+", " ", note)
     return url, note
 
@@ -1102,7 +1117,7 @@ def classify_source_type(url: str | None) -> str:
     host = urllib.parse.urlparse(url).netloc.lower()
     if "x.com" in host or "twitter.com" in host:
         return "X"
-    if "xiaohongshu.com" in host or "xhslink.com" in host:
+    if "xiaohongshu.com" in host or "xhslink.com" in host or "xhslink.cn" in host:
         return "小红书"
     if "zhihu.com" in host:
         return "知乎"
