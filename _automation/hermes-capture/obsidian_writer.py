@@ -17,24 +17,23 @@ def path_is_in_output_dir(relative_path: str, output_dir: str) -> bool:
     return relative_parts[: len(output_parts)] == output_parts
 
 
-def ensure_vault_dirs(vault_path: str) -> None:
-    for name in [
-        "00_Inbox",
-        "01_Sources",
-        "02_Concepts",
-        "03_Entities",
-        "04_Projects",
-        "05_Strategies",
-        "06_Logs",
-        "90_Archive",
-    ]:
-        Path(vault_path, name).mkdir(parents=True, exist_ok=True)
+def ensure_vault_dirs(vault_path: str, *dirs: str) -> None:
+    """Ensure only the explicitly requested dirs exist (relative to the vault).
+
+    旧版会一次性创建整套英文骨架目录（00_Inbox/01_Sources/...）；主库迁移到
+    `obsidian-vaults`（00-Inbox/01-Raw/...）后那样会污染现有结构，因此默认
+    不创建任何目录，只按调用方实际要写入的目标建目录。
+    """
+    for name in dirs:
+        clean = str(name).strip().strip("/\\")
+        if clean:
+            Path(vault_path, clean).mkdir(parents=True, exist_ok=True)
 
 
 def write_inbox_note(item: dict[str, Any], notion_url: str, config: dict[str, Any]) -> str:
     vault = Path(config["vault_path"]).resolve()
-    inbox_dir = item.get("obsidian_output_dir") or config.get("obsidian_inbox_dir", "00_Inbox")
-    ensure_vault_dirs(str(vault))
+    inbox_dir = item.get("obsidian_output_dir") or config.get("obsidian_inbox_dir", "00-Inbox")
+    ensure_vault_dirs(str(vault), str(inbox_dir))
     target_dir = (vault / str(inbox_dir)).resolve()
     if not target_dir.is_relative_to(vault):
         raise RuntimeError(f"Refusing to write outside vault: {inbox_dir}")
@@ -56,7 +55,7 @@ def overwrite_note(relative_path: str, item: dict[str, Any], notion_url: str, co
     if not path.is_relative_to(vault):
         raise RuntimeError(f"Refusing to write outside vault: {relative_path}")
 
-    ensure_vault_dirs(str(vault))
+    ensure_vault_dirs(str(vault), str(Path(relative_path).parent))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(build_markdown(item, notion_url), encoding="utf-8")
     return path.relative_to(vault).as_posix()

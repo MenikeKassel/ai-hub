@@ -92,7 +92,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "notion_database_id": os.environ.get("NOTION_DATABASE_ID", ""),
         "notion_version": "2022-06-28",
         "vault_path": "",  # 已废弃(第二大脑项目终止,2026-08-06)
-        "obsidian_inbox_dir": "00_Inbox",
+        "obsidian_inbox_dir": "00-Inbox",
         "obsidian_project_allowlist": "",
         # .env 文件列表(分号分隔)通过环境变量 NOTION_ENV_FILES 提供, 不硬编码用户路径
         "notion_env_files": os.environ.get("NOTION_ENV_FILES", ""),
@@ -522,7 +522,7 @@ def fetch_xiaohongshu_content(url: str, max_chars: int) -> dict[str, Any]:
             "author_username": "",
         }
 
-    xhs_cli = run_command(["xhs", "read", url], timeout=45)
+    xhs_cli = run_command(["xhs", "read", url], timeout=45, strip_proxy=True)
     if xhs_cli["ok"]:
         data = parse_nested_json(xhs_cli["stdout"])
         content = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
@@ -700,9 +700,16 @@ def format_mcporter_arg(key: str, value: str, quote_value: bool = False) -> str:
     return f"{key}={text}"
 
 
-def run_command(command: list[str], timeout: int = 30) -> dict[str, Any]:
+def run_command(command: list[str], timeout: int = 30, strip_proxy: bool = False) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if strip_proxy:
+        # 国内站点直连更稳（系统代理常导致 xhs 等工具失败）
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(key, None)
+    # Windows: .cmd/.bat 必须解析成全路径才可能被 CreateProcess 拉起（不查 PATHEXT）
+    resolved = shutil.which(command[0]) or command[0]
+    command = [resolved, *command[1:]]
     try:
         completed = subprocess.run(
             command,
@@ -1080,7 +1087,12 @@ def douyin_share_text_fallback(url: str, note: str, failed_fetch: dict[str, Any]
     title_text = clean
     if "】" in title_text:
         title_text = title_text.split("】", 1)[1]
-    title_text = re.split(r"复制此链接|打开抖音|https?://", title_text, maxsplit=1)[0].strip(" .。-—")
+    title_text = re.split(r"复制此链接|打开抖音|https?://", title_text, maxsplit=1)[0]
+    # 抖音口令噪声尾巴（如 "xsr:/ w@s.rE :1pm 08/21"、"Cuf:/ 12/13 :6pm W@z.te"）
+    title_text = re.sub(r"\s*[A-Za-z0-9]{2,6}:/.*$", "", title_text).strip(" .。-—")
+    if not title_text and author_match:
+        # 文案没有正文时退回用【X的(图文)作品】里的主题
+        title_text = author_match.group(0).lstrip("看看").strip("【】").strip()
     if not title_text:
         title_text = clean
     title = f"{title_text[:80]} - 抖音" if title_text else "抖音分享"

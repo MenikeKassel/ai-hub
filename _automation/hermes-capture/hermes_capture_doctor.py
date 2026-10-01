@@ -24,7 +24,9 @@ LEGACY_HOME = (
     else Path(r"C:\Users\YOUR_USER\.hermes")
 )
 PIPELINE = Path(__file__).resolve().parent / "capture_pipeline.py"
-VAULT = Path(r"F:\research")
+CONFIG_FILE = PIPELINE.parent / "config.yaml"
+DEFAULT_VAULT = Path(r"D:\aiworkspace\obsidian-vaults")
+DEFAULT_INBOX = "00-Inbox"
 
 
 def check(name: str, ok: bool, detail: str = "") -> dict[str, Any]:
@@ -38,17 +40,30 @@ def read_text(path: Path) -> str:
         return ""
 
 
-def run_python(code: str, cwd: Path, hermes_home: Path) -> tuple[int, str, str]:
+def extract_config_value(config: str, key: str) -> str:
+    match = re.search(rf'^\s*{re.escape(key)}\s*:\s*(.+?)\s*(?:#.*)?$', config, re.MULTILINE)
+    if not match:
+        return ""
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def probe_python(agent_dir: Path) -> str:
+    """插件注册探测优先用 hermes-agent 自带的 venv python（有 hermes_cli 依赖）。"""
+    candidate = agent_dir / "venv" / "Scripts" / "python.exe"
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+def run_python(code: str, cwd: Path, hermes_home: Path, python_exe: str) -> tuple[int, str, str]:
     completed = subprocess.run(
-        [sys.executable, "-c", code],
+        [python_exe, "-c", code],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=30,
+        timeout=60,
         check=False,
-        env={**__import__("os").environ, "HERMES_HOME": str(hermes_home)},
+        env={**os.environ, "HERMES_HOME": str(hermes_home)},
     )
     return completed.returncode, completed.stdout.strip(), completed.stderr.strip()
 
@@ -68,6 +83,7 @@ def inspect_hermes_home(home: Path) -> list[dict[str, Any]]:
         check(f"{home} plugin installed", (plugin_dir / "plugin.yaml").exists() and (plugin_dir / "__init__.py").exists(), str(plugin_dir)),
     ]
     if agent_dir.exists():
+        python_exe = probe_python(agent_dir)
         code = (
             "from hermes_cli.plugins import discover_plugins, get_plugin_commands, has_hook;"
             "discover_plugins(force=True);"
@@ -75,7 +91,7 @@ def inspect_hermes_home(home: Path) -> list[dict[str, Any]]:
             "print(','.join(sorted(k for k in cmds if k in {'clip','idea','readlater','log','day','auto','kol','event','concept','holding','c','i','rl','j','a','k','e','x','h'})));"
             "print('hook=' + str(has_hook('pre_gateway_dispatch')).lower())"
         )
-        rc, out, err = run_python(code, agent_dir, home)
+        rc, out, err = run_python(code, agent_dir, home, python_exe)
         lines = out.splitlines()
         expected = {
             "clip",
@@ -105,12 +121,15 @@ def inspect_hermes_home(home: Path) -> list[dict[str, Any]]:
 
 
 def inspect_pipeline() -> list[dict[str, Any]]:
+    config = read_text(CONFIG_FILE)
+    vault_value = extract_config_value(config, "vault_path")
+    inbox_dir = extract_config_value(config, "obsidian_inbox_dir") or DEFAULT_INBOX
+    vault = Path(vault_value) if vault_value else DEFAULT_VAULT
     checks = [
         check("pipeline exists", PIPELINE.exists(), str(PIPELINE)),
-        check("vault exists", VAULT.exists(), str(VAULT)),
-        check("obsidian inbox exists", (VAULT / "00_Inbox").exists(), str(VAULT / "00_Inbox")),
-        check("obsidian AGENTS exists", (VAULT / "AGENTS.md").exists(), str(VAULT / "AGENTS.md")),
-        check("obsidian index exists", (VAULT / "index.md").exists(), str(VAULT / "index.md")),
+        check("config vault_path set (obsidian 写入已启用)", bool(vault_value), vault_value or str(DEFAULT_VAULT)),
+        check("vault exists", vault.exists(), str(vault)),
+        check("obsidian inbox exists", (vault / inbox_dir).exists(), str(vault / inbox_dir)),
     ]
     return checks
 
@@ -122,7 +141,8 @@ def main() -> int:
 
     checks = []
     checks.extend(inspect_hermes_home(APPDATA_HOME))
-    checks.extend(inspect_hermes_home(LEGACY_HOME))
+    if (LEGACY_HOME / "config.yaml").exists():
+        checks.extend(inspect_hermes_home(LEGACY_HOME))
     checks.extend(inspect_pipeline())
     ok = all(item["ok"] for item in checks)
     payload = {"ok": ok, "checks": checks}
