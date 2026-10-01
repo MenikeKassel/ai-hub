@@ -14,6 +14,7 @@ def test_detect_platform():
     assert detect_platform("https://www.bilibili.com/video/BV1xx411c7mD") == "bili"
     assert detect_platform("https://v.douyin.com/abc/") == "dy"
     assert detect_platform("http://xhslink.com/o/abc") == "xhs"
+    assert detect_platform("https://xhslink.cn/o/8CPv9jWjc06") == "xhs"
     assert is_zhihu_question_page("https://www.zhihu.com/question/1") is True
     assert is_zhihu_question_page("https://www.zhihu.com/question/1/answer/2") is False
     assert is_zhihu_question_page("https://zhuanlan.zhihu.com/p/123") is False

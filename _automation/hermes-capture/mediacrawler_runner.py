@@ -241,7 +241,7 @@ def normalize_platform(value: str, values: list[str]) -> str:
 
 def detect_platform(value: str) -> str | None:
     host = urlparse(value).netloc.lower()
-    if "xiaohongshu.com" in host or "xhslink.com" in host or "rednote.com" in host:
+    if "xiaohongshu.com" in host or "xhslink.com" in host or "xhslink.cn" in host or "rednote.com" in host:
         return "xhs"
     if "douyin.com" in host or "iesdouyin.com" in host:
         return "dy"
