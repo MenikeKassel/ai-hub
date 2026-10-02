@@ -25,9 +25,11 @@ $env:ZHIHU_PROFILE_DIRECTORY = "Default"
 $env:ZHIHU_USER_DATA_DIR = Join-Path $env:LOCALAPPDATA "hermes\browser-profiles\zhihu-edge"
 $env:ZHIHU_CDP_PORT = "9223"
 $freestockStarter = Join-Path $RepoRoot "scripts\start-freestockdb.ps1"
-if (-not (Test-Path -LiteralPath $freestockStarter)) { throw "FreeStockDB starter not found: $freestockStarter" }
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $freestockStarter -RepoRoot $RepoRoot
-if ($LASTEXITCODE -ne 0) { throw "FreeStockDB did not become ready on 127.0.0.1:7899." }
+# Research UI readiness must not depend on provider startup or repair. The
+# existing FreeStockDB logon/update tasks own its lifecycle independently.
+if (-not (Test-Path -LiteralPath $freestockStarter)) {
+    Write-Warning "FreeStockDB starter is unavailable; starting the research console with market diagnostics."
+}
 
 $python = Join-Path $RepoRoot "_runtime\venv-trading\Scripts\python.exe"
 $appDirectory = Join-Path $RepoRoot "_automation\trading_research"
@@ -60,6 +62,15 @@ if (Test-Path -LiteralPath $stopRequestPath) {
     $processIds += @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique)
     try {
+        # Validate the entire set before stopping anything. An occupied port
+        # alone does not establish ownership of another application's process.
+        foreach ($processId in @($processIds | Select-Object -Unique)) {
+            $candidate = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
+            if ($candidate -and ($candidate.CommandLine -notmatch "kol_api:app" -or
+                $candidate.CommandLine -notmatch "--port\s+$Port")) {
+                throw "Refusing to stop an unmanaged process at PID $processId."
+            }
+        }
         foreach ($processId in @($processIds | Select-Object -Unique)) {
             $target = Get-Process -Id $processId -ErrorAction SilentlyContinue
             if ($target) {

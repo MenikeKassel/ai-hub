@@ -1,6 +1,6 @@
 # KOL theme radar
 
-Status date: 2026-10-02.
+Status date: 2026-10-03.
 
 ## Why a separate research layer
 
@@ -19,7 +19,9 @@ historical approval queue.
 
 - A theme match retains the exact source field, character offsets, quote,
   post identity, author, platform, and canonical source link.
-- `posted_at` is the source publication time. The earliest matching saved post
+- `posted_at` is the source publication time. `evidence_at` uses a known later
+  edit time, or the observation time for an edited body without edit metadata.
+  Earliest source selection uses this conservative evidence time. The saved post
   is labelled **库内最早命中**; the earliest original source is shown separately.
   Neither establishes the first mention anywhere on the Internet.
 - `first_detected_at` records when this index actually found the evidence.
@@ -60,6 +62,70 @@ opportunity will be observed.
 
 ## Configuration and operations
 
+Schema migration 4 preserves the original `posts` row for approval and adds
+append-only `post_observations`. Trusted versions require the same account,
+publication time within 60 seconds and sufficient provider priority. Older edit
+timestamps and older already-seen bodies cannot replace the current projection.
+Provider/parser hash changes alone are not body revisions. The version viewer
+never exposes private provider responses. Legacy recovery can recover only the
+latest snapshot still present in `post_sources`, not overwritten intermediate
+edits or a proven first-capture timestamp.
+
+`research_jobs` is an atomic SQLite outbox for post, observation and classification
+changes. The local API worker and per-account collection drain share a process
+lock; evidence, change delivery and job completion commit together. Failures
+persist with backoff. Catalog changes queue every saved post, including zero-hit
+posts. Fresh source observations are processed first. No model or market call is
+needed. The worker heartbeat and failed jobs are visible in system health.
+
+Open discovery extracts explicit industry phrases and research clauses, then
+checks noun-phrase structure with pinned Jieba POS tagging (no online model).
+It keeps precise evidence. It is a conservative rule-based proposal mechanism and can
+miss unsupported wording; it does not claim general entity extraction. Candidate
+confirmation or a manually entered topic adds a local `research_themes` entry,
+invalidates the catalog and replays the archive. Advertisements, broad recap
+lists and sentence fragments are filtered; secondary sources remain labelled.
+No candidate decision changes stock approval or market subscriptions.
+
+The October 3 content repair added 30 locally reviewed technical/industry topics
+with 33 exact terms from 14 saved source examples. Luna max checked each term
+against the full source; generalized opinions, company names and product models
+were excluded. This local vocabulary and its review provenance remain in SQLite
+and the runtime report, not Git. English acronyms require word boundaries.
+Research-summary headers and attribution before a comma retain secondary-source
+roles; a market-news recap cannot become a fresh industry call.
+
+The review page includes `research_items` for today's and next morning's 09:00
+windows: theme evidence, viewpoint changes, withdrawals, removed evidence, new
+topics and capture gaps. Historical replay is archived without active delivery.
+An edit's current observation does not backdate an alert to initial publication.
+Acknowledgement marks research read and cannot approve a formal event. A later
+successful surface capture marks its daily gap resolved while keeping the
+failure record. This adds local delivery only, without sending external messages.
+The digest uses stable ID cursors (`before_id`, `next_cursor`) and the UI can load
+older current-window items beyond the first 100 without creating a history tab.
+
+`collection_surface_runs` records each account/surface attempt, including empty
+and failed results, requested/received counts and the observed publication
+range. `bounded` and `range_complete` describe only the requested scope; neither
+proves complete history. Restored legacy metadata is labelled `legacy_snapshot`;
+where old counts were not retained, the UI says **条数未保留**, not an empty feed.
+The current account summary remains compatible; surface coverage is separate.
+
+Research startup does not start or repair FreeStockDB. Existing provider tasks
+own its lifecycle. The market store initializes on demand; a locked/unavailable
+warehouse produces 503 for market-dependent requests, while source/research
+pages remain available. `ok` stays a compatibility process-liveness field;
+`process_ready`, `business_ok`, `overall_status`, `data_status` and
+`delivery_status` expose distinct operational facts. Unknown data never becomes
+healthy solely because the API responds.
+
+Useful read APIs: `/api/research-digest`, `/api/research-index/status`,
+`/api/collection/surfaces`, `/api/posts/{post_id}/observations`, and
+`/api/theme-candidates`. Topic writes use `/api/research-themes` and
+`/api/theme-candidates/{id}/decision`; research acknowledgement uses
+`/api/research-digest/{id}/acknowledge`.
+
 The versioned `theme_catalog.json` contains explicit theme aliases and research
 associations. Adding aliases expands research discovery; it does not change
 event approval rules. Broad words such as “酒” must not collapse white spirits
@@ -71,6 +137,11 @@ a date filter. `POST /api/theme-leads/extract` replays the local index without
 requesting a market sync or model run.
 
 Summaries distinguish the earliest saved source and earliest original source.
+`first_original_*` retains the oldest authored post, including recaps and product
+mentions. The separate `first_research_*` fields select original discussion
+with analysis/forward/viewpoint evidence, excluding recaps, products, secondary
+sources and withdrawals. The card labels this **最早原创讨论**; neither proves
+a profitable opportunity or a complete research report.
 Evidence items separately classify forward discussion, recommendations,
 analysis and recaps. These are evidence categories, not automatic promotion
 or investment rankings. A direct industry observation can remain `analysis`

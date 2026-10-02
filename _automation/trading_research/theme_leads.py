@@ -13,7 +13,7 @@ from kol_posts import KolPostStore
 
 
 CATALOG_PATH = Path(__file__).with_name("theme_catalog.json")
-EXTRACTION_VERSION = "theme-evidence-v3"
+EXTRACTION_VERSION = "theme-evidence-v5"
 THEME_KINDS = {"prospective", "recommendation", "analysis", "retrospective", "product", "secondhand"}
 SOURCE_FIELDS = ("text", "article_title", "article_text", "quoted_text", "ocr_text")
 _RETROSPECTIVE = re.compile(r"回顾|复盘|早在|此前|之前|当时|上次|曾经|早就|最早|已经提|上周|上个月|前几天|提示过|提过|说过|谈过|推荐过")
@@ -28,7 +28,8 @@ _RECOMMENDATION = re.compile(r"推荐|看好|看多|看空|低吸|买入|建仓|
 _STOCK_ACTION = re.compile(r"买入|建仓|加仓|减仓|卖出|低吸|布局")
 _PRODUCT = re.compile(r"一瓶|几瓶|瓶装|口感|喝|品尝|尝了|试饮|酒体|酒液|到货|下单|买了|买过|购买|兰亭|兰庭")
 _FINANCE = re.compile(r"股票|股价|个股|板块|建仓|持仓|估值|业绩|市值|涨停|看多|看空|标的|仓位|买入")
-_SECONDHAND = re.compile(r"转述|转发|转载|摘自|据.{1,20}(?:说|介绍)|他说|她说|群友(?:说|观点)")
+_SECONDHAND = re.compile(r"转述|转发|转载|摘自|据.{1,20}(?:说|介绍)|有媒体报道|媒体报道|新闻报道|行业专家.{0,10}梳理|纪要摘要|公司公告|公告称|他说|她说|群友(?:说|观点)")
+_RESEARCH_SUMMARY = re.compile(r"^\s*【[^】\n]{2,30}】[^\n]{0,100}(?:点评|研报|纪要)")
 _WITHDRAWAL = re.compile(r"不再推荐|不推荐|不看好|没有机会|别[^。\n，,；;]{0,12}(?:买入|建仓)")
 
 
@@ -52,8 +53,13 @@ class ThemeCatalog:
         ]
 
 
-def load_theme_catalog(path: Path = CATALOG_PATH) -> ThemeCatalog:
+def load_theme_catalog(path: Path = CATALOG_PATH, *, store: KolPostStore | None = None) -> ThemeCatalog:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if store is not None:
+        with store.connect() as db:
+            custom = db.execute('SELECT * FROM research_themes ORDER BY theme_id').fetchall()
+        data['themes'] = [*data.get('themes', []), *[{'id': r['theme_id'], 'name': r['name'],
+            'terms': json.loads(r['terms_json']), 'mapped_symbols': []} for r in custom]]
     themes: list[dict[str, Any]] = []
     ids: set[str] = set()
     for raw in data.get("themes", []):
@@ -171,6 +177,12 @@ def theme_evidence(post: Mapping[str, Any], catalog: ThemeCatalog) -> list[dict[
             raw = {}
     if isinstance(raw, dict) and raw.get("source_kind") == "aggregation":
         post = {**post, "is_aggregation": True}
+    body = str(post.get('article_text') or post.get('text') or '')
+    header = body[:500]
+    external_frame = bool(_RESEARCH_SUMMARY.search(header) or (
+        re.match(r'\s*Q[：:]',header) and re.search(r'(?:^|\n)A[：:]',header)
+        and re.search(r'行业专家.{0,10}梳理|纪要摘要',header)))
+    news_recap = bool(re.search(r'A股收盘',header[:100]) and len(re.findall(r'(?:^|\n)[•●🔹]',header)) >= 3)
     fields = {field: (str(post.get(field) or ""), str(post.get(field) or "").casefold()) for field in SOURCE_FIELDS}
     leads: list[dict[str, Any]] = []
     for theme in catalog.themes:
@@ -184,6 +196,8 @@ def theme_evidence(post: Mapping[str, Any], catalog: ThemeCatalog) -> list[dict[
                 pattern = re.escape(rule["term"])
                 if rule["term"].isdigit():
                     pattern = rf"(?<!\d){pattern}(?!\d)"
+                elif re.fullmatch(r'[A-Za-z][A-Za-z0-9+/-]*',rule['term']):
+                    pattern = rf'(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])'
                 for match in re.finditer(pattern, text, flags=re.IGNORECASE):
                     start, end = _local_span(text, match.start(), match.end())
                     if rule["require_any"]:
@@ -201,7 +215,16 @@ def theme_evidence(post: Mapping[str, Any], catalog: ThemeCatalog) -> list[dict[
                         if not named or theme["id"] in named:
                             end = max(end, right)
                     context = text[start:end]
-                    role = _role(post, field, context)
+                    # Attribution can precede a comma; keep the surrounding
+                    # sentence without borrowing a different paragraph's author.
+                    sentence_start = max((text.rfind(c,0,match.start())+1 for c in '\n。！？!?；;'),default=0)
+                    attribution = text[max(sentence_start,match.start()-200):end]
+                    role = _role(post, field, attribution)
+                    if role == 'original' and external_frame:
+                        role = 'secondhand'
+                    if role == 'secondhand' and _SECONDHAND.search(attribution):
+                        start = max(sentence_start,match.start()-200)
+                        context = text[start:end]
                     kind = _kind(context, role, post)
                     evidence.append({
                         "field": field, "start": start, "end": end, "text": context,
@@ -239,6 +262,8 @@ def theme_evidence(post: Mapping[str, Any], catalog: ThemeCatalog) -> list[dict[
             for span in own
         ):
             kind = "prospective"
+        if news_recap and kind in {'analysis','prospective','recommendation'}:
+            kind = 'retrospective'
         source_role = "original" if own else selected[0]["source_role"]
         leads.append({
             "theme_id": theme["id"], "theme_name": theme["name"],
@@ -266,7 +291,7 @@ def extract_theme_leads(
     store: KolPostStore, *, catalog: ThemeCatalog | None = None,
     post_ids: list[str] | None = None, batch_size: int = 500,
 ) -> ThemeExtractionSummary:
-    catalog = catalog or load_theme_catalog()
+    catalog = catalog or load_theme_catalog(store=store)
     processed = created = updated = removed = failed = 0
     after = ""
     targets = set(post_ids) if post_ids is not None else None
@@ -295,7 +320,7 @@ def extract_theme_leads(
 
 
 def query_theme_leads(store: KolPostStore, **filters: Any) -> dict[str, Any]:
-    catalog = load_theme_catalog()
+    catalog = load_theme_catalog(store=store)
     result = store.query_theme_leads(
         query_theme_ids=catalog.search_theme_ids(str(filters.get("query") or "")), **filters,
     )

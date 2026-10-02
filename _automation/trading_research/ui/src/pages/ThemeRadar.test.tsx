@@ -114,4 +114,12 @@ describe('theme radar', () => {
     expect(await screen.findByText(/本地证据回放完成 · 读取耗时/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /批准|审批|确认/ })).not.toBeInTheDocument()
   })
+
+  it('does not use an old authored product or recap when original discussion is absent', async () => {
+    vi.spyOn(api, 'themeLeads').mockResolvedValue({ ...themeResponse, summary: [{ ...themeResponse.summary[0], first_research_posted_at: null, first_research_evidence_at: null, first_research_author_name: null, first_research_platform: null, first_research_url: null }] })
+    renderRadar()
+    expect(await screen.findByText('最早原创讨论：暂无')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '打开最早原创讨论' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /打开最早命中/ })).toHaveAttribute('href', themeResponse.summary[0].first_url)
+  })
 })

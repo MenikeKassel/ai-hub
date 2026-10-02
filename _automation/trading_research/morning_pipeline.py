@@ -197,6 +197,17 @@ class MorningPipeline:
                 except Exception as exc:
                     errors.append(f"fetch: {str(exc)[:1000]}")
 
+            # Local research delivery survives model and market degradation.
+            from research_workflow import ResearchWorkflow
+            research = ResearchWorkflow(self.post_store, now_provider=self.now_provider)
+            indexed = research.drain(limit=5000, budget_seconds=20)
+            digest = research.digest(as_of.isoformat()) if as_of == self.now_provider().date() else None
+            stages['research_indexed'] = indexed['processed']
+            stages['research_unread'] = digest['unread'] if digest else 0
+            stages['research_source_gaps'] = digest['coverage']['gap_count'] if digest else 0
+            stages['research_pending'] = research.status()['pending']
+            if indexed['failed']:
+                errors.append('research_index: local evidence remains queued for retry')
             pending = self._pending_candidates()
             morning = [
                 post for post in pending

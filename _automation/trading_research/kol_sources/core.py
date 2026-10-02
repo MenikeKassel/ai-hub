@@ -232,6 +232,8 @@ class ProviderFetchResult:
     next_cursor: str = ""
     user_id: str = ""
     exhausted: bool = False
+    coverage: dict[str, Any] = field(default_factory=dict)
+    surfaces: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class XPostProvider(Protocol):

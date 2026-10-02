@@ -124,7 +124,7 @@ class MinuteBarProvider(Protocol):
 
 
 class MarketStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, migration_timeout: float = 30):
         self.root = Path(root)
         self.raw_root = self.root / "raw"
         self.warehouse_root = self.root / "warehouse"
@@ -135,7 +135,7 @@ class MarketStore:
         self.lock_path = self.root / ".market.lock"
         for path in (self.raw_root, self.warehouse_root, self.audit_root, self.manifest_root):
             path.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        self._migrate(timeout=migration_timeout)
 
     @contextmanager
     def lock(self, *, timeout: float = 30):
@@ -158,8 +158,8 @@ class MarketStore:
             finally:
                 connection.close()
 
-    def _migrate(self) -> None:
-        with self.lock(timeout=30):
+    def _migrate(self, *, timeout: float = 30) -> None:
+        with self.lock(timeout=timeout):
             existing_version = 0
             if self.db_path.exists() and self.db_path.stat().st_size:
                 try:

@@ -12,6 +12,8 @@ from filelock import FileLock, Timeout as FileLockTimeout
 from kol_tracker import SHANGHAI, now_iso
 from runtime_jobs import initialize_schema, owned_worker, worker_active
 from .core import FetchSummary, ModelWorkerBusyError, PROVIDER_PRIORITY, PostRecord, ProviderAttempt, RuleResult, SEED_KOLS, _json, _loads, _normalise_attributed_name, _zhihu_profile_handle
+from .research_schema import RESEARCH_MIGRATION
+from .observations import record_observation, project_observation, evidence_time
 
 
 class KolPostStore:
@@ -60,7 +62,7 @@ class KolPostStore:
                     error TEXT NOT NULL DEFAULT '',
                     extracted_at TEXT NOT NULL
                 );
-            """)),
+            """), (4, RESEARCH_MIGRATION)),
         )
 
     @contextmanager
@@ -1330,6 +1332,7 @@ class KolPostStore:
             # fetches may provide fresher metrics or an alternate raw source,
             # but must never replace its正文、媒体、原始响应、摘要或内容哈希.
             if existing is not None and existing_has_content:
+                record_observation(db, post, dict(existing), timestamp)
                 db.execute(
                     """
                     UPDATE posts SET metrics_json=?,metrics_provider=?,provider_warning=?,fetched_at=?
@@ -1376,6 +1379,7 @@ class KolPostStore:
                         _json(post.raw_payload), _json(post.metrics), _json([warning] if warning else []),
                     ),
                 )
+                record_observation(db, post, None, timestamp)
                 return True
 
             existing_provider = str(existing["canonical_provider"] or "twitter-cli-legacy")
@@ -1411,6 +1415,7 @@ class KolPostStore:
                         post.fetched_at, timestamp, post.post_id,
                     ),
                 )
+            record_observation(db, post, dict(existing), timestamp)
             return False
 
     def list_post_sources(self, post_id: str) -> list[dict[str, Any]]:
@@ -1789,9 +1794,10 @@ class KolPostStore:
         clauses = [
             "p.post_id>?",
             "(e.post_id IS NULL OR e.status<>'completed' OR e.catalog_version<>? "
-            "OR e.content_hash<>p.content_hash OR e.post_updated_at<>p.updated_at "
+            "OR e.content_hash<>coalesce(o.content_hash,p.content_hash) OR e.post_updated_at<>p.updated_at "
             "OR e.classification_updated_at<>coalesce(c.updated_at,'') "
-            "OR e.ocr_text<>coalesce(c.ocr_text,'') "
+            "OR e.ocr_text<>CASE WHEN o.content_hash IS NOT NULL AND o.content_hash<>p.content_hash THEN '' ELSE coalesce(c.ocr_text,'') END "
+            "OR e.observation_id<>coalesce(o.id,0) "
             "OR e.is_aggregation<>EXISTS(SELECT 1 FROM digest_attributions d WHERE d.source_post_id=p.post_id))",
         ]
         params: list[Any] = [after_post_id, catalog_version]
@@ -1802,25 +1808,29 @@ class KolPostStore:
             rows = db.execute(
                 f"""
                 SELECT p.*,coalesce(c.ocr_text,'') AS ocr_text,
+                    coalesce(o.id,0) AS observation_id,o.snapshot_json AS observation_snapshot_json,
+                    o.fetched_at AS observation_fetched_at,o.source_updated_at AS observation_updated_at,
                     coalesce(c.updated_at,'') AS classification_updated_at,
                     c.content_type,c.evidence_type,
                     EXISTS(SELECT 1 FROM digest_attributions d WHERE d.source_post_id=p.post_id) AS is_aggregation
                 FROM posts p
                 LEFT JOIN classifications c ON c.post_id=p.post_id
                 LEFT JOIN theme_extractions e ON e.post_id=p.post_id
+                LEFT JOIN post_observation_heads h ON h.post_id=p.post_id
+                LEFT JOIN post_observations o ON o.id=h.observation_id
                 WHERE {' AND '.join(clauses)}
                 ORDER BY p.post_id LIMIT ?
                 """,
                 [*params, max(1, min(limit, 500))],
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [project_observation(dict(row)) for row in rows]
 
     @staticmethod
     def _theme_extraction_params(post: dict[str, Any], catalog_version: str) -> tuple[Any, ...]:
         return (
             str(post["post_id"]), str(post["content_hash"]), str(post["updated_at"]),
             str(post.get("classification_updated_at") or ""), str(post.get("ocr_text") or ""),
-            int(bool(post.get("is_aggregation"))), catalog_version,
+            int(bool(post.get("is_aggregation"))), catalog_version, int(post.get('observation_id') or 0),
         )
 
     def replace_theme_leads(
@@ -1845,19 +1855,19 @@ class KolPostStore:
                 INSERT INTO theme_leads(
                     post_id,theme_id,theme_name,kind,source_role,matched_terms_json,
                     evidence_json,evidence_text,claimed_timing_json,mapped_symbols_json,
-                    catalog_version,first_detected_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    catalog_version,first_detected_at,updated_at,observation_id,evidence_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(post_id,theme_id) DO UPDATE SET
                     theme_name=excluded.theme_name,kind=excluded.kind,source_role=excluded.source_role,
                     matched_terms_json=excluded.matched_terms_json,evidence_json=excluded.evidence_json,
                     evidence_text=excluded.evidence_text,claimed_timing_json=excluded.claimed_timing_json,
                     mapped_symbols_json=excluded.mapped_symbols_json,catalog_version=excluded.catalog_version,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,observation_id=excluded.observation_id,evidence_at=excluded.evidence_at
                 """,
                 (post_id, value["theme_id"], value["theme_name"], value["kind"], value["source_role"],
                  _json(value["matched_terms"]), _json(value["evidence"]), value["evidence_text"],
                  _json(value["claimed_timing"]), _json(value["mapped_symbols"]),
-                 catalog_version, timestamp, timestamp),
+                 catalog_version, timestamp, timestamp, int(post.get('observation_id') or 0), evidence_time(post)),
             )
         stale = existing - current
         if stale:
@@ -1869,13 +1879,13 @@ class KolPostStore:
             """
             INSERT INTO theme_extractions(
                 post_id,content_hash,post_updated_at,classification_updated_at,ocr_text,is_aggregation,
-                catalog_version,status,error,extracted_at
-            ) VALUES(?,?,?,?,?,?,?,'completed','',?)
+                catalog_version,observation_id,status,error,extracted_at
+            ) VALUES(?,?,?,?,?,?,?,?,'completed','',?)
             ON CONFLICT(post_id) DO UPDATE SET content_hash=excluded.content_hash,
                 post_updated_at=excluded.post_updated_at,
                 classification_updated_at=excluded.classification_updated_at,
                 ocr_text=excluded.ocr_text,is_aggregation=excluded.is_aggregation,
-                catalog_version=excluded.catalog_version,status='completed',error='',
+                catalog_version=excluded.catalog_version,observation_id=excluded.observation_id,status='completed',error='',
                 extracted_at=excluded.extracted_at
             """,
             (*self._theme_extraction_params(post, catalog_version), timestamp),
@@ -1916,8 +1926,8 @@ class KolPostStore:
             """
             INSERT INTO theme_extractions(
                 post_id,content_hash,post_updated_at,classification_updated_at,ocr_text,is_aggregation,
-                catalog_version,status,error,extracted_at
-            ) VALUES(?,?,?,?,?,?,?,'failed',?,?)
+                catalog_version,observation_id,status,error,extracted_at
+            ) VALUES(?,?,?,?,?,?,?,?,'failed',?,?)
             ON CONFLICT(post_id) DO UPDATE SET status='failed',error=excluded.error,
                 extracted_at=excluded.extracted_at
             """,
@@ -1926,7 +1936,7 @@ class KolPostStore:
 
     @staticmethod
     def _theme_lead_row(row: sqlite3.Row) -> dict[str, Any]:
-        value = dict(row)
+        value = project_observation(dict(row))
         for name in ("matched_terms", "evidence", "claimed_timing", "mapped_symbols"):
             value[name] = _loads(value.pop(f"{name}_json"), [])
         raw = _loads(value.pop("raw_json", "{}"), {})
@@ -1988,8 +1998,8 @@ class KolPostStore:
         if query.strip():
             needle = query.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             term = f"%{needle}%"
-            fields = ("l.theme_name", "l.evidence_text", "l.mapped_symbols_json", "p.text", "p.article_title",
-                      "p.article_text", "p.quoted_text", "coalesce(c.ocr_text,'')", "p.author_name",
+            fields = ("l.theme_name", "l.evidence_text", "l.mapped_symbols_json", "coalesce(json_extract(o.snapshot_json,'$.text'),p.text)", "coalesce(json_extract(o.snapshot_json,'$.article_title'),p.article_title)",
+                      "coalesce(json_extract(o.snapshot_json,'$.article_text'),p.article_text)", "coalesce(json_extract(o.snapshot_json,'$.quoted_text'),p.quoted_text)", "CASE WHEN o.content_hash IS NOT NULL AND o.content_hash<>p.content_hash THEN '' ELSE coalesce(c.ocr_text,'') END", "p.author_name",
                       "k.display_name", "p.handle", "p.quoted_author")
             search = [f"LOWER({field}) LIKE ? ESCAPE '\\'" for field in fields]
             params.extend([term] * len(fields))
@@ -2009,6 +2019,7 @@ class KolPostStore:
         joins = """
             FROM theme_leads l JOIN posts p ON p.post_id=l.post_id
             JOIN kols k ON k.id=p.kol_id LEFT JOIN classifications c ON c.post_id=p.post_id
+            LEFT JOIN post_observations o ON o.id=l.observation_id
         """
         base_where = " WHERE " + " AND ".join(clauses) if clauses else ""
         item_clauses = [*clauses]
@@ -2027,7 +2038,7 @@ class KolPostStore:
             rows = db.execute(
                 f"""
                 SELECT l.*,p.kol_id,p.author_name,p.handle,p.platform,p.url,p.posted_at,p.fetched_at,p.provider_warning,p.post_type,
-                    p.raw_json,
+                    p.raw_json,p.content_hash,o.snapshot_json AS observation_snapshot_json,
                     p.text,p.article_title,p.article_text,p.quoted_text,p.quoted_author,p.quoted_id,
                     coalesce(c.ocr_text,'') AS ocr_text,k.display_name
                 {joins} {item_where}
@@ -2039,24 +2050,36 @@ class KolPostStore:
             summaries = db.execute(
                 f"""
                 WITH base AS (
-                    SELECT l.*,p.posted_at,p.posted_at_utc,p.fetched_at,p.platform,p.handle,p.author_name,p.url
+                    SELECT l.*,p.posted_at,p.posted_at_utc,p.fetched_at,p.platform,p.handle,p.author_name,p.url,
+                        coalesce(NULLIF(l.evidence_at,''),p.posted_at) AS effective_at,
+                        (l.source_role='original' AND l.kind IN ('analysis','prospective','recommendation')
+                            AND NOT EXISTS(SELECT 1 FROM json_each(l.evidence_json) e
+                                WHERE json_extract(e.value,'$.context_role')='withdrawal')) AS is_research
                     {joins} {base_where}
                 )
                 SELECT theme_id,MAX(theme_name) AS theme_name,COUNT(*) AS post_count,
                     COUNT(DISTINCT CASE WHEN source_role='original' THEN lower(platform)||':'||lower(handle) END) AS source_count,
                     SUM(CASE WHEN source_role<>'original' THEN 1 ELSE 0 END) AS secondhand_post_count,
-                    SUM(CASE WHEN source_role='original' AND kind IN ('analysis','prospective','recommendation') THEN 1 ELSE 0 END) AS research_count,
-                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_posted_at,
-                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_post_id,
-                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_url,
-                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_author_name,
-                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_platform,
-                    (SELECT source_role FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_source_role,
-                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_posted_at,
-                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_post_id,
-                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_url,
-                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_author_name,
-                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_platform,
+                    SUM(is_research) AS research_count,
+                    MIN(effective_at) AS first_evidence_at,
+                    MIN(CASE WHEN source_role='original' THEN effective_at END) AS first_original_evidence_at,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_posted_at,
+                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_post_id,
+                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_url,
+                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_author_name,
+                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_platform,
+                    (SELECT source_role FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_source_role,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_original_posted_at,
+                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_original_post_id,
+                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_original_url,
+                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_original_author_name,
+                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_original_platform,
+                    MIN(CASE WHEN is_research THEN effective_at END) AS first_research_evidence_at,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id AND is_research ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_research_posted_at,
+                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id AND is_research ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_research_post_id,
+                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id AND is_research ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_research_url,
+                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id AND is_research ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_research_author_name,
+                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id AND is_research ORDER BY julianday(effective_at),post_id LIMIT 1) AS first_research_platform,
                     (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc) DESC,post_id DESC LIMIT 1) AS last_posted_at,
                     (SELECT fetched_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(fetched_at),post_id LIMIT 1) AS first_source_fetched_at,
                     MIN(first_detected_at) AS first_detected_at,MAX(mapped_symbols_json) AS mapped_symbols_json

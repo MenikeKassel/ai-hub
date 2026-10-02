@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink, History, Radar, RefreshCw, Search, ShieldAlert } from 'lucide-react'
 import { api, formatDate } from '../api'
 import QueryState from '../components/QueryState'
+import { TopicDiscovery, SourceVersions } from '../features/research/ResearchPanels'
 import type { ThemeLeadItem, ThemeLeadKind, ThemeLeadMappedSymbol, ThemeLeadSourceCoverage, ThemeLeadSummary, ThemeLeadSourceRole } from '../types'
 import { updateRoute, useRoute } from '../workspace'
 
@@ -142,16 +143,18 @@ function SymbolBadges({ symbols }: { symbols: ThemeLeadMappedSymbol[] }) {
 
 function ThemeCard({ summary, selected, onSelect }: { summary: ThemeLeadSummary; selected: boolean; onSelect: () => void }) {
   const sourceRole = summary.first_source_role || 'original'
-  const firstOriginalDate = summary.first_original_posted_at || (sourceRole === 'original' ? summary.first_posted_at : null)
-  const firstOriginalAuthor = summary.first_original_author_name || (sourceRole === 'original' ? summary.first_author_name : null)
-  const firstOriginalPlatform = summary.first_original_platform || (sourceRole === 'original' ? summary.first_platform : null)
-  const firstOriginalUrl = summary.first_original_url || (sourceRole === 'original' ? summary.first_url : null)
+  const researchSummary = summary.first_research_posted_at !== undefined
+  const originalLabel = researchSummary ? '最早原创讨论' : '最早原创'
+  const firstOriginalDate = researchSummary ? summary.first_research_evidence_at || summary.first_research_posted_at : summary.first_original_evidence_at || summary.first_original_posted_at || (sourceRole === 'original' ? summary.first_posted_at : null)
+  const firstOriginalAuthor = researchSummary ? summary.first_research_author_name : summary.first_original_author_name || (sourceRole === 'original' ? summary.first_author_name : null)
+  const firstOriginalPlatform = researchSummary ? summary.first_research_platform : summary.first_original_platform || (sourceRole === 'original' ? summary.first_platform : null)
+  const firstOriginalUrl = researchSummary ? summary.first_research_url : summary.first_original_url || (sourceRole === 'original' ? summary.first_url : null)
   return <article className={`theme-card ${selected ? 'selected' : ''}`}>
     <button className="theme-card-select" aria-pressed={selected} onClick={onSelect}>
       <div className="theme-card-heading"><span className="eyebrow">主题</span><strong>{summary.theme_name || summary.theme_id}</strong><span className="theme-card-count">{summary.post_count} 条</span></div>
       <div className="theme-card-facts">
-        <div><small>库内最早命中</small><strong>{safeDate(summary.first_posted_at)}</strong></div>
-        <div><small>最早原创</small><strong>{safeDate(firstOriginalDate)}</strong></div>
+        <div><small>库内最早命中</small><strong>{safeDate(summary.first_evidence_at || summary.first_posted_at)}</strong></div>
+        <div><small>{originalLabel}</small><strong>{safeDate(firstOriginalDate)}</strong></div>
         <div><small>实际首次检出</small><strong>{safeDate(summary.first_detected_at)}</strong></div>
         <div><small>研究讨论</small><strong>{summary.research_count ?? '—'}</strong></div>
       </div>
@@ -161,11 +164,11 @@ function ThemeCard({ summary, selected, onSelect }: { summary: ThemeLeadSummary;
     <div className="theme-card-origin">
       <div className="theme-card-origin-details">
         <span>最早命中：{summary.first_author_name || '未标注'}{summary.first_platform ? ` · ${summary.first_platform}` : ''} <span className="badge neutral">{sourceRoleLabels[sourceRole as ThemeLeadSourceRole] || sourceRole}</span></span>
-        <span>最早原创：{firstOriginalAuthor || '未标注'}{firstOriginalPlatform ? ` · ${firstOriginalPlatform}` : ''}</span>
+        <span>{originalLabel}：{firstOriginalAuthor || (researchSummary ? '暂无' : '未标注')}{firstOriginalPlatform ? ` · ${firstOriginalPlatform}` : ''}</span>
       </div>
       <div className="theme-card-origin-links">
         {summary.first_url ? <a href={summary.first_url} target="_blank" rel="noreferrer">打开最早命中 <ExternalLink size={12} /></a> : <span>暂无最早命中链接</span>}
-        {firstOriginalUrl ? <a href={firstOriginalUrl} target="_blank" rel="noreferrer">打开最早原创 <ExternalLink size={12} /></a> : <span>暂无最早原创链接</span>}
+        {firstOriginalUrl ? <a href={firstOriginalUrl} target="_blank" rel="noreferrer">打开{originalLabel} <ExternalLink size={12} /></a> : <span>暂无{originalLabel}链接</span>}
       </div>
     </div>
   </article>
@@ -178,6 +181,7 @@ function EvidenceDetails({ item }: { item: ThemeLeadItem }) {
     <summary>查看原文与字段证据{item.evidence?.length ? ` · ${item.evidence.length} 处` : ''}</summary>
     <div className="theme-source-evidence-body">
       <p className="theme-original-text">{body}</p>
+      <SourceVersions postId={item.post_id} />
       {!!item.article_title && <div className="theme-field"><span>{questionTitle ? '问题标题（不是回答作者观点）' : '文章标题（article_title）'}</span><p>{item.article_title}</p></div>}
       {!!item.article_text && item.article_text !== body && <div className="theme-field"><span>文章正文（article_text）</span><p>{item.article_text}</p></div>}
       {!!item.quoted_text && item.quoted_text !== body && <div className="theme-field"><span>引用正文（quoted_text）</span><p>{item.quoted_text}</p></div>}
@@ -272,8 +276,9 @@ export default function ThemeRadar() {
   const totalPages = query.data?.total_pages || 1
 
   return <section className="theme-radar-workspace">
-    <header className="page-header theme-radar-header"><div><span className="eyebrow">LOCAL THEME EVIDENCE</span><h1>主题雷达</h1><p className="page-description">按主题查看原文时间线，区分库内最早命中、最早原创、实际检出时间与来源角色。</p></div><div className="header-actions"><button className="secondary-button" disabled={extract.isPending} onClick={() => extract.mutate()}><RefreshCw size={15} className={extract.isPending ? 'spin' : ''} />{extract.isPending ? '正在回放…' : '回放本地证据'}</button></div></header>
+    <header className="page-header theme-radar-header"><div><span className="eyebrow">LOCAL THEME EVIDENCE</span><h1>主题雷达</h1><p className="page-description">按主题查看原文时间线，区分库内最早命中、最早原创讨论、实际检出时间与来源角色。</p></div><div className="header-actions"><button className="secondary-button" disabled={extract.isPending} onClick={() => extract.mutate()}><RefreshCw size={15} className={extract.isPending ? 'spin' : ''} />{extract.isPending ? '正在回放…' : '回放本地证据'}</button></div></header>
     <div className="theme-radar-warning"><ShieldAlert size={16} /><span>知乎采集范围存在缺口，无法证明全账号无提及；请核对回答/文章/想法覆盖；历史仅回答。</span></div>
+    <TopicDiscovery />
     <div className="theme-radar-toolbar panel"><label className="theme-search"><Search size={16} /><input aria-label="搜索主题、作者或原文" value={q} onChange={(event) => setFilter('q', event.target.value)} placeholder="搜索会稽山、作者、主题或原文" /></label><label><span>主题</span><select aria-label="筛选主题" value={themeId} onChange={(event) => setFilter('theme_id', event.target.value)}><option value="">全部主题</option>{summaries.map((summary) => <option key={summary.theme_id} value={summary.theme_id}>{summary.theme_name}</option>)}</select></label><label><span>种类</span><select aria-label="筛选证据种类" value={kind} onChange={(event) => setFilter('kind', event.target.value)}><option value="">全部种类</option>{kindOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label><span>KOL ID</span><input aria-label="筛选 KOL ID" inputMode="numeric" value={kolId} onChange={(event) => setFilter('kol_id', event.target.value)} placeholder="全部" /></label><label><span>从</span><input aria-label="主题证据开始日期" type="date" value={dateFrom} onChange={(event) => setFilter('date_from', event.target.value)} /></label><label><span>到</span><input aria-label="主题证据结束日期" type="date" value={dateTo} onChange={(event) => setFilter('date_to', event.target.value)} /></label><label><span>时间</span><select aria-label="主题时间顺序" value={sort} onChange={(event) => setFilter('sort', event.target.value)}><option value="newest">最近优先</option><option value="oldest">最早优先</option></select></label><button className="icon-button" title="清除主题筛选" onClick={clearFilters}><History size={16} /></button></div>
     <QueryState loading={query.isLoading} error={query.error} stale={Boolean(query.data)} />
     <div className="theme-radar-context"><span><Radar size={15} />{query.data ? `当前返回 ${query.data.total} 条证据 · 第 ${query.data.page} / ${totalPages} 页` : '正在读取主题证据'}</span><span>汇总覆盖当前主题/关键词/种类/KOL筛选下的全部历史；日期只过滤时间线。</span></div>

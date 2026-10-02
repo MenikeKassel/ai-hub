@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-10-02.
+Status date: 2026-10-03.
 
 ## Start and inspect
 
@@ -79,7 +79,8 @@ until a locally verified session is enabled; do not loop the same batch.
 
 The theme radar reads industry and company evidence independently of the
 recommendation queue. Its earliest source means the earliest matching saved
-post, while its detection time records the real local index run. A historical
+evidence, using known source-edit time or observation time for a later changed
+body, while its detection time records the real local index run. A historical
 replay never creates historical approval tasks. To rebuild only this research
 index, use `POST /api/theme-leads/extract`; it does not request model work or
 market publication. The versioned aliases and research associations are in
@@ -90,6 +91,25 @@ reported status and pagination depth before assuming account coverage. Partial
 surface failures retain successful posts and expose warnings; they do not prove
 that an author never discussed a theme. See `kol-theme-radar.md` for the source,
 time, and attribution contract.
+
+The API runs a local durable research worker, also drained with a bounded budget
+after each successful account capture and before morning finalization. It never
+calls a model or writes the market. Inspect `/api/research-index/status` for
+pending/failed jobs and `/api/collection/surfaces` for account/surface coverage.
+Original approval evidence is immutable; `/api/posts/{post_id}/observations`
+exposes safe source revisions for research. Open topic proposals and manually
+added topics are local research only, with catalog changes replaying the archive.
+The review page adds a research digest with read acknowledgements and stable
+pagination for the same two current windows.
+
+`start-kol-ui.ps1` no longer starts or repairs FreeStockDB. Provider tasks own
+its lifecycle, and the API initializes the market warehouse only when needed.
+An unavailable warehouse returns 503 for dependent requests while source and
+research pages remain usable. Managed stop requests verify every listener's
+KOL command line before stopping it. In health responses, `ok` is compatible
+process liveness; use `process_ready`, `business_ok`, `data_status` and
+`delivery_status` for the separate contracts. Unknown freshness and incomplete
+coverage remain degraded rather than becoming healthy because the API responds.
 
 ## Market maintenance
 

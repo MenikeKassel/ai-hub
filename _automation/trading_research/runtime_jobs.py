@@ -45,12 +45,14 @@ def initialize_schema(path: Path, migrate_legacy, *, migrations: tuple[tuple[int
                         (version,),
                     ).fetchone():
                         continue
-                    db.executescript(statements)
-                    db.execute(
-                        'INSERT INTO workbench_schema_migrations(version) VALUES(?)',
-                        (version,),
-                    )
-                    db.commit()
+                    try:
+                        # DDL and the version marker must survive or roll back
+                        # together; a partial ALTER cannot be safely replayed.
+                        db.executescript('BEGIN IMMEDIATE;\n' + statements +
+                            f'\nINSERT INTO workbench_schema_migrations(version) VALUES({int(version)});\nCOMMIT;')
+                    except Exception:
+                        db.rollback()
+                        raise
 
 
 def worker_paths(database: Path, kind: str) -> tuple[Path, Path]:

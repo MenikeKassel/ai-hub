@@ -169,6 +169,8 @@ export default function System({ section = 'tasks' }: { section?: SystemSection 
     {section === 'health' && <div className="health-grid">
       <HealthItem icon={Terminal} label="Hermes gateway" ok={h?.component_status?.hermes_gateway.status === 'running'} value={`${h?.component_status?.hermes_gateway.status || 'unknown'}${h?.component_status?.hermes_gateway.pid ? ` / PID ${h.component_status.hermes_gateway.pid}` : ''}`} />
       <HealthItem icon={Terminal} label="KOL operator" ok={h?.component_status?.operator.status === 'available'} value={h?.component_status?.operator.status || 'unknown'} />
+      <HealthItem icon={Database} label="研究数据覆盖" ok={h?.data_status === 'ready'} value={`${h?.data_status || 'unknown'} · 来源面缺口 ${h?.source_coverage?.gap_count ?? '—'}`} />
+      <HealthItem icon={Database} label="研究晨报索引" ok={h?.delivery_status === 'ready'} value={`${h?.delivery_status || 'unknown'} · 等待 ${h?.research_index?.pending ?? '—'} / 重试 ${h?.research_index?.failed ?? '—'}`} />
       <HealthItem icon={Terminal} label="X session pool" ok={h?.x_collection_status === 'ready'} value={`${h?.x_collection_status || 'pending_verification'} / ${h?.x_sessions?.global_remaining_24h ?? 0} global requests left`} />
       <HealthItem icon={Terminal} label="X public backup" ok={!!h?.public_backup?.enabled && !h?.public_backup?.paused_until} value={`${h?.public_backup?.enabled ? 'enabled' : 'disabled'} / ${h?.public_backup?.public_remaining_24h ?? 0} public requests left`} />
       <HealthItem icon={Database} label="Zhihu collection" ok={!!h?.zhihu_capture_available && h?.zhihu_fetch_status !== 'degraded'} value={`${h?.zhihu_active_kols || 0} active / ${h?.zhihu_paused_kols || 0} paused / ${h?.zhihu_fetch_status || 'never'}`} />

@@ -6,6 +6,21 @@ from datetime import datetime, timedelta
 from kol_tracker import SHANGHAI
 
 
+def research_health(store, market: dict) -> dict:
+    from kol_sources.coverage import surface_coverage
+    from research_workflow import ResearchWorkflow
+    coverage = surface_coverage(store)
+    index = ResearchWorkflow(store).status()
+    market_status = market.get('daily_data_status', market.get('market_status','unknown'))
+    known_bad = market_status not in {'current','checking','unknown'}
+    data_status = 'degraded' if coverage['gap_count'] or known_bad else 'ready' if market_status == 'current' else 'unknown'
+    delivery_status = 'degraded' if index['proposal_status'] == 'degraded' else index['status']
+    overall = 'degraded' if 'degraded' in {data_status,delivery_status} else 'ready' if data_status == delivery_status == 'ready' else 'pending'
+    return {'process_ready':True,'ok_scope':'process','business_ok':overall=='ready','overall_status':overall,
+        'data_status':data_status,'delivery_status':delivery_status,'research_index':index,
+        'source_coverage':{k:v for k,v in coverage.items() if k != 'items'}}
+
+
 def model_health(store, *, now: datetime | None = None) -> dict:
     current = now or datetime.now(SHANGHAI)
     cutoff = (current - timedelta(hours=24)).isoformat(timespec="seconds")

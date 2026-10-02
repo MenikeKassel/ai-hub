@@ -10,6 +10,7 @@ from .media import download_images as _download_images_impl
 from .normalization import normalise_douyin_post, normalise_twitter_post, normalise_zhihu_post
 from .providers import _post_provider_warning, _provider_result, _resolve_twitter_command
 from .repository import KolPostStore
+from .coverage import record_surfaces, normalization_gap
 from .rules import RuleClassifier
 
 
@@ -47,6 +48,8 @@ def _fetch_with_retry(
                 next_cursor=result.next_cursor,
                 user_id=result.user_id,
                 exhausted=result.exhausted,
+                coverage=result.coverage,
+                surfaces=result.surfaces,
             )
         except TwitterAuthenticationError as exc:
             if not getattr(exc, "attempts", None):
@@ -170,6 +173,7 @@ def _fetch_with_cursor_search(
                 next_cursor=latest.next_cursor,
                 user_id=latest.user_id,
                 exhausted=latest.exhausted,
+                coverage=latest.coverage, surfaces=latest.surfaces,
             )
         attempts.extend(expanded.attempts)
         warnings.extend(expanded.warnings)
@@ -185,6 +189,7 @@ def _fetch_with_cursor_search(
                 next_cursor=expanded.next_cursor,
                 user_id=expanded.user_id,
                 exhausted=expanded.exhausted,
+                coverage=expanded.coverage, surfaces=expanded.surfaces,
             )
         if len(expanded.posts) < requested * page:
             break
@@ -198,6 +203,7 @@ def _fetch_with_cursor_search(
         next_cursor=latest.next_cursor,
         user_id=latest.user_id,
         exhausted=latest.exhausted,
+        coverage=latest.coverage, surfaces=latest.surfaces,
     )
 
 
@@ -373,6 +379,8 @@ def run_post_fetch(
                 )
                 blocked_reported.add(platform)
             if not dry_run:
+                record_surfaces(store,run_id,kol,requested=max_count,
+                    surfaces=getattr(selected_provider,'surfaces',()) if platform=='zhihu' else ('timeline',),error='session_unavailable')
                 store.update_fetch_progress(
                     run_id,
                     processed_kols=index + 1,
@@ -455,6 +463,8 @@ def run_post_fetch(
             )
             if not dry_run:
                 store.record_fetch_attempts(run_id, kol["id"], kol["handle"], fetch_result.attempts)
+                record_surfaces(store, run_id, kol, result=fetch_result, requested=max_count,
+                    surfaces=getattr(selected_provider, 'surfaces', ()) if platform == 'zhihu' else ('timeline',))
                 store.record_provider_comparisons(run_id, kol["id"], fetch_result.comparisons)
             if platform == "zhihu" and fetch_result.warnings:
                 for warning in dict.fromkeys(str(item) for item in fetch_result.warnings if str(item)):
@@ -465,6 +475,7 @@ def run_post_fetch(
                 shadow_failed_kols.append(kol["handle"])
             seen_ids: list[str] = []
             seen_post_ids: set[str] = set()
+            observed_dates: dict[str,list[str]] = {}
             for payload in fetch_result.posts:
                 try:
                     if platform == "zhihu":
@@ -488,11 +499,16 @@ def run_post_fetch(
                         )
                 except ValueError as exc:
                     errors.append(f"@{kol['handle']} skipped unusable post: {exc}")
+                    if not dry_run:
+                        surface = payload.get('surface') or {'answer':'answers','article':'articles','idea':'ideas','pin':'ideas'}.get(str(payload.get('content_type') or payload.get('type') or ''),'answers' if platform=='zhihu' else 'timeline')
+                        normalization_gap(store, run_id, kol['id'], str(surface))
                     continue
                 if post.post_id in seen_post_ids:
                     continue
                 seen_post_ids.add(post.post_id)
                 seen_ids.append(post.post_id)
+                surface = {'answer':'answers','aggregation':'answers','article':'articles','idea':'ideas','pin':'ideas'}.get(post.post_type,'timeline') if platform=='zhihu' else 'timeline'
+                observed_dates.setdefault(surface,[]).append(post.posted_at)
                 created = not store.has_post(post.post_id) if dry_run else store.upsert_post(post, run_id=run_id)
                 if not dry_run and post.platform == "Zhihu" and post.post_type == "aggregation":
                     store.replace_digest_attributions(
@@ -533,6 +549,11 @@ def run_post_fetch(
                         )
                 if created and rule.is_candidate and not archive_only_backfill:
                     candidate_posts += 1
+            if not dry_run:
+                with store.connect() as db:
+                    for surface, dates in observed_dates.items():
+                        db.execute('UPDATE collection_surface_runs SET earliest_posted_at=?,latest_posted_at=? WHERE run_id=? AND kol_id=? AND surface=?',
+                            (min(dates),max(dates),run_id,kol['id'],surface))
             if fetch_result.posts and not seen_ids:
                 message = "provider returned posts but none had usable content"
                 attempts = [
@@ -622,11 +643,21 @@ def run_post_fetch(
                     else:
                         store.complete_fetch_queue_item(batch_key, int(kol["id"]))
             successful += 1
+            if not dry_run:
+                try:
+                    from research_workflow import ResearchWorkflow
+                    ResearchWorkflow(store).drain(limit=100, budget_seconds=2)
+                except Exception as exc:
+                    errors.append(f'research_index_deferred: {type(exc).__name__}')
             platform_breakdown[platform]["success"] += 1
             platform_breakdown[platform]["pending"] = max(
                 0, platform_breakdown[platform]["pending"] - 1
             )
         except Exception as exc:
+            if not dry_run:
+                record_surfaces(store, run_id, kol, requested=max_count,
+                    surfaces=getattr(selected_provider, 'surfaces', ()) if platform == 'zhihu' else ('timeline',),
+                    error='authentication_failed' if isinstance(exc, TwitterAuthenticationError) else 'capture_failed')
             attempts = list(getattr(exc, "attempts", []))
             rate_limited_this_account = isinstance(exc, TwitterRateLimitError) or any(
                 attempt.error_code == "rate_limited" for attempt in attempts

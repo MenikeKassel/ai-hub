@@ -512,6 +512,14 @@ export interface ThemeLeadSourceCoverage {
 }
 
 export interface ThemeLeadSummary {
+  first_research_evidence_at?: string | null
+  first_research_posted_at?: string | null
+  first_research_post_id?: string | null
+  first_research_url?: string | null
+  first_research_author_name?: string | null
+  first_research_platform?: string | null
+  first_evidence_at?: string
+  first_original_evidence_at?: string
   theme_id: string
   theme_name: string
   first_author_name?: string | null
@@ -1091,6 +1099,13 @@ export interface PublicBackupHealth {
 }
 
 export interface Health {
+  process_ready?: boolean
+  business_ok?: boolean
+  overall_status?: string
+  data_status?: string
+  delivery_status?: string
+  research_index?: { pending: number; failed: number; status: string }
+  source_coverage?: { target_surfaces: number; gap_count: number; status: string }
   ok: boolean
   lightweight?: boolean
   diagnostics_cached?: boolean

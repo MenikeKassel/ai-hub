@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .health_status import model_component_health
+from .health_status import model_component_health, research_health
 from .context import ApiServices
 from .dependencies import (
     Any,
@@ -255,6 +255,7 @@ def register_routes(services: ApiServices) -> None:
             "ok": True,
             "date": date.today().isoformat(),
             "lightweight": True,
+            **research_health(post_store, cached_market),
             "diagnostics_cached": bool(cached_diagnostics),
             "recovery_mode": mode.get("mode", "live"),
             "as_of": mode.get("as_of", ""),

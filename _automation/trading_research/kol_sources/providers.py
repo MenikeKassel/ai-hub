@@ -710,6 +710,9 @@ class ZhihuProfileProvider:
                 )
             ],
             warnings=list(dict.fromkeys(warnings)),
+            coverage=coverage_metadata,
+            surfaces={name: {**detail, 'received_count': len(surface_rows.get(name, {}).get('posts') or [])}
+                for name, detail in surface_metadata.items()},
         )
 
 

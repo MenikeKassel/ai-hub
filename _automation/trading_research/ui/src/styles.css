@@ -16,6 +16,15 @@
   --red-soft: #faeaea;
 }
 
+.research-panel { padding: 16px; margin: 12px 0; }
+.research-panel > summary { cursor: pointer; font-weight: 600; }
+.research-panel > p, .research-item > p { font-size: 13px; color: #596575; }
+.research-items { max-height: 440px; overflow: auto; }
+.research-item { padding: 14px 0; border-top: 1px solid #e0e5ec; overflow-wrap: anywhere; }
+.research-item blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid #ccd8ec; white-space: pre-wrap; font-size: 13px; }
+.research-item .header-actions { margin-top: 8px; flex-wrap: wrap; }
+.source-versions { margin: 12px 0; }
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #f5f6f8; }
 button, input, select, textarea { font: inherit; letter-spacing: 0; }

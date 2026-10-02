@@ -1,7 +1,9 @@
 from __future__ import annotations
 from .context import ApiServices
+from . import research_routes
+from .deferred_market import DeferredMarketStore, MarketUnavailableError
 from . import system_routes, reviews_routes, accounts_routes, performance_routes, collection_routes, market_routes, events_routes
-from .health_status import model_component_health
+from .health_status import model_component_health, research_health
 from theme_leads import extract_theme_leads
 from .dependencies import (
     Any,
@@ -111,7 +113,7 @@ def create_app(
     post_store = KolPostStore(kol_root / "posts.db", kol_root / "media")
     event_store = KolStore(kol_root)
     performance = KolPerformanceService(event_store, post_store=post_store)
-    local_market_store = MarketStore(config.runtime_root / "market")
+    local_market_store = DeferredMarketStore(config.runtime_root / "market")
     default_runtime = Path(
         os.environ.get("TRADING_RUNTIME_ROOT", ROOT / "_runtime" / "trading")
     ).resolve()
@@ -222,6 +224,10 @@ def create_app(
             logger.warning("Discovery AI scoring is unavailable: %s", exc)
 
     app = FastAPI(title="KOL Research Console", version="3.0.0")
+    from fastapi.responses import JSONResponse
+    @app.exception_handler(MarketUnavailableError)
+    async def market_unavailable(_request, exc):
+        return JSONResponse(status_code=503,content={'detail':str(exc),'component':'market'})
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
     app.state.settings = config
     app.state.post_store = post_store
@@ -1012,6 +1018,7 @@ def create_app(
             }
         return {
             "ok": True,
+            **research_health(post_store, market_component),
             "date": date.today().isoformat(),
             "recovery_mode": market_component.get("recovery_mode", "live"),
             "as_of": market_component.get("as_of", ""),
@@ -1189,6 +1196,7 @@ def create_app(
     collection_routes.register_routes(services)
     market_routes.register_routes(services)
     events_routes.register_routes(services)
+    research_routes.register_routes(services)
 
     media_mount = kol_root / "media"
     app.mount("/media", StaticFiles(directory=media_mount), name="kol-media")

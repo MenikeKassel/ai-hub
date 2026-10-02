@@ -1,6 +1,6 @@
 # KOL operational guardrails
 
-Status: 2026-09-26. Scope: local KOL collection, review, and market context.
+Status: 2026-10-03. Scope: local KOL collection, review, and market context.
 
 ## Failure pattern
 
@@ -38,6 +38,16 @@ Recent incidents were mostly contract drift, not isolated exceptions:
    cursor without changing the verified reader identity.
 
 ## Next boundaries
+
+The 2026-10-03 research repair adds schema migration 4 and small modules for
+observations, surface coverage, topic proposals, durable indexing and research
+delivery. These modules do not own formal stock decisions or market publication.
+Source approval evidence stays immutable; current source versions are projected
+only for research. Index completion and local delivery commit together. Schema
+DDL and its migration marker also commit together, avoiding partial ALTER replay.
+The API and providers have separate readiness contracts; market initialization
+is deferred and an unavailable warehouse does not block source browsing. See
+`kol-theme-radar.md` for the complete time, coverage and delivery contract.
 
 - Replace provider error-string checks with typed outcomes such as
   `rate_limited`, `transient`, `auth_required`, and `identity_unverified`.
