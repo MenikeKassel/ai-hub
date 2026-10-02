@@ -2,6 +2,7 @@ from __future__ import annotations
 from .context import ApiServices
 from . import system_routes, reviews_routes, accounts_routes, performance_routes, collection_routes, market_routes, events_routes
 from .health_status import model_component_health
+from theme_leads import extract_theme_leads
 from .dependencies import (
     Any,
     ApiSettings,
@@ -545,6 +546,7 @@ def create_app(
         }
 
     def extract_leads() -> dict[str, Any]:
+        themes = extract_theme_leads(post_store)
         result = extract_stock_leads(
             post_store,
             instruments=market_store.instrument_map(),
@@ -555,6 +557,7 @@ def create_app(
         routed = route_confirmed_leads(symbols)
         return {
             **asdict(result),
+            "theme_leads": asdict(themes),
             "reconciled_symbols": reconciled,
             **routed,
             "market_write_mode": (
@@ -563,6 +566,7 @@ def create_app(
         }
 
     def extract_leads_for_post(post_id: str) -> dict[str, Any]:
+        themes = extract_theme_leads(post_store, post_ids=[post_id])
         result = extract_stock_leads(
             post_store,
             instruments=market_store.instrument_map(),
@@ -578,6 +582,7 @@ def create_app(
         routed = route_confirmed_leads(symbols)
         return {
             **asdict(result),
+            "theme_leads": asdict(themes),
             "reconciled_symbols": reconciled,
             **routed,
             "market_write_mode": (

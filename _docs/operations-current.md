@@ -1,6 +1,6 @@
 # Current operations
 
-Status date: 2026-09-26.
+Status date: 2026-10-02.
 
 ## Start and inspect
 
@@ -76,6 +76,20 @@ the audit APIs, but they are archive-only: fetch repair, AI retry, and morning
 orchestration must not recreate a historical pending queue. A targeted X fetch
 that reports `no verified X session is currently available` remains blocked
 until a locally verified session is enabled; do not loop the same batch.
+
+The theme radar reads industry and company evidence independently of the
+recommendation queue. Its earliest source means the earliest matching saved
+post, while its detection time records the real local index run. A historical
+replay never creates historical approval tasks. To rebuild only this research
+index, use `POST /api/theme-leads/extract`; it does not request model work or
+market publication. The versioned aliases and research associations are in
+`_automation/trading_research/theme_catalog.json`.
+
+Zhihu collection now requests answers, articles, and pins. Check each surface's
+reported status and pagination depth before assuming account coverage. Partial
+surface failures retain successful posts and expose warnings; they do not prove
+that an author never discussed a theme. See `kol-theme-radar.md` for the source,
+time, and attribution contract.
 
 ## Market maintenance
 

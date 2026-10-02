@@ -1,6 +1,8 @@
 from __future__ import annotations
 import hashlib
+import html
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 from kol_tracker import SHANGHAI, now_iso
 from .core import PostRecord, _utc_and_local
@@ -119,39 +121,194 @@ def extract_zhihu_digest_attributions(text: str) -> list[dict[str, Any]]:
     return values
 
 
-def normalise_zhihu_answer(
+ZHIHU_CONTENT_TYPES = {"answer", "article", "idea"}
+
+
+def _zhihu_content_type(payload: dict[str, Any], url: str) -> str:
+    value = str(
+        payload.get("type")
+        or payload.get("contentType")
+        or payload.get("surface")
+        or ""
+    ).strip().casefold()
+    aliases = {
+        "answers": "answer",
+        "articles": "article",
+        "pins": "idea",
+        "pin": "idea",
+        "ideas": "idea",
+        "thought": "idea",
+        "thoughts": "idea",
+    }
+    value = aliases.get(value, value)
+    if value in ZHIHU_CONTENT_TYPES:
+        return value
+    if re.fullmatch(r"https://www\.zhihu\.com/question/\d+/answer/\d+", url):
+        return "answer"
+    if re.fullmatch(r"https://zhuanlan\.zhihu\.com/p/\d+", url):
+        return "article"
+    if re.fullmatch(r"https://www\.zhihu\.com/pin/\d+", url):
+        return "idea"
+    # Old answer payloads predate the explicit type field.  Preserve their
+    # compatibility while rejecting unknown new content types below.
+    if not value:
+        return "answer"
+    raise ValueError(f"unsupported Zhihu content type: {value}")
+
+
+def _zhihu_numeric_id(value: Any, content_type: str) -> str:
+    raw = str(value or "").strip()
+    prefix = f"zhihu:{content_type}:"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix) :]
+    legacy_prefix = f"{content_type}:"
+    if raw.startswith(legacy_prefix):
+        raw = raw[len(legacy_prefix) :]
+    id_pattern = r"\d{5,25}" if content_type == "answer" else r"\d{1,25}"
+    if not re.fullmatch(id_pattern, raw):
+        raise ValueError(f"Zhihu {content_type} has an invalid id")
+    return raw
+
+
+def zhihu_post_id(content_type: str, raw_id: str) -> str:
+    """Use legacy numeric IDs for answers and namespaced IDs for new feeds."""
+    if content_type == "answer":
+        return raw_id
+    return f"zhihu:{content_type}:{raw_id}"
+
+
+def _zhihu_created_value(payload: dict[str, Any]) -> str:
+    for key in ("createdAtISO", "created_at", "created_time", "created"):
+        source = payload.get(key)
+        if source in (None, "", 0):
+            continue
+        if isinstance(source, (int, float)) or re.fullmatch(r"\d+(?:\.\d+)?", str(source)):
+            try:
+                number = float(source)
+                if number > 100_000_000_000:
+                    number /= 1000
+                return datetime.fromtimestamp(number, tz=timezone.utc).isoformat(timespec="seconds")
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+        return str(source)
+    return ""
+
+
+def _zhihu_text(value: Any) -> str:
+    if isinstance(value, list):
+        pieces = []
+        for item in value:
+            if isinstance(item, dict):
+                item = item.get("content") or item.get("text") or item.get("value") or ""
+            pieces.append(_zhihu_text(item))
+        return "\n".join(piece for piece in pieces if piece).strip()
+    value = html.unescape(str(value or ""))
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"[ \t]+\n", "\n", value).strip()
+
+
+def normalise_zhihu_post(
     payload: dict[str, Any],
     kol: dict[str, Any],
     *,
     provider: str = "zhihu-local",
 ) -> PostRecord:
-    post_id = str(payload.get("id") or "").strip()
-    if not re.fullmatch(r"\d{5,25}", post_id):
-        raise ValueError("Zhihu answer has an invalid id")
-    author = payload.get("author") if isinstance(payload.get("author"), dict) else {}
-    utc_value, local_value = _utc_and_local(str(payload.get("createdAtISO") or ""))
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        raise ValueError("Zhihu answer has no usable text")
+    if not isinstance(payload, dict):
+        raise ValueError("Zhihu payload must be an object")
     url = str(payload.get("url") or "").strip()
-    if not re.fullmatch(r"https://www\.zhihu\.com/question/\d+/answer/\d+", url):
-        raise ValueError("Zhihu answer has no canonical URL")
+    content_type = _zhihu_content_type(payload, url)
+    supplied_id = payload.get("id")
+    if not supplied_id:
+        id_match = re.search(r"/(?:answer|p|pin)/(\d+)$", url)
+        supplied_id = id_match.group(1) if id_match else ""
+    raw_id = _zhihu_numeric_id(supplied_id, content_type)
+    author = payload.get("author") if isinstance(payload.get("author"), dict) else {}
+    author_name = str(author.get("name") or author.get("fullname") or "").strip()
+    author_handle = str(
+        author.get("screenName") or author.get("url_token") or author.get("screen_name") or ""
+    ).strip()
+    if not author_name and not author_handle:
+        raise ValueError(f"Zhihu {content_type} has no verified author")
+    requested_handle = str(payload.get("requestedHandle") or kol.get("handle") or "").strip()
+    mismatch = bool(payload.get("authorMismatch")) or payload.get("authorMatchesHandle") is False
+    if (
+        author_handle
+        and requested_handle
+        and author_handle.casefold() != requested_handle.casefold()
+    ):
+        mismatch = True
     tracking_mode = str(kol.get("tracking_mode") or "").strip()
+    # A direct profile feed must never silently graft a favourite/foreign row
+    # onto the requested KOL.  Aggregation feeds retain the API author because
+    # their purpose is explicitly to preserve second-hand attribution.
+    if mismatch and tracking_mode != "aggregation":
+        raise ValueError(
+            f"Zhihu {content_type} author {author_handle or author_name!r} "
+            f"does not match requested profile {requested_handle!r}"
+        )
+    text = _zhihu_text(payload.get("text"))
+    if not text:
+        raise ValueError(f"Zhihu {content_type} has no usable text")
+    canonical_patterns = {
+        "answer": r"https://www\.zhihu\.com/question/\d+/answer/\d+",
+        "article": r"https://zhuanlan\.zhihu\.com/p/\d+",
+        "idea": r"https://www\.zhihu\.com/pin/\d+",
+    }
+    if not re.fullmatch(canonical_patterns[content_type], url):
+        raise ValueError(f"Zhihu {content_type} has no canonical URL")
+    url_id_match = re.search(r"/(?:answer|p|pin)/(\d+)$", url)
+    if not url_id_match or url_id_match.group(1) != raw_id:
+        raise ValueError(f"Zhihu {content_type} id does not match its canonical URL")
+    created_value = _zhihu_created_value(payload)
+    if not created_value:
+        raise ValueError(f"Zhihu {content_type} is missing an exact timestamp")
+    try:
+        utc_value, local_value = _utc_and_local(created_value)
+    except ValueError as exc:
+        raise ValueError(f"Zhihu {content_type} has an invalid exact timestamp") from exc
     is_aggregation = tracking_mode == "aggregation"
     raw_payload = dict(payload)
+    raw_payload["type"] = content_type
+    raw_payload["surface"] = {
+        "answer": "answers",
+        "article": "articles",
+        "idea": "ideas",
+    }[content_type]
     raw_payload["source_kind"] = "aggregation" if is_aggregation else "direct_profile"
     raw_payload["attributions"] = extract_zhihu_digest_attributions(text) if is_aggregation else []
-    hash_input = "\n".join([post_id, text, str(payload.get("articleTitle") or "")]).encode("utf-8")
+    post_id = zhihu_post_id(content_type, raw_id)
+    hash_input = "\n".join(
+        [post_id, content_type, url, text, str(payload.get("articleTitle") or "")]
+    ).encode("utf-8")
+    provider_warning = "secondhand_aggregation" if is_aggregation else ""
+    profile_warnings = [
+        str(item).strip()
+        for item in payload.get("profile_warnings") or []
+        if str(item).strip()
+    ]
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    coverage_status = str(coverage.get("status") or "").casefold()
+    if profile_warnings:
+        provider_warning = ";".join(
+            filter(None, [provider_warning, *dict.fromkeys(profile_warnings)])
+        )
+    elif "coverage" in payload and coverage_status == "complete":
+        # Keep an explicit current-run state for the UI.  A bounded run is
+        # represented by raw coverage metadata and remains warning-free.
+        provider_warning = ";".join(filter(None, [provider_warning, "coverage:complete"]))
+    if mismatch and is_aggregation:
+        provider_warning = ";".join(filter(None, [provider_warning, "author_mismatch_retained"]))
+    post_type = "aggregation" if is_aggregation and content_type == "answer" else content_type
     return PostRecord(
         post_id=post_id,
         kol_id=int(kol["id"]),
         platform="Zhihu",
         handle=str(kol["handle"]),
-        author_name=str(author.get("name") or kol.get("display_name") or kol["handle"]),
+        author_name=author_name or author_handle,
         url=url,
         text=text,
-        article_title=str(payload.get("articleTitle") or ""),
-        article_text="",
+        article_title=str(payload.get("articleTitle") or payload.get("title") or ""),
+        article_text=text if content_type == "article" else str(payload.get("articleText") or ""),
         quoted_id="",
         quoted_text="",
         quoted_author="",
@@ -159,17 +316,27 @@ def normalise_zhihu_answer(
         reply_to_author="",
         posted_at=local_value,
         posted_at_utc=utc_value,
-        post_type="aggregation" if is_aggregation else "answer",
+        post_type=post_type,
         language=str(payload.get("lang") or "zh-CN"),
-        media=[],
+        media=list(payload.get("media") or []) if isinstance(payload.get("media"), list) else [],
         metrics=dict(payload.get("metrics") or {}),
         raw_payload=raw_payload,
         content_hash=hashlib.sha256(hash_input).hexdigest(),
         fetched_at=now_iso(),
         canonical_provider=provider,
         metrics_provider=provider,
-        provider_warning="secondhand_aggregation" if is_aggregation else "",
+        provider_warning=provider_warning,
     )
+
+
+def normalise_zhihu_answer(
+    payload: dict[str, Any],
+    kol: dict[str, Any],
+    *,
+    provider: str = "zhihu-local",
+) -> PostRecord:
+    """Backward-compatible answer entry point; explicit new types dispatch too."""
+    return normalise_zhihu_post(payload, kol, provider=provider)
 
 
 def normalise_douyin_post(

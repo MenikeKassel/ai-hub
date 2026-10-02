@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 
-export type Workspace = 'reviews' | 'events' | 'kols' | 'history' | 'system'
+export type Workspace = 'reviews' | 'events' | 'kols' | 'history' | 'themes' | 'system'
 const dirtyEditors = new Set<symbol>()
 let acceptedHash = window.location.hash
 let permittedHash = ''
@@ -10,10 +10,10 @@ export function parseRoute(hash: string) {
   const params = new URLSearchParams(search)
   const aliases: Record<string, [Workspace, string?]> = {
     overview: ['reviews'], backtests: ['events', 'returns'], performance: ['kols', 'performance'],
-    discovery: ['kols', 'discovery'], leads: ['history'], market: ['system', 'health'],
+    discovery: ['kols', 'discovery'], leads: ['history'], 'theme-radar': ['themes'], themes: ['themes'], market: ['system', 'health'],
   }
   const alias = aliases[path]
-  const workspace = alias?.[0] || (['reviews', 'events', 'kols', 'history', 'system'].includes(path) ? path as Workspace : 'reviews')
+  const workspace = alias?.[0] || (['reviews', 'events', 'kols', 'history', 'themes', 'system'].includes(path) ? path as Workspace : 'reviews')
   if (alias?.[1]) params.set('tab', alias[1])
   return { workspace, params }
 }

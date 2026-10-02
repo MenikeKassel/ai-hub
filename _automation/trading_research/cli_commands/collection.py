@@ -625,6 +625,9 @@ def kol_post_fetch(context: ModuleType, args: argparse.Namespace) -> None:
         batch_key=batch_key,
         fresh_first_page=bool(getattr(args, "fresh_first_page", False)),
     )
+    # Themes are local text evidence. Persist them before optional AI work and
+    # even when stock extraction is skipped or the market database is locked.
+    theme_payload = context._extract_theme_leads(store) if not args.dry_run else {}
     codex_completed = codex_failed = 0
     if not args.dry_run and not args.skip_classify:
         codex_completed, codex_failed = context.classify_pending_with_codex(
@@ -652,6 +655,7 @@ def kol_post_fetch(context: ModuleType, args: argparse.Namespace) -> None:
         "dry_run": args.dry_run,
         "fallback_mode": context._fallback_mode(),
         "stock_leads": lead_payload,
+        "theme_leads": theme_payload,
     }
     if args.notify and not args.alerts_only:
         digest = (

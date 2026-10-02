@@ -28,7 +28,39 @@ class KolPostStore:
                     symbol TEXT PRIMARY KEY,
                     queued_at TEXT NOT NULL
                 );
-            """),),
+            """), (3, """
+                CREATE TABLE IF NOT EXISTS theme_leads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    post_id TEXT NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+                    theme_id TEXT NOT NULL,
+                    theme_name TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('prospective','recommendation','analysis','retrospective','product','secondhand')),
+                    source_role TEXT NOT NULL CHECK(source_role IN ('original','quoted','secondhand','aggregation')),
+                    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    evidence_text TEXT NOT NULL DEFAULT '',
+                    claimed_timing_json TEXT NOT NULL DEFAULT '[]',
+                    mapped_symbols_json TEXT NOT NULL DEFAULT '[]',
+                    catalog_version TEXT NOT NULL,
+                    first_detected_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(post_id,theme_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_theme_leads_theme ON theme_leads(theme_id,post_id);
+                CREATE INDEX IF NOT EXISTS idx_theme_leads_kind ON theme_leads(kind,source_role,post_id);
+                CREATE TABLE IF NOT EXISTS theme_extractions (
+                    post_id TEXT PRIMARY KEY REFERENCES posts(post_id) ON DELETE CASCADE,
+                    content_hash TEXT NOT NULL,
+                    post_updated_at TEXT NOT NULL,
+                    classification_updated_at TEXT NOT NULL,
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    is_aggregation INTEGER NOT NULL DEFAULT 0,
+                    catalog_version TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('completed','failed')),
+                    error TEXT NOT NULL DEFAULT '',
+                    extracted_at TEXT NOT NULL
+                );
+            """)),
         )
 
     @contextmanager
@@ -1747,6 +1779,302 @@ class KolPostStore:
                     now_iso(),
                 ),
             )
+
+    def list_posts_for_theme_extraction(
+        self, catalog_version: str, *, after_post_id: str = "",
+        post_ids: set[str] | None = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if post_ids is not None and not post_ids:
+            return []
+        clauses = [
+            "p.post_id>?",
+            "(e.post_id IS NULL OR e.status<>'completed' OR e.catalog_version<>? "
+            "OR e.content_hash<>p.content_hash OR e.post_updated_at<>p.updated_at "
+            "OR e.classification_updated_at<>coalesce(c.updated_at,'') "
+            "OR e.ocr_text<>coalesce(c.ocr_text,'') "
+            "OR e.is_aggregation<>EXISTS(SELECT 1 FROM digest_attributions d WHERE d.source_post_id=p.post_id))",
+        ]
+        params: list[Any] = [after_post_id, catalog_version]
+        if post_ids is not None:
+            clauses.append(f"p.post_id IN ({','.join('?' for _ in post_ids)})")
+            params.extend(sorted(post_ids))
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT p.*,coalesce(c.ocr_text,'') AS ocr_text,
+                    coalesce(c.updated_at,'') AS classification_updated_at,
+                    c.content_type,c.evidence_type,
+                    EXISTS(SELECT 1 FROM digest_attributions d WHERE d.source_post_id=p.post_id) AS is_aggregation
+                FROM posts p
+                LEFT JOIN classifications c ON c.post_id=p.post_id
+                LEFT JOIN theme_extractions e ON e.post_id=p.post_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY p.post_id LIMIT ?
+                """,
+                [*params, max(1, min(limit, 500))],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _theme_extraction_params(post: dict[str, Any], catalog_version: str) -> tuple[Any, ...]:
+        return (
+            str(post["post_id"]), str(post["content_hash"]), str(post["updated_at"]),
+            str(post.get("classification_updated_at") or ""), str(post.get("ocr_text") or ""),
+            int(bool(post.get("is_aggregation"))), catalog_version,
+        )
+
+    def replace_theme_leads(
+        self, post: dict[str, Any], leads: list[dict[str, Any]], catalog_version: str,
+    ) -> dict[str, int]:
+        """Replace one post's evidence and extraction marker in one transaction."""
+        with self.connect() as db:
+            return self._replace_theme_leads_in_connection(db, post, leads, catalog_version, now_iso())
+
+    def _replace_theme_leads_in_connection(
+        self, db: sqlite3.Connection, post: dict[str, Any], leads: list[dict[str, Any]],
+        catalog_version: str, timestamp: str,
+    ) -> dict[str, int]:
+        post_id = str(post["post_id"])
+        existing = {str(row["theme_id"]) for row in db.execute(
+            "SELECT theme_id FROM theme_leads WHERE post_id=?", (post_id,),
+        ).fetchall()}
+        current = {str(value["theme_id"]) for value in leads}
+        for value in leads:
+            db.execute(
+                """
+                INSERT INTO theme_leads(
+                    post_id,theme_id,theme_name,kind,source_role,matched_terms_json,
+                    evidence_json,evidence_text,claimed_timing_json,mapped_symbols_json,
+                    catalog_version,first_detected_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(post_id,theme_id) DO UPDATE SET
+                    theme_name=excluded.theme_name,kind=excluded.kind,source_role=excluded.source_role,
+                    matched_terms_json=excluded.matched_terms_json,evidence_json=excluded.evidence_json,
+                    evidence_text=excluded.evidence_text,claimed_timing_json=excluded.claimed_timing_json,
+                    mapped_symbols_json=excluded.mapped_symbols_json,catalog_version=excluded.catalog_version,
+                    updated_at=excluded.updated_at
+                """,
+                (post_id, value["theme_id"], value["theme_name"], value["kind"], value["source_role"],
+                 _json(value["matched_terms"]), _json(value["evidence"]), value["evidence_text"],
+                 _json(value["claimed_timing"]), _json(value["mapped_symbols"]),
+                 catalog_version, timestamp, timestamp),
+            )
+        stale = existing - current
+        if stale:
+            db.executemany(
+                "DELETE FROM theme_leads WHERE post_id=? AND theme_id=?",
+                [(post_id, theme_id) for theme_id in stale],
+            )
+        db.execute(
+            """
+            INSERT INTO theme_extractions(
+                post_id,content_hash,post_updated_at,classification_updated_at,ocr_text,is_aggregation,
+                catalog_version,status,error,extracted_at
+            ) VALUES(?,?,?,?,?,?,?,'completed','',?)
+            ON CONFLICT(post_id) DO UPDATE SET content_hash=excluded.content_hash,
+                post_updated_at=excluded.post_updated_at,
+                classification_updated_at=excluded.classification_updated_at,
+                ocr_text=excluded.ocr_text,is_aggregation=excluded.is_aggregation,
+                catalog_version=excluded.catalog_version,status='completed',error='',
+                extracted_at=excluded.extracted_at
+            """,
+            (*self._theme_extraction_params(post, catalog_version), timestamp),
+        )
+        return {"created": len(current - existing), "updated": len(current & existing), "removed": len(stale)}
+
+    def replace_theme_leads_batch(
+        self, values: list[tuple[dict[str, Any], list[dict[str, Any]]]], catalog_version: str,
+    ) -> dict[str, int]:
+        totals = {"created": 0, "updated": 0, "removed": 0, "failed": 0}
+        with self.connect() as db:
+            # An outer transaction is required: releasing an outermost SQLite
+            # savepoint would otherwise commit every post independently.
+            db.execute("BEGIN IMMEDIATE")
+            timestamp = now_iso()
+            for post, leads in values:
+                db.execute("SAVEPOINT theme_post")
+                try:
+                    result = self._replace_theme_leads_in_connection(db, post, leads, catalog_version, timestamp)
+                    for key, count in result.items():
+                        totals[key] += count
+                except Exception as exc:
+                    db.execute("ROLLBACK TO SAVEPOINT theme_post")
+                    self._mark_theme_extraction_failed_in_connection(db, post, catalog_version, str(exc), timestamp)
+                    totals["failed"] += 1
+                finally:
+                    db.execute("RELEASE SAVEPOINT theme_post")
+        return totals
+
+    def mark_theme_extraction_failed(self, post: dict[str, Any], catalog_version: str, error: str) -> None:
+        with self.connect() as db:
+            self._mark_theme_extraction_failed_in_connection(db, post, catalog_version, error, now_iso())
+
+    def _mark_theme_extraction_failed_in_connection(
+        self, db: sqlite3.Connection, post: dict[str, Any], catalog_version: str, error: str, timestamp: str,
+    ) -> None:
+        db.execute(
+            """
+            INSERT INTO theme_extractions(
+                post_id,content_hash,post_updated_at,classification_updated_at,ocr_text,is_aggregation,
+                catalog_version,status,error,extracted_at
+            ) VALUES(?,?,?,?,?,?,?,'failed',?,?)
+            ON CONFLICT(post_id) DO UPDATE SET status='failed',error=excluded.error,
+                extracted_at=excluded.extracted_at
+            """,
+            (*self._theme_extraction_params(post, catalog_version), error[:2000], timestamp),
+        )
+
+    @staticmethod
+    def _theme_lead_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        for name in ("matched_terms", "evidence", "claimed_timing", "mapped_symbols"):
+            value[name] = _loads(value.pop(f"{name}_json"), [])
+        raw = _loads(value.pop("raw_json", "{}"), {})
+        raw = raw if isinstance(raw, dict) else {}
+        value["source_surface"] = None
+        value["source_coverage"] = None
+        if value.get("platform") == "Zhihu":
+            value["source_surface"] = str(raw.get("surface") or {"article": "articles", "idea": "ideas"}.get(value["post_type"], "answers"))
+            coverage = raw.get("profile_coverage") or raw.get("coverage")
+            allowed = ("status", "complete", "bounded", "historical_complete", "requested_surfaces",
+                       "successful_surfaces", "failed_surfaces", "limit_per_surface", "note")
+            value["source_coverage"] = {
+                key: item for key, item in coverage.items()
+                if key in allowed and isinstance(item, (str, int, float, bool, list))
+            } if isinstance(coverage, dict) and coverage else {
+                "status": "legacy_answers_only", "historical_complete": False,
+                "requested_surfaces": ["answers"],
+            }
+            surfaces: dict[str, dict[str, Any]] = {}
+            raw_surfaces = raw.get("surfaces")
+            for surface, detail in (raw_surfaces.items() if isinstance(raw_surfaces, dict) else []):
+                if surface not in {"answers", "articles", "ideas"} or not isinstance(detail, dict):
+                    continue
+                status = detail.get("status")
+                summary = {"status": status if isinstance(status, str) and status in {"success", "partial", "failed", "unsupported", "empty", "bounded", "complete"} else "unknown"}
+                for key in ("bounded", "exhausted", "partial"):
+                    if isinstance(detail.get(key), bool):
+                        summary[key] = detail[key]
+                if isinstance(detail.get("pages"), int) and not isinstance(detail["pages"], bool):
+                    summary["pages"] = detail["pages"]
+                warnings = detail.get("warnings")
+                summary["warnings"] = [item for item in warnings if isinstance(item, str)] if isinstance(warnings, list) else []
+                if summary["status"] == "success":
+                    summary["status"] = "partial" if summary.get("partial") else "bounded" if summary.get("bounded") else "complete" if summary.get("exhausted") else "success"
+                surfaces[surface] = summary
+            if surfaces:
+                value["source_coverage"]["surfaces"] = surfaces
+        value["source_updated_at"] = None
+        for key in ("updatedAtISO", "updated_at", "updated"):
+            source = raw.get(key)
+            if not isinstance(source, str):
+                continue
+            try:
+                datetime.fromisoformat(source.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            value["source_updated_at"] = source
+            break
+        return value
+
+    def query_theme_leads(
+        self, *, query: str = "", query_theme_ids: list[str] | None = None,
+        theme_id: str = "", kind: str = "", kol_id: int | None = None,
+        date_from: str = "", date_to: str = "", page: int = 1, page_size: int = 50,
+        sort: str = "newest",
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if query.strip():
+            needle = query.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            term = f"%{needle}%"
+            fields = ("l.theme_name", "l.evidence_text", "l.mapped_symbols_json", "p.text", "p.article_title",
+                      "p.article_text", "p.quoted_text", "coalesce(c.ocr_text,'')", "p.author_name",
+                      "k.display_name", "p.handle", "p.quoted_author")
+            search = [f"LOWER({field}) LIKE ? ESCAPE '\\'" for field in fields]
+            params.extend([term] * len(fields))
+            if query_theme_ids:
+                search.append(f"l.theme_id IN ({','.join('?' for _ in query_theme_ids)})")
+                params.extend(query_theme_ids)
+            clauses.append(f"({' OR '.join(search)})")
+        if theme_id:
+            clauses.append("l.theme_id=?")
+            params.append(theme_id)
+        if kind:
+            clauses.append("l.kind=?")
+            params.append(kind)
+        if kol_id is not None:
+            clauses.append("p.kol_id=?")
+            params.append(kol_id)
+        joins = """
+            FROM theme_leads l JOIN posts p ON p.post_id=l.post_id
+            JOIN kols k ON k.id=p.kol_id LEFT JOIN classifications c ON c.post_id=p.post_id
+        """
+        base_where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        item_clauses = [*clauses]
+        item_params = [*params]
+        if date_from:
+            item_clauses.append("substr(p.posted_at,1,10)>=?")
+            item_params.append(date_from)
+        if date_to:
+            item_clauses.append("substr(p.posted_at,1,10)<=?")
+            item_params.append(date_to)
+        item_where = " WHERE " + " AND ".join(item_clauses) if item_clauses else ""
+        safe_page, safe_size = max(1, page), max(1, min(page_size, 100))
+        order = "ASC" if sort == "oldest" else "DESC"
+        with self.connect() as db:
+            total = int(db.execute(f"SELECT COUNT(*) {joins} {item_where}", item_params).fetchone()[0])
+            rows = db.execute(
+                f"""
+                SELECT l.*,p.kol_id,p.author_name,p.handle,p.platform,p.url,p.posted_at,p.fetched_at,p.provider_warning,p.post_type,
+                    p.raw_json,
+                    p.text,p.article_title,p.article_text,p.quoted_text,p.quoted_author,p.quoted_id,
+                    coalesce(c.ocr_text,'') AS ocr_text,k.display_name
+                {joins} {item_where}
+                ORDER BY p.posted_at_utc {order},p.post_id {order},l.id {order} LIMIT ? OFFSET ?
+                """, [*item_params, safe_size, (safe_page - 1) * safe_size],
+            ).fetchall()
+            # Dates only filter the evidence page. The theme summary retains
+            # the earliest local source across the entire matching inventory.
+            summaries = db.execute(
+                f"""
+                WITH base AS (
+                    SELECT l.*,p.posted_at,p.posted_at_utc,p.fetched_at,p.platform,p.handle,p.author_name,p.url
+                    {joins} {base_where}
+                )
+                SELECT theme_id,MAX(theme_name) AS theme_name,COUNT(*) AS post_count,
+                    COUNT(DISTINCT CASE WHEN source_role='original' THEN lower(platform)||':'||lower(handle) END) AS source_count,
+                    SUM(CASE WHEN source_role<>'original' THEN 1 ELSE 0 END) AS secondhand_post_count,
+                    SUM(CASE WHEN source_role='original' AND kind IN ('analysis','prospective','recommendation') THEN 1 ELSE 0 END) AS research_count,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_posted_at,
+                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_post_id,
+                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_url,
+                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_author_name,
+                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_platform,
+                    (SELECT source_role FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_source_role,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_posted_at,
+                    (SELECT post_id FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_post_id,
+                    (SELECT url FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_url,
+                    (SELECT author_name FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_author_name,
+                    (SELECT platform FROM base b WHERE b.theme_id=s.theme_id AND source_role='original' ORDER BY julianday(posted_at_utc),post_id LIMIT 1) AS first_original_platform,
+                    (SELECT posted_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(posted_at_utc) DESC,post_id DESC LIMIT 1) AS last_posted_at,
+                    (SELECT fetched_at FROM base b WHERE b.theme_id=s.theme_id ORDER BY julianday(fetched_at),post_id LIMIT 1) AS first_source_fetched_at,
+                    MIN(first_detected_at) AS first_detected_at,MAX(mapped_symbols_json) AS mapped_symbols_json
+                FROM base s GROUP BY theme_id ORDER BY last_posted_at DESC,theme_id
+                """, params,
+            ).fetchall()
+        summary = []
+        for row in summaries:
+            value = dict(row)
+            value["mapped_symbols"] = _loads(value.pop("mapped_symbols_json"), [])
+            value["original_source_count"] = value["source_count"]
+            value["first_fetched_at"] = value["first_source_fetched_at"]
+            summary.append(value)
+        return {
+            "summary": summary, "items": [self._theme_lead_row(row) for row in rows],
+            "total": total, "page": safe_page, "page_size": safe_size,
+            "total_pages": (total + safe_size - 1) // safe_size,
+        }
 
     def upsert_stock_lead(self, value: dict[str, Any]) -> bool:
         timestamp = now_iso()

@@ -355,6 +355,170 @@ class TwitterCliProvider:
         )
 
 
+ZHIHU_PROFILE_SURFACES = ("answers", "articles", "ideas")
+
+
+def _normalise_zhihu_surfaces(value: tuple[str, ...] | list[str] | str | None) -> tuple[str, ...]:
+    aliases = {
+        "answer": "answers",
+        "answers": "answers",
+        "article": "articles",
+        "articles": "articles",
+        "idea": "ideas",
+        "ideas": "ideas",
+        "pin": "ideas",
+        "pins": "ideas",
+    }
+    values = value.replace(";", ",").split(",") if isinstance(value, str) else list(value or ZHIHU_PROFILE_SURFACES)
+    if any(str(raw or "").strip().casefold() == "all" for raw in values):
+        values = list(ZHIHU_PROFILE_SURFACES)
+    result: list[str] = []
+    for raw in values:
+        name = str(raw or "").strip().casefold()
+        if not name:
+            continue
+        canonical = aliases.get(name)
+        if canonical and canonical not in result:
+            result.append(canonical)
+        elif not canonical:
+            raise ValueError(f"unsupported Zhihu profile surface: {name}")
+    return tuple(result or ZHIHU_PROFILE_SURFACES)
+
+
+def _zhihu_payload_identity(item: dict[str, Any]) -> str:
+    content_type = str(item.get("type") or "").strip().casefold()
+    surface = str(item.get("surface") or "").strip().casefold()
+    url = str(item.get("url") or "").strip().casefold()
+    content_type = {
+        "answers": "answer",
+        "articles": "article",
+        "ideas": "idea",
+        "pin": "idea",
+        "pins": "idea",
+    }.get(content_type, content_type)
+    if not content_type:
+        content_type = {
+            "answers": "answer",
+            "articles": "article",
+            "ideas": "idea",
+        }.get(surface, "answer")
+    if content_type == "answer" and not surface:
+        if "zhuanlan.zhihu.com/p/" in url:
+            content_type = "article"
+        elif "www.zhihu.com/pin/" in url:
+            content_type = "idea"
+    raw_id = str(item.get("id") or "").strip()
+    return f"{content_type}:{raw_id}" if raw_id else f"{content_type}:{url}"
+
+
+def _dedupe_zhihu_payloads(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _zhihu_payload_identity(item)
+        if key.endswith(":") or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _zhihu_coverage_metadata(value: Any) -> dict[str, Any]:
+    """Keep the profile coverage state without copying the post arrays."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = (
+        "status",
+        "complete",
+        "bounded",
+        "historical_complete",
+        "requested_surfaces",
+        "successful_surfaces",
+        "failed_surfaces",
+        "limit_per_surface",
+        "note",
+    )
+    metadata: dict[str, Any] = {}
+    for key in allowed:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, list):
+            metadata[key] = [str(entry) for entry in item]
+        elif isinstance(item, (str, int, float, bool)) or item is None:
+            metadata[key] = item
+    return metadata
+
+
+def _zhihu_surface_metadata(value: Any) -> dict[str, dict[str, Any]]:
+    """Return per-surface state while deliberately dropping ``posts``."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = ("status", "warnings", "pages", "exhausted", "partial", "bounded")
+    metadata: dict[str, dict[str, Any]] = {}
+    for surface, raw in value.items():
+        if not isinstance(raw, dict):
+            continue
+        summary: dict[str, Any] = {}
+        for key in allowed:
+            if key not in raw:
+                continue
+            item = raw[key]
+            if key == "warnings":
+                summary[key] = [str(entry) for entry in item] if isinstance(item, list) else []
+            elif isinstance(item, (str, int, float, bool)) or item is None:
+                summary[key] = item
+        metadata[str(surface)] = summary
+    return metadata
+
+
+def _zhihu_problem_warnings(
+    payload_warnings: Any,
+    coverage: dict[str, Any],
+    surfaces: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Extract actionable gaps for each retained post.
+
+    A bounded limit is represented by the coverage metadata alone.  It must
+    not become a provider warning which makes a normal bounded freshness pass
+    look like a failed post.
+    """
+    result: list[str] = []
+
+    def add(value: Any) -> None:
+        warning = str(value or "").strip()
+        lowered = warning.casefold()
+        if not warning or "bounded_limit_reached" in lowered or lowered in {
+            "coverage:bounded",
+            "bounded",
+        }:
+            return
+        if warning not in result:
+            result.append(warning)
+
+    coverage_status = str(coverage.get("status") or "").casefold()
+    if coverage_status in {"failed", "unsupported", "partial"}:
+        add(f"coverage:{coverage_status}")
+    for surface, raw in surfaces.items():
+        status = str(raw.get("status") or "").casefold()
+        if status in {"failed", "unsupported", "partial"}:
+            add(f"surface:{surface}:{status}")
+            for warning in raw.get("warnings") or []:
+                add(f"surface:{surface}:{warning}")
+    for warning in payload_warnings or []:
+        clean = str(warning or "").strip()
+        lowered = clean.casefold()
+        # An empty surface is valid evidence of no rows and is kept in the
+        # run-level warnings for compatibility, but is not a per-post gap.
+        if not clean or "bounded_limit_reached" in lowered or lowered in {
+            "coverage:bounded",
+            "bounded",
+        } or lowered.endswith(":empty"):
+            continue
+        add(clean)
+    return result
+
+
 class ZhihuProfileProvider:
     name = "zhihu-local"
 
@@ -369,6 +533,9 @@ class ZhihuProfileProvider:
         port: int = 9223,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         timeout_seconds: int = 120,
+        surfaces: tuple[str, ...] | list[str] | str | None = None,
+        surface_budget_seconds: int = 90,
+        request_timeout_seconds: int = 12,
     ):
         self.script_path = Path(script_path)
         self.python_command = python_command
@@ -378,6 +545,9 @@ class ZhihuProfileProvider:
         self.port = int(port)
         self.runner = runner
         self.timeout_seconds = max(30, min(int(timeout_seconds), 300))
+        self.surfaces = _normalise_zhihu_surfaces(surfaces)
+        self.surface_budget_seconds = max(10, min(int(surface_budget_seconds), 110))
+        self.request_timeout_seconds = max(2, min(int(request_timeout_seconds), self.surface_budget_seconds))
         self.session_prepared = False
         self.preflight_error = ""
 
@@ -434,6 +604,14 @@ class ZhihuProfileProvider:
         if not self.script_path.is_file():
             raise ZhihuProviderError(f"Zhihu capture script is missing: {self.script_path}")
         started = time.perf_counter()
+        # Keep the browser page wait and the profile API budget inside the
+        # subprocess timeout.  A slow page must not kill a run after one
+        # surface already returned useful rows.
+        page_wait_seconds = max(10, min(15, self.timeout_seconds // 6))
+        surface_budget_seconds = max(
+            10,
+            min(self.surface_budget_seconds, self.timeout_seconds - page_wait_seconds - 8),
+        )
         command = [
             self.python_command,
             str(self.script_path),
@@ -448,6 +626,14 @@ class ZhihuProfileProvider:
             "--profile-directory",
             self.profile_directory,
             "--no-launch",
+            "--wait",
+            str(page_wait_seconds),
+            "--surfaces",
+            ",".join(self.surfaces),
+            "--surface-budget-seconds",
+            str(surface_budget_seconds),
+            "--request-timeout-seconds",
+            str(self.request_timeout_seconds),
         ]
         if self.browser_path:
             command.extend(["--browser-path", self.browser_path])
@@ -472,16 +658,49 @@ class ZhihuProfileProvider:
             payload = json.loads(completed.stdout or "{}")
         except json.JSONDecodeError as exc:
             raise ZhihuProviderError(f"Zhihu profile capture returned invalid JSON: {exc}") from exc
-        if completed.returncode != 0 or not payload.get("ok"):
+        raw_posts = payload.get("posts") or []
+        surface_rows = payload.get("surfaces") if isinstance(payload.get("surfaces"), dict) else {}
+        successful_surface = any(
+            str(item.get("status") or "") in {"success", "empty", "partial"}
+            for item in surface_rows.values()
+            if isinstance(item, dict)
+        )
+        if completed.returncode != 0 or (not payload.get("ok") and not (raw_posts and successful_surface)):
             detail = str(payload.get("error") or completed.stderr or "Zhihu profile capture failed")
             raise ZhihuProviderError(detail[-2000:])
-        raw_posts = payload.get("posts") or []
         if not isinstance(raw_posts, list):
             raise ZhihuProviderError("Zhihu profile capture output is not a post list")
-        posts = [dict(item) for item in raw_posts if isinstance(item, dict)]
+        posts = _dedupe_zhihu_payloads([dict(item) for item in raw_posts if isinstance(item, dict)])
+        raw_warnings = [str(item) for item in payload.get("warnings") or [] if str(item)]
+        coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        coverage_status = str(coverage.get("status") or "")
+        surface_metadata = _zhihu_surface_metadata(surface_rows)
+        profile_warnings = _zhihu_problem_warnings(raw_warnings, coverage, surface_metadata)
+        # Keep empty-surface diagnostics at run level for compatibility, but
+        # suppress bounded-limit chatter.  Coverage status is added only when
+        # it denotes an actual gap; bounded remains raw metadata.
+        warnings = [
+            warning
+            for warning in raw_warnings
+            if "bounded_limit_reached" not in warning.casefold()
+            and warning.casefold() not in {"coverage:bounded", "bounded"}
+        ]
+        if coverage_status in {"partial", "failed", "unsupported"}:
+            warnings.append(f"coverage:{coverage_status}")
+        coverage_metadata = _zhihu_coverage_metadata(coverage)
+        enriched_posts: list[dict[str, Any]] = []
+        for post in posts:
+            enriched = dict(post)
+            enriched["coverage"] = dict(coverage_metadata)
+            enriched["surfaces"] = {
+                surface: dict(summary)
+                for surface, summary in surface_metadata.items()
+            }
+            enriched["profile_warnings"] = list(profile_warnings)
+            enriched_posts.append(enriched)
         return ProviderFetchResult(
             provider=self.name,
-            posts=posts,
+            posts=enriched_posts,
             attempts=[
                 ProviderAttempt(
                     provider=self.name,
@@ -490,7 +709,7 @@ class ZhihuProfileProvider:
                     duration_ms=int((time.perf_counter() - started) * 1000),
                 )
             ],
-            warnings=[],
+            warnings=list(dict.fromkeys(warnings)),
         )
 
 

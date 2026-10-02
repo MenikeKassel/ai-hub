@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 from kol_tracker import SHANGHAI, now_iso
 from runtime_jobs import initialize_schema, owned_worker, worker_active
-from .core import FetchSummary, ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XPostProvider, XSessionUnavailableError
+from .core import FetchSummary, ProviderAttempt, ProviderFetchResult, TwitterAuthenticationError, TwitterProviderError, TwitterRateLimitError, XBudgetDeferredError, XPostProvider, XSessionUnavailableError, ZhihuProviderError
 from .media import download_images as _download_images_impl
-from .normalization import normalise_douyin_post, normalise_twitter_post, normalise_zhihu_answer
+from .normalization import normalise_douyin_post, normalise_twitter_post, normalise_zhihu_post
 from .providers import _post_provider_warning, _provider_result, _resolve_twitter_command
 from .repository import KolPostStore
 from .rules import RuleClassifier
@@ -456,15 +456,19 @@ def run_post_fetch(
             if not dry_run:
                 store.record_fetch_attempts(run_id, kol["id"], kol["handle"], fetch_result.attempts)
                 store.record_provider_comparisons(run_id, kol["id"], fetch_result.comparisons)
+            if platform == "zhihu" and fetch_result.warnings:
+                for warning in dict.fromkeys(str(item) for item in fetch_result.warnings if str(item)):
+                    errors.append(f"@{kol['handle']} Zhihu coverage warning: {warning}")
             if fetch_result.provider == "nitter":
                 fallback_kols.append(kol["handle"])
             if "shadow_fallback_failed" in fetch_result.warnings:
                 shadow_failed_kols.append(kol["handle"])
             seen_ids: list[str] = []
+            seen_post_ids: set[str] = set()
             for payload in fetch_result.posts:
                 try:
                     if platform == "zhihu":
-                        post = normalise_zhihu_answer(
+                        post = normalise_zhihu_post(
                             payload,
                             kol,
                             provider=fetch_result.provider,
@@ -485,6 +489,9 @@ def run_post_fetch(
                 except ValueError as exc:
                     errors.append(f"@{kol['handle']} skipped unusable post: {exc}")
                     continue
+                if post.post_id in seen_post_ids:
+                    continue
+                seen_post_ids.add(post.post_id)
                 seen_ids.append(post.post_id)
                 created = not store.has_post(post.post_id) if dry_run else store.upsert_post(post, run_id=run_id)
                 if not dry_run and post.platform == "Zhihu" and post.post_type == "aggregation":
@@ -527,18 +534,19 @@ def run_post_fetch(
                 if created and rule.is_candidate and not archive_only_backfill:
                     candidate_posts += 1
             if fetch_result.posts and not seen_ids:
-                raise TwitterProviderError(
-                    "provider returned posts but none had usable content",
-                    attempts=[
-                        ProviderAttempt(
-                            fetch_result.provider,
-                            "unusable_content",
-                            post_count=len(fetch_result.posts),
-                            error_code="unusable_content",
-                            error="all returned posts failed normalization",
-                        )
-                    ],
-                )
+                message = "provider returned posts but none had usable content"
+                attempts = [
+                    ProviderAttempt(
+                        fetch_result.provider,
+                        "normalization_failed" if platform == "zhihu" else "unusable_content",
+                        post_count=len(fetch_result.posts),
+                        error_code="normalization_failed" if platform == "zhihu" else "unusable_content",
+                        error="all returned posts failed normalization",
+                    )
+                ]
+                if platform == "zhihu":
+                    raise ZhihuProviderError(message, attempts=attempts)
+                raise TwitterProviderError(message, attempts=attempts)
             guarded_provider = provider
             if getattr(guarded_provider, "session_manager", None) is None:
                 guarded_provider = getattr(guarded_provider, "primary", guarded_provider)
@@ -624,6 +632,11 @@ def run_post_fetch(
                 attempt.error_code == "rate_limited" for attempt in attempts
             )
             blocked_account = isinstance(exc, (XSessionUnavailableError, XBudgetDeferredError))
+            normalization_failed = (
+                platform == "zhihu"
+                and isinstance(exc, ZhihuProviderError)
+                and any(attempt.error_code == "normalization_failed" for attempt in attempts)
+            )
             zhihu_transient = platform == "zhihu" and "10003" in str(exc)
             if not blocked_account:
                 failed += 1
@@ -666,6 +679,8 @@ def run_post_fetch(
                     if isinstance(exc, XBudgetDeferredError)
                     else "blocked_auth"
                     if isinstance(exc, XSessionUnavailableError)
+                    else "normalization_failed"
+                    if normalization_failed
                     else "provider_transient"
                     if zhihu_transient
                     else

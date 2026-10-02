@@ -465,6 +465,120 @@ export interface StockMentionPage {
   total_pages: number
 }
 
+export type ThemeLeadKind = 'prospective' | 'recommendation' | 'analysis' | 'retrospective' | 'product' | 'secondhand'
+export type ThemeLeadSourceRole = 'original' | 'quoted' | 'secondhand' | 'aggregation'
+
+export interface ThemeLeadEvidence {
+  field: string
+  start: number
+  end: number
+  text: string
+  matched_term: string
+  source_role?: ThemeLeadSourceRole | string
+  kind?: ThemeLeadKind | string
+  context_role?: string
+}
+
+export interface ThemeLeadMappedSymbol {
+  symbol: string
+  name: string
+  instrument_type: 'stock' | 'etf' | 'index' | string
+  association: 'research_only' | string
+}
+
+export interface ThemeLeadSurfaceCoverage {
+  status?: string | null
+  warnings?: string[]
+  pages?: number
+  exhausted?: boolean
+  partial?: boolean
+  bounded?: boolean
+  [key: string]: unknown
+}
+
+export interface ThemeLeadSourceCoverage {
+  status?: string | null
+  complete?: boolean
+  bounded?: boolean
+  historical_complete?: boolean
+  requested_surfaces?: string[]
+  successful_surfaces?: string[]
+  failed_surfaces?: string[]
+  limit_per_surface?: number
+  note?: string | null
+  surfaces?: Record<string, ThemeLeadSurfaceCoverage>
+  profile_coverage?: ThemeLeadSourceCoverage | null
+  [key: string]: unknown
+}
+
+export interface ThemeLeadSummary {
+  theme_id: string
+  theme_name: string
+  first_author_name?: string | null
+  first_platform?: string | null
+  first_url?: string | null
+  first_source_role?: ThemeLeadSourceRole | string | null
+  first_posted_at: string | null
+  first_detected_at: string | null
+  first_source_fetched_at: string | null
+  last_posted_at: string | null
+  first_original_posted_at?: string | null
+  first_original_post_id?: string | null
+  first_original_url?: string | null
+  first_original_author_name?: string | null
+  first_original_platform?: string | null
+  research_count?: number
+  source_count: number
+  original_source_count: number
+  secondhand_post_count: number
+  post_count: number
+  mapped_symbols: ThemeLeadMappedSymbol[]
+}
+
+export interface ThemeLeadItem {
+  id: string | number
+  theme_id: string
+  theme_name: string
+  post_id: string
+  kol_id: number | string
+  display_name: string
+  author_name: string
+  handle: string
+  platform: string
+  url: string
+  posted_at: string | null
+  fetched_at: string | null
+  first_detected_at: string | null
+  kind: ThemeLeadKind | string
+  source_role: ThemeLeadSourceRole
+  quoted_author: string
+  matched_terms: string[]
+  evidence: ThemeLeadEvidence[]
+  evidence_text: string
+  claimed_timing: string[]
+  mapped_symbols: ThemeLeadMappedSymbol[]
+  text: string
+  article_title: string
+  article_text: string
+  quoted_text: string
+  ocr_text: string
+  source_surface?: string | null
+  source_coverage?: ThemeLeadSourceCoverage | null
+  source_updated_at?: string | null
+  provider_warning?: string | null
+  post_type?: string | null
+}
+
+export interface ThemeLeadsResponse {
+  summary: ThemeLeadSummary[]
+  items: ThemeLeadItem[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  catalog_version: string
+}
+
 export interface Instrument {
   symbol: string
   name: string

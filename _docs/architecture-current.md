@@ -7,7 +7,7 @@ sets `mode=live`, `write_enabled=true`, `market_update_enabled=true`, while
 `returns_update_enabled=true` and `research_update_enabled=false`. Candidate directories and the
 previous published directory make each run recoverable.
 
-Status date: 2026-09-26. Source version: 3.1.0.
+Status date: 2026-10-02. Source version: 3.1.0.
 
 ## Purpose and boundary
 
@@ -20,7 +20,8 @@ positions.
 
 ```text
 X session pool ─┐
-                ├─> KOL collection ─> posts.db ─> rules/OCR/model ─> review
+                ├─> KOL collection ─> posts.db ─> theme evidence ─> theme radar
+                │                       └─> rules/OCR/model ─> review
 Zhihu CDP 9223 ─┘                                      │
                                                       └─> stock leads
                                                             │
@@ -86,6 +87,15 @@ Ignored local state:
 - Morning orchestration, recommendation reprocessing, and repair may create
   drafts only for those two active windows. Older candidates are marked
   `historical_archive_only` instead of becoming a persistent backlog.
+- Theme evidence is indexed independently of stock names, model results, and
+  formal event approval. A theme's associated companies are research context;
+  the index cannot create an event or market subscription.
+- The theme radar distinguishes original publication time from actual local
+  detection time. A retrospective claimed date cannot move the earliest source
+  backward. Quotes and aggregated material do not count as independent original
+  sources. See [`kol-theme-radar.md`](kol-theme-radar.md).
+- Zhihu answer, article, and pin coverage must be reported separately. A partial
+  success preserves available evidence and reports the missing surfaces.
 
 ### Daily market
 

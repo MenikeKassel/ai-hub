@@ -1,4 +1,6 @@
 from __future__ import annotations
+from dataclasses import asdict
+from theme_leads import extract_theme_leads, query_theme_leads
 from .context import ApiServices
 from .dependencies import (
     Any,
@@ -38,6 +40,36 @@ def register_routes(services: ApiServices) -> None:
     run_freestockdb_update_job = services.run_freestockdb_update_job
     safe_freestockdb_health = services.safe_freestockdb_health
     safe_market_health = services.safe_market_health
+
+    @app.get("/api/theme-leads")
+    def list_theme_leads(
+        q: str = Query(default="", max_length=200),
+        theme_id: str = Query(default="", max_length=80),
+        kind: str = Query(default="", pattern="^(|prospective|recommendation|analysis|retrospective|product|secondhand)$"),
+        kol_id: int | None = None,
+        date_from: str = Query(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+        date_to: str = Query(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=100),
+        sort: str = Query(default="newest", pattern="^(newest|oldest)$"),
+    ) -> dict[str, Any]:
+        try:
+            for value in (date_from, date_to):
+                if value:
+                    date.fromisoformat(value)
+            if date_from and date_to and date_from > date_to:
+                raise ValueError("date_from must not be after date_to")
+            return query_theme_leads(
+                post_store, query=q, theme_id=theme_id, kind=kind, kol_id=kol_id,
+                date_from=date_from, date_to=date_to, page=page, page_size=page_size, sort=sort,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/theme-leads/extract")
+    def extract_theme_lead_queue(post_id: str | None = None) -> dict[str, Any]:
+        # Topic evidence never calls stock approval, admissions or market sync.
+        return asdict(extract_theme_leads(post_store, post_ids=[post_id] if post_id else None))
 
     @app.post("/api/stock-leads/extract")
     def extract_stock_lead_queue() -> dict[str, Any]:

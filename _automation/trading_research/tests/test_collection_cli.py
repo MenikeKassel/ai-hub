@@ -18,10 +18,71 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cli_commands.collection import kol_post_fetch  # noqa: E402
 from kol_sources.repository import KolPostStore  # noqa: E402
+from kol_posts import normalise_twitter_post  # noqa: E402
 import trading_cli  # noqa: E402
 
 
 class CollectionCliTests(unittest.TestCase):
+    def theme_context(self, store):
+        return SimpleNamespace(
+            _post_store=lambda: store,
+            _post_provider=lambda *args, **kwargs: object(),
+            _zhihu_provider=lambda: object(), _douyin_provider=lambda: object(),
+            _classification_aliases=lambda: {}, RuleClassifier=lambda aliases: object(),
+            run_post_fetch=lambda *args, **kwargs: SimpleNamespace(run_id="fetch-1", successful_kols=1, failed_kols=0),
+            _extract_theme_leads=trading_cli._extract_theme_leads,
+            _extract_leads_to_market=mock.Mock(return_value={}),
+            _fallback_mode=lambda: "shadow", json=json, date=date,
+            classify_pending_with_codex=mock.Mock(side_effect=RuntimeError("HTTP 402")),
+            build_post_classifier=lambda *args, **kwargs: object(), KOL_CLASSIFIER_SCHEMA=None, ROOT=None,
+        )
+
+    def theme_args(self, **changes):
+        return argparse.Namespace(**{
+            "backfill": 1, "handles": "", "as_of": "2026-09-26", "platform": "zhihu",
+            "provider": "auto", "batch_key": "test-theme", "dry_run": False,
+            "skip_classify": True, "skip_leads": True, "classify_limit": 1,
+            "fresh_first_page": False, "notify": False, "alerts_only": False, **changes,
+        })
+
+    def add_theme_post(self, store):
+        kol_id, _ = store.add_kol("Example", "example")
+        store.upsert_post(normalise_twitter_post({
+            "id": "90001", "text": "研究黄酒板块。", "createdAtISO": "2026-09-19T10:00:00+08:00",
+        }, store.get_kol(kol_id)))
+
+    def test_skip_stock_extraction_still_persists_themes_before_ai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            self.add_theme_post(store)
+            context = self.theme_context(store)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                kol_post_fetch(context, self.theme_args())
+            self.assertEqual(1, json.loads(output.getvalue())["theme_leads"]["created"])
+            self.assertEqual(1, store.query_theme_leads()["total"])
+            context._extract_leads_to_market.assert_not_called()
+            context.classify_pending_with_codex.assert_not_called()
+
+    def test_ai_402_does_not_lose_theme_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            self.add_theme_post(store)
+            context = self.theme_context(store)
+            with self.assertRaisesRegex(RuntimeError, "402"):
+                kol_post_fetch(context, self.theme_args(skip_classify=False))
+            self.assertEqual(1, store.query_theme_leads()["total"])
+            context._extract_leads_to_market.assert_not_called()
+
+    def test_theme_pass_precedes_initial_market_store_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = KolPostStore(Path(tmp) / "posts.db", Path(tmp) / "media")
+            self.add_theme_post(store)
+            with mock.patch.object(trading_cli, "_market_store", side_effect=FileLockTimeout("market.lock")):
+                with self.assertRaises(FileLockTimeout):
+                    trading_cli._extract_leads_to_market(store)
+            self.assertEqual(1, store.query_theme_leads()["total"])
+
     def test_market_lock_defers_leads_without_losing_completed_fetch(self) -> None:
         store = SimpleNamespace(codex_failure_streak=lambda: 0)
         result = SimpleNamespace(run_id="fetch-1", successful_kols=1, failed_kols=0)
@@ -38,6 +99,7 @@ class CollectionCliTests(unittest.TestCase):
             RuleClassifier=lambda aliases: object(),
             run_post_fetch=lambda *args, **kwargs: result,
             _extract_leads_to_market=market_locked,
+            _extract_theme_leads=mock.Mock(return_value={"created": 1}),
             _fallback_mode=lambda: "shadow",
             json=json,
             date=date,
@@ -61,6 +123,8 @@ class CollectionCliTests(unittest.TestCase):
             kol_post_fetch(context, args)
         payload = json.loads(output.getvalue())
         self.assertEqual(1, payload["successful_kols"])
+        self.assertEqual({"created": 1}, payload["theme_leads"])
+        context._extract_theme_leads.assert_called_once_with(store)
         self.assertEqual(
             {"deferred": True, "reason": "market_locked", "retry": "next_fetch"},
             payload["stock_leads"],

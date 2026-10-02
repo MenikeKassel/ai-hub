@@ -1,6 +1,6 @@
 import type {
   BulkApprovalPreview, BulkApprovalResult, Checkpoint, CollectionCoverageResponse, CollectionRecoveryPreview, CollectionRecoveryRun, DigestAuthor, Draft, DraftCorrectionType, DraftRevision, Event, EventAmendment, EventAmendmentResult, EventDossier, EventIntradayContext, EventMark, EventMethodResearchSection, EventRevision, EventTechnicalContext, EventUpdate, FetchRun, FoundationRefreshState, FreeStockDBHealth, Health, Instrument, Kol, KolLeaderboard, KolPerformanceDetail, KolPerformanceResponse, KolPerformanceRow, ManualRecommendationDraft, MarketDailyBar, MarketHealth, MarketIndicatorSeries, MorningReview, OperatorTasks, PipelineStatus, Post, RecommendationDraft, ReviewAgentDecision, ReviewAgentSummary, ReviewResult, StockLead, StockMentionPage, Summary, XSessionPolicy, XSessionSlot, PublicBackupHealth,
-  QueueStatus,
+  QueueStatus, ThemeLeadsResponse,
 } from './types'
 
 import { ApiError, request } from './http'
@@ -190,6 +190,8 @@ export const api = {
   stockLeads: (query = '') => request<StockLead[]>(`/api/stock-leads${query ? `?${query}` : ''}`),
   stockMentions: (params: URLSearchParams) => request<StockMentionPage>(`/api/stock-mentions?${params}`),
   extractStockLeads: () => request('/api/stock-leads/extract', { method: 'POST' }),
+  themeLeads: (params: URLSearchParams, signal?: AbortSignal) => request<ThemeLeadsResponse>(`/api/theme-leads?${params}`, { signal }),
+  extractThemeLeads: () => request<{ ok?: boolean; status?: string; read_time_ms?: number; started_at?: string; completed_at?: string }>('/api/theme-leads/extract', { method: 'POST' }),
   reviewStockLead: (id: number, value: { action: string; note: string; symbol?: string; security_name?: string }) =>
     request<StockLead>(`/api/stock-leads/${id}/review`, { method: 'POST', body: JSON.stringify(value) }),
   instruments: () => request<Instrument[]>('/api/instruments'),

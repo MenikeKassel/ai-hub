@@ -110,6 +110,7 @@ from purchased_daily import (
     import_historical_daily,
 )
 from stock_leads import extract_stock_leads, reconcile_exact_stock_leads
+from theme_leads import extract_theme_leads
 from market_admissions import (
     MarketAdmissionRepository,
     read_published_manifest,
@@ -1873,8 +1874,13 @@ def _seed_market_instruments(store: MarketStore) -> int:
     return len(seeded)
 
 
+def _extract_theme_leads(post_store: KolPostStore | None = None) -> dict[str, Any]:
+    return extract_theme_leads(post_store or _post_store()).__dict__
+
+
 def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str, Any]:
     posts = post_store or _post_store()
+    themes = _extract_theme_leads(posts)
     market = _market_store()
     writes_enabled = _market_writes_enabled()
     if writes_enabled:
@@ -1931,6 +1937,7 @@ def _extract_leads_to_market(post_store: KolPostStore | None = None) -> dict[str
         "admission_symbol_count": len(set(admission_symbols)),
         "admission_symbols": sorted(set(admission_symbols))[:20],
         "market_write_mode": "live" if writes_enabled else "historical_admission_only",
+        "theme_leads": themes,
     }
 
 

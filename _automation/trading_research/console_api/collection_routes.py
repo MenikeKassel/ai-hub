@@ -1,4 +1,5 @@
 from __future__ import annotations
+from theme_leads import extract_theme_leads
 from .context import ApiServices
 from .dependencies import (
     Any,
@@ -72,6 +73,7 @@ def register_routes(services: ApiServices) -> None:
                 classification_aliases()
             ),
         )
+        themes = extract_theme_leads(post_store)
         classified = failed = 0
         if body.classify and result.candidate_posts:
             classified, failed = classify_pending_with_codex(
@@ -91,6 +93,7 @@ def register_routes(services: ApiServices) -> None:
             "codex_classified": classified,
             "codex_failed": failed,
             "stock_leads": lead_result,
+            "theme_leads": asdict(themes),
         }
 
 
@@ -262,4 +265,3 @@ def register_routes(services: ApiServices) -> None:
     @app.get("/api/fetch-attempts")
     def fetch_attempts(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
         return post_store.recent_fetch_attempts(limit)
-

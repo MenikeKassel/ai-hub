@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Check, RefreshCw, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, Radar, RefreshCw, X } from 'lucide-react'
 import { api, formatDate } from '../api'
 import PostDetail from '../features/reviews/ReviewDetail'
 import type { ReviewView } from '../features/reviews/types'
 import QueryState from '../components/QueryState'
-import { shanghaiDate, updateRoute, useRoute } from '../workspace'
+import { navigate, shanghaiDate, updateRoute, useRoute } from '../workspace'
 
 const viewKeys: ReviewView[] = ['new', 'processed', 'pending', 'failed', 'approved']
 const viewLabels: Record<ReviewView, string> = { new: '新增帖子', processed: 'AI 已处理', pending: '待你确认', failed: 'AI 失败', approved: '今日批准' }
@@ -53,7 +53,7 @@ export default function ReviewQueue() {
   const sourceItem = detail.data ? { postId: selectedId, post: detail.data.post, drafts: detail.data.drafts, historical: false } : null
 
   return <section className={`review-workspace ${params.get('detail') === '1' ? 'show-review-detail' : ''}`}>
-    <header className="page-header"><div><span className="eyebrow">REVIEW WORKSPACE</span><h1>审核工作台</h1><p className="page-description">读原文，核对证据，再确认每一条观点。</p></div><button className="secondary-button" disabled={runMorning.isPending} onClick={() => runMorning.mutate()}><RefreshCw size={16} />{runMorning.isPending ? '正在启动…' : '运行完整晨报'}</button></header>
+    <header className="page-header"><div><span className="eyebrow">REVIEW WORKSPACE</span><h1>审核工作台</h1><p className="page-description">读原文，核对证据，再确认每一条观点。</p></div><div className="header-actions"><button className="secondary-button theme-radar-entry" onClick={() => navigate('themes')}><Radar size={15} />板块观点查看主题雷达</button><button className="secondary-button" disabled={runMorning.isPending} onClick={() => runMorning.mutate()}><RefreshCw size={16} />{runMorning.isPending ? '正在启动…' : '运行完整晨报'}</button></div></header>
     <div className="review-scope-bar"><h2>{reviewDate === today ? '今日审核' : '下一晨报'}</h2><nav className="segmented" aria-label="审核范围"><button className={reviewDate === today ? 'active' : ''} onClick={() => switchQueue(today)}>今日审核</button><button className={reviewDate === nextMorning ? 'active' : ''} onClick={() => switchQueue(nextMorning)}>下一晨报</button></nav></div>
     {delivery && <div className={`delivery-strip ${delivery.status}`}><strong>09:00 晨报交付快照 · <span className="delivery-status">{deliveryLabels[delivery.status] || delivery.status}</span></strong><span>{delivery.successful_kols} / {delivery.active_kols} 个账号完成采集 · 覆盖率 {delivery.coverage == null ? '未知' : `${Math.round(delivery.coverage * 100)}%`} · 未尝试 {deliveryPending} · 失败 {delivery.failed_kols}</span><details><summary>交付详情{deliveryErrors.length ? ` · ${deliveryErrors.length} 项异常` : ''}</summary><p>这是当次晨报的结算记录，之后的补抓不会改写它。</p><p>{delivery.completed_at ? `阶段完成：${formatDate(delivery.completed_at)}` : '阶段尚未完成'}</p>{Object.entries(delivery.platform_breakdown || {}).map(([platform, value]) => <p key={platform}>{platform.toUpperCase()}：成功 {value.success} / 目标 {value.target} · 失败 {value.failed} · 等待 {value.pending}</p>)}{!Object.keys(delivery.platform_breakdown || {}).length && <p>这次记录缺少分平台统计。</p>}{deliveryErrors.map((error, index) => <p key={index}>{error}</p>)}</details></div>}
     <div className="review-counters">{viewKeys.map((key) => <button key={key} aria-pressed={view === key} className={view === key ? 'active' : ''} onClick={() => updateRoute({ view: key, page: 1, post: null, detail: null, attention: null })}><span>{viewLabels[key]}</span><strong>{query.data?.counts?.[key] ?? '—'}<small>篇</small></strong></button>)}</div>

@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ComponentType } from 'react'
-import { Archive, Database, ListChecks, Radio, Rows3, Users } from 'lucide-react'
+import { Archive, Database, ListChecks, Radar, Radio, Rows3, Users } from 'lucide-react'
 import PipelineStatusBar from './components/PipelineStatusBar'
 import { navigate, updateRoute, useRoute, type Workspace } from './workspace'
 
@@ -31,6 +31,7 @@ const Kols = lazyWithRecovery(() => import('./pages/Kols'), 'kols')
 const KolPerformance = lazyWithRecovery(() => import('./pages/KolPerformance'), 'performance')
 const System = lazyWithRecovery(() => import('./pages/System'), 'system')
 const StockLeads = lazyWithRecovery(() => import('./pages/StockLeads'), 'history')
+const ThemeRadar = lazyWithRecovery(() => import('./pages/ThemeRadar'), 'themes')
 const Discovery = lazyWithRecovery(() => import('./pages/Discovery'), 'discovery')
 
 const workspaces: Array<{ key: Workspace; label: string; detail: string; icon: typeof Radio }> = [
@@ -38,6 +39,7 @@ const workspaces: Array<{ key: Workspace; label: string; detail: string; icon: t
   { key: 'events', label: '事件研究', detail: '证据、行情与收益', icon: Rows3 },
   { key: 'kols', label: 'KOL 库', detail: '账号、表现与发现', icon: Users },
   { key: 'history', label: '资料归档', detail: '历史资料与股票提及', icon: Archive },
+  { key: 'themes', label: '主题雷达', detail: '主题、原文与时间线', icon: Radar },
   { key: 'system', label: '运行中心', detail: '任务、健康与连接', icon: Database },
 ]
 const tabs: Partial<Record<Workspace, Array<[string, string]>>> = {
@@ -55,7 +57,7 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand-block"><div className="brand-mark"><Radio size={20} /></div><div><strong>KOL 研究台</strong><span>从观点到可核对的证据</span></div></div>
       <span className="nav-caption">研究工作区</span>
-      <nav aria-label="主导航">{workspaces.map(({ key, label, detail, icon: Icon }) => <button key={key} aria-label={`${key === 'reviews' ? '今日审核' : key === 'events' ? '正式事件 收益审计' : key === 'kols' ? 'KOL管理' : key === 'history' ? '历史归档' : '数据健康'} ${label}`} aria-current={page === key ? 'page' : undefined} className={page === key ? 'nav-item active' : 'nav-item'} onClick={() => navigate(key)}><Icon size={19} /><span>{label}<small>{detail}</small></span></button>)}</nav>
+      <nav aria-label="主导航">{workspaces.map(({ key, label, detail, icon: Icon }) => <button key={key} aria-label={`${key === 'reviews' ? '今日审核' : key === 'events' ? '正式事件 收益审计' : key === 'kols' ? 'KOL管理' : key === 'history' ? '历史归档' : key === 'themes' ? '主题雷达' : '数据健康'} ${label}`} aria-current={page === key ? 'page' : undefined} className={page === key ? 'nav-item active' : 'nav-item'} onClick={() => navigate(key)}><Icon size={19} /><span>{label}<small>{detail}</small></span></button>)}</nav>
       <div className="sidebar-footer"><span className="status-dot" />本地研究环境 <span className="version-tag">V4</span></div>
     </aside>
     <div className="mobile-nav" aria-label="移动导航">{workspaces.map(({ key, label, icon: Icon }) => <button key={key} aria-current={page === key ? 'page' : undefined} aria-label={label} className={page === key ? 'active' : ''} onClick={() => navigate(key)}><Icon size={18} /><span>{label}</span></button>)}</div>
@@ -68,6 +70,7 @@ export default function App() {
         {page === 'kols' && (selectedTab === 'performance' ? <KolPerformance /> : selectedTab === 'discovery' ? <Discovery /> : <Kols />)}
         {page === 'system' && <System section={selectedTab as 'tasks' | 'health' | 'connections'} />}
         {page === 'history' && <StockLeads />}
+        {page === 'themes' && <ThemeRadar />}
       </Suspense>
     </main>
   </div>

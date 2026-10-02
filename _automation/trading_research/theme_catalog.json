@@ -1,0 +1,30 @@
+{
+  "version": "2026-10-02.1",
+  "themes": [
+    {
+      "id": "huangjiu",
+      "name": "黄酒",
+      "terms": [
+        "黄酒", "古越龙山", "金枫酒业", "601579", "600059", "600616",
+        {"term": "会稽山", "require_any": ["黄酒", "兰亭", "兰庭", "酒", "股票", "板块", "股价", "估值", "业绩", "涨", "跌", "证券", "公司", "市值", "持仓", "建仓", "601579"], "context_chars": 60},
+        {"term": "金枫", "require_any": ["黄酒", "板块", "股票", "股价", "估值", "600616"], "context_chars": 60},
+        {"term": "兰亭", "require_any": ["黄酒", "会稽山", "口感", "酒体", "酒液", "陈酿", "纯酿"], "context_chars": 60},
+        {"term": "兰庭", "require_any": ["黄酒", "会稽山", "口感", "酒体", "酒液", "陈酿", "纯酿"], "context_chars": 60}
+      ],
+      "mapped_symbols": [
+        {"symbol": "601579", "name": "会稽山", "instrument_type": "stock"},
+        {"symbol": "600059", "name": "古越龙山", "instrument_type": "stock"},
+        {"symbol": "600616", "name": "金枫酒业", "instrument_type": "stock"}
+      ],
+      "mapping_verification": {
+        "source": "local instrument_catalog",
+        "provider": "public-dataset-recovery",
+        "snapshot_date": "2026-08-16",
+        "verified_on": "2026-10-02"
+      }
+    },
+    {"id": "baijiu", "name": "白酒", "terms": ["白酒", "白酒板块"], "mapped_symbols": []},
+    {"id": "microcap", "name": "微盘股", "terms": ["微盘", "微盘股", "微盘指数", "微盘风格"], "mapped_symbols": []},
+    {"id": "consumption", "name": "消费板块", "terms": ["大消费", "消费板块", "消费复苏", "消费刺激", "促消费政策", "消费股"], "mapped_symbols": []}
+  ]
+}
